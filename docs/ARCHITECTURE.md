@@ -72,14 +72,14 @@ flowchart TD
     subgraph PAGE_MAIN_WORLD["MAIN World (chat.deepseek.com)"]
         PageApp["DeepSeek Web Application"]
         Interceptor["Minimal Interceptor (interceptor.main.ts)"]
-        PageApp -.->|fetch / XHR| Interceptor
+        PageApp -.->|"fetch / XHR"| Interceptor
     end
 
     subgraph ISOLATED_WORLD["ISOLATED Content Script"]
         Bridge["Bridge Receiver & Schema Validator"]
         RecorderBuffer["In-Memory Revision Buffer"]
         InlineUI["Non-Destructive Overlay UI"]
-        Interceptor -->|CustomEvent (Validated)| Bridge
+        Interceptor -->|"Validated CustomEvent"| Bridge
         Bridge --> RecorderBuffer
         Bridge --> InlineUI
     end
@@ -90,7 +90,7 @@ flowchart TD
         StorageEngine["IndexedDB (StreamArchiveDB)"]
         Reconciler["History Reconciler"]
         
-        RecorderBuffer -->|chrome.runtime.sendMessage| BackgroundWorker
+        RecorderBuffer -->|"chrome.runtime.sendMessage"| BackgroundWorker
         BackgroundWorker --> StorageEngine
         Reconciler --> StorageEngine
         StorageEngine --> SidePanel

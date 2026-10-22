@@ -94,7 +94,7 @@ flowchart TD
     subgraph PAGE_MAIN_WORLD["MAIN World (chat.deepseek.com)"]
         PageApp["DeepSeek Web Application"]
         Interceptor["Passive Transport Tap (interceptor.content.ts)"]
-        PageApp -.->|fetch / XHR| Interceptor
+        PageApp -.->|"fetch / XHR"| Interceptor
     end
 
     subgraph ISOLATED_WORLD["ISOLATED World (Content Script)"]
@@ -102,7 +102,7 @@ flowchart TD
         Coordinator["Canonical Stream Coordinator"]
         RawBuffer["Crash-Durable Raw Journal Buffer"]
         
-        Interceptor -->|CustomEvent (Validated)| Bridge
+        Interceptor -->|"Validated CustomEvent"| Bridge
         Bridge --> RawBuffer
         Bridge --> Coordinator
     end
@@ -113,8 +113,8 @@ flowchart TD
         StorageEngine["IndexedDB (StreamArchiveDB v5)"]
         Reconciler["Passive History Reconciler"]
         
-        RawBuffer -->|chrome.runtime.sendMessage| BackgroundWorker
-        Coordinator -->|Incremental Checkpoints| BackgroundWorker
+        RawBuffer -->|"chrome.runtime.sendMessage"| BackgroundWorker
+        Coordinator -->|"Incremental Checkpoints"| BackgroundWorker
         BackgroundWorker --> StorageEngine
         Reconciler --> StorageEngine
         StorageEngine --> SidePanel
