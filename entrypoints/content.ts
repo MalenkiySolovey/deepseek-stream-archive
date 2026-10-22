@@ -23,6 +23,10 @@ import {
   MESSAGE_RECORD_PROTOCOL_OBSERVATION,
   MESSAGE_FORWARD_HISTORY_OBSERVATION,
   MESSAGE_PERSIST_CANONICAL_CHECKPOINT,
+  MESSAGE_HISTORY_INGEST_OPEN,
+  MESSAGE_HISTORY_INGEST_BATCH,
+  MESSAGE_HISTORY_INGEST_COMMIT,
+  MESSAGE_HISTORY_INGEST_ABORT,
   type SaveSyntheticBatchRequest,
   type SaveSyntheticBatchResponse,
   type ForwardTransportEventRequest,
@@ -33,6 +37,10 @@ import {
   type ForwardHistoryObservationRequest,
   type PersistCanonicalCheckpointRequest,
   type PersistCanonicalCheckpointResponse,
+  type HistoryIngestOpenRequest,
+  type HistoryIngestBatchRequest,
+  type HistoryIngestCommitRequest,
+  type HistoryIngestAbortRequest,
 } from '../src/bridge/messages';
 import { GenericSseDecoder } from '../src/transport/sse/decoder';
 import { DeepSeekProtocolDecoder } from '../src/adapters/deepseek/protocol/decoder';
@@ -45,6 +53,7 @@ import {
 import type { DeepSeekSemanticEvent } from '../src/adapters/deepseek/protocol/types';
 import { CanonicalStreamCoordinator } from '../src/core/recorder/canonical-stream-coordinator';
 import { DeepSeekHistoryParser } from '../src/adapters/deepseek/history/parser';
+import { StreamArchiveOverlayPortal } from '../src/overlay/portal';
 import { logger } from '../src/shared/logger';
 
 interface ActiveStreamSession {
@@ -92,10 +101,27 @@ export default defineContentScript({
     window.addEventListener('visibilitychange', handleFlushOnVisibility);
     window.addEventListener('pagehide', handleFlushOnPageHide);
 
+    let pendingCanonicalCheckpointsLost = 0;
+    let pendingCanonicalRevisionCount = 0;
+    let canonicalDurabilityGap = false;
+
+    // Non-destructive in-page recovery overlay portal (Shadow DOM)
+    const overlayPortal = new StreamArchiveOverlayPortal();
+
     if (ctx && typeof ctx.onInvalidated === 'function') {
       ctx.onInvalidated(() => {
         window.removeEventListener('visibilitychange', handleFlushOnVisibility);
         window.removeEventListener('pagehide', handleFlushOnPageHide);
+        overlayPortal.destroy();
+        for (const session of activeSessions.values()) {
+          const diag = session.canonicalCoordinator.getDiagnostics();
+          if (diag.hasPendingCheckpoint || diag.unackedRevisionsCount > 0) {
+            pendingCanonicalCheckpointsLost += diag.hasPendingCheckpoint ? 1 : 0;
+            pendingCanonicalRevisionCount += diag.unackedRevisionsCount;
+            canonicalDurabilityGap = true;
+          }
+          session.canonicalCoordinator.dispose();
+        }
         rawJournalBuffer.destroy();
       });
     }
@@ -269,7 +295,16 @@ export default defineContentScript({
                     recoveryEvents: dto.recoveryEvents,
                   },
                 };
-                return await chrome.runtime.sendMessage(req);
+                const ack = await chrome.runtime.sendMessage(req);
+                if (
+                  ack?.success &&
+                  (dto.isFinal ||
+                    dto.recoveryEvents.length > 0 ||
+                    dto.message.status === 'filtered')
+                ) {
+                  overlayPortal.refreshSummary().catch(() => {});
+                }
+                return ack;
               },
             });
 
@@ -573,23 +608,63 @@ export default defineContentScript({
           return;
         }
 
-        try {
-          const req: ForwardHistoryObservationRequest = {
-            type: MESSAGE_FORWARD_HISTORY_OBSERVATION,
-            payload: {
-              url: histStream.url,
-              sessionId: histStream.sessionId,
-              status: histStream.status,
-              body: fullBody,
+        (async () => {
+          const stagingId =
+            typeof crypto !== 'undefined' && crypto.randomUUID
+              ? crypto.randomUUID()
+              : `stage_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+          const BATCH_SIZE = 50;
+          const messages = parsed.messages;
+          const totalBatches = Math.max(1, Math.ceil(messages.length / BATCH_SIZE));
+
+          try {
+            // 1. Open staging
+            const openReq: HistoryIngestOpenRequest = {
+              type: MESSAGE_HISTORY_INGEST_OPEN,
+              stagingId,
+              sessionId: parsed.session.sessionId,
+              totalBatches,
+              totalMessages: messages.length,
               timestamp: histStream.startedAt,
-            },
-          };
-          chrome.runtime.sendMessage(req).catch((err) => {
-            logger.warn('Failed to forward history observation to background', err);
-          });
-        } catch (err) {
-          logger.warn('Error forwarding history observation', err);
-        }
+            };
+            await chrome.runtime.sendMessage(openReq);
+
+            // 2. Send bounded batches
+            for (let b = 0; b < totalBatches; b++) {
+              const start = b * BATCH_SIZE;
+              const batchMessages = messages.slice(start, start + BATCH_SIZE);
+              const batchReq: HistoryIngestBatchRequest = {
+                type: MESSAGE_HISTORY_INGEST_BATCH,
+                stagingId,
+                batchIndex: b,
+                session: b === 0 ? parsed.session : undefined,
+                messages: batchMessages,
+              };
+              await chrome.runtime.sendMessage(batchReq);
+            }
+
+            // 3. Commit staging
+            const commitReq: HistoryIngestCommitRequest = {
+              type: MESSAGE_HISTORY_INGEST_COMMIT,
+              stagingId,
+            };
+            await chrome.runtime.sendMessage(commitReq);
+            overlayPortal.refreshSummary().catch(() => {});
+          } catch (err) {
+            logger.warn('Error in bounded history staging transfer; aborting', err);
+            try {
+              const abortReq: HistoryIngestAbortRequest = {
+                type: MESSAGE_HISTORY_INGEST_ABORT,
+                stagingId,
+                reason: err instanceof Error ? err.message : String(err),
+              };
+              await chrome.runtime.sendMessage(abortReq);
+            } catch {
+              // ignore
+            }
+          }
+        })().catch(() => {});
         return;
       }
 

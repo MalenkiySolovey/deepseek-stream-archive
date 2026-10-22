@@ -7,3 +7,6 @@ export * from './protocol/message-id';
 export * from './protocol/fragment-projector';
 export * from './protocol/patch-applier';
 export * from './protocol/decoder';
+export * from './dom/types';
+export * from './dom/capability-probe';
+export * from './dom/message-locator';

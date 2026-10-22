@@ -6,7 +6,7 @@
 
 ![Platform](https://img.shields.io/badge/platform-Chrome%20%7C%20Chromium%20MV3-4285F4?logo=googlechrome&logoColor=white)
 ![Framework](https://img.shields.io/badge/framework-WXT%20%2B%20Svelte%205-FF3E00?logo=svelte&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-318%20passing-3DDC84)
+![Tests](https://img.shields.io/badge/tests-334%20passing-3DDC84)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -53,7 +53,7 @@ Other frequent loss vectors include:
 ### 2. Anti-Recall Invariant & Censorship Recovery
 - **Detect-Before-Apply Guard:** Intercepts `CONTENT_FILTER` and `TEMPLATE_RESPONSE` patches before they can overwrite the active state tree.
 - **Last-Good State Preservation:** Permanently freezes the complete pre-filtered answer and reasoning chain as an immutable `isLastGood` revision.
-- **Audit-Proof Recovery Events:** Creates structured `RecoveryEvent` records linking censorship incidents to the preserved pre-filter text.
+- **Durable Recovery Events:** Creates structured `RecoveryEvent` records linking censorship incidents to the preserved pre-filter text.
 
 ### 3. Extension-Isolated Storage
 - **Chromium MV3 Origin Isolation:** All conversation data, raw batches, and canonical models are stored in an IndexedDB database hosted strictly inside the extension origin (`chrome-extension://<id>`).
@@ -74,7 +74,7 @@ Other frequent loss vectors include:
 - **Deduplication & Cycle Prevention:** Identical duplicates are safely deduplicated; conflicting server entries are rejected; cyclic parent links are automatically detected and broken.
 
 ### 6. Crash-Durable Raw Journal & Replay Engine
-- **Forensic Byte Evidence:** Captures and batches raw response chunks into an append-only ledger *prior* to protocol decoding.
+- **Durable Raw Evidence:** Captures and batches raw response chunks into an append-only ledger *prior* to protocol decoding.
 - **Monotonic Sequence Enforcement:** Strict checkpoint ledger verifying continuous sequence delivery (`seq = lastCommitted + 1`) and rejecting sequence gaps.
 - **Immutable Revision Verification:** Rejects conflicting payload overwrites while guaranteeing idempotent re-commit of identical data.
 - **Offline Deterministic Replay:** Reconstructs canonical conversation trees from raw recorded batches without requiring an internet connection.

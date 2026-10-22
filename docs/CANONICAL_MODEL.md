@@ -154,3 +154,13 @@ To support scalable browsing without loading multi-megabyte text payloads into U
    - Automatically selects preferred revision per message (`selectPreferredRevision` prioritizes `isLastGood === true`, then highest `revisionIndex`).
 3. **`getRevisionContent(revisionId)`:**
    - On-demand loader for individual revision text, thinking traces, and timestamps.
+
+---
+
+## 5. Checkpoint Delivery Integrity & Terminal Locking
+
+To prevent sequence gaps and divergent payload replays:
+1. **Sealed Checkpoints:** The `CanonicalStreamCoordinator` seals checkpoint sequences immutably. On NACK or transport failure, the exact sequence and payload are retried with bounded exponential backoff (`[250ms, 1s, 4s, 10s, 30s]`) without advancing sequence numbers.
+2. **Durable Checkpoint Fingerprints:** A SHA-256 fingerprint of the checkpoint payload is computed before opening the IndexedDB transaction and stored in `STORE_CANONICAL_CHECKPOINTS`. Re-deliveries of committed sequences are checked for fingerprint matching: matching fingerprints succeed idempotently; differing fingerprints reject with `checkpoint_conflict`.
+3. **Terminal Checkpoint Locking:** Once a terminal checkpoint (`isTerminal: true`) commits, the repository locks the stream against any higher sequence numbers (`terminal_checkpoint_locked`), ensuring exactly one final checkpoint per stream.
+4. **History Staging Store (Schema v6):** Bounded history slices are staged in `STORE_HISTORY_STAGING` and committed atomically into canonical stores via `commitHistoryStagingPlan()`, completely deleting staging records in the same transaction.

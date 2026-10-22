@@ -28,6 +28,12 @@ export const MESSAGE_LIST_ARCHIVE_CONVERSATIONS = 'STREAMARCHIVE_LIST_ARCHIVE_CO
 export const MESSAGE_GET_ARCHIVE_CONVERSATION = 'STREAMARCHIVE_GET_ARCHIVE_CONVERSATION' as const;
 export const MESSAGE_GET_REVISION_CONTENT = 'STREAMARCHIVE_GET_REVISION_CONTENT' as const;
 
+export const MESSAGE_HISTORY_INGEST_OPEN = 'STREAMARCHIVE_HISTORY_INGEST_OPEN' as const;
+export const MESSAGE_HISTORY_INGEST_BATCH = 'STREAMARCHIVE_HISTORY_INGEST_BATCH' as const;
+export const MESSAGE_HISTORY_INGEST_COMMIT = 'STREAMARCHIVE_HISTORY_INGEST_COMMIT' as const;
+export const MESSAGE_HISTORY_INGEST_ABORT = 'STREAMARCHIVE_HISTORY_INGEST_ABORT' as const;
+export const MESSAGE_GET_PAGE_RECOVERY_SUMMARY = 'STREAMARCHIVE_GET_PAGE_RECOVERY_SUMMARY' as const;
+
 
 export type ObservationState = 'not_observed' | 'observed' | 'failed' | 'unsupported';
 
@@ -272,6 +278,75 @@ export interface GetRevisionContentResponse {
   error?: string;
 }
 
+export interface HistoryIngestOpenRequest {
+  type: typeof MESSAGE_HISTORY_INGEST_OPEN;
+  stagingId: string;
+  sessionId: string;
+  totalBatches: number;
+  totalMessages: number;
+  timestamp: number;
+}
+
+export interface HistoryIngestOpenResponse {
+  success: boolean;
+  stagingId: string;
+  error?: string;
+}
+
+export interface HistoryIngestBatchRequest {
+  type: typeof MESSAGE_HISTORY_INGEST_BATCH;
+  stagingId: string;
+  batchIndex: number;
+  session?: import('../adapters/deepseek/history/types').NormalizedHistorySession;
+  messages: import('../adapters/deepseek/history/types').NormalizedHistoryMessage[];
+}
+
+export interface HistoryIngestBatchResponse {
+  success: boolean;
+  stagingId: string;
+  batchIndex: number;
+  error?: string;
+}
+
+export interface HistoryIngestCommitRequest {
+  type: typeof MESSAGE_HISTORY_INGEST_COMMIT;
+  stagingId: string;
+}
+
+export interface HistoryIngestCommitResponse {
+  success: boolean;
+  stagingId: string;
+  conversationId?: string;
+  messagesCreated?: number;
+  messagesUpdated?: number;
+  revisionsCreated?: number;
+  treeLinksResolved?: number;
+  error?: string;
+}
+
+export interface HistoryIngestAbortRequest {
+  type: typeof MESSAGE_HISTORY_INGEST_ABORT;
+  stagingId: string;
+  reason?: string;
+}
+
+export interface HistoryIngestAbortResponse {
+  success: boolean;
+  stagingId: string;
+  error?: string;
+}
+
+export interface GetPageRecoverySummaryRequest {
+  type: typeof MESSAGE_GET_PAGE_RECOVERY_SUMMARY;
+  currentRouteSessionId?: string;
+}
+
+export interface GetPageRecoverySummaryResponse {
+  success: boolean;
+  summary: import('../adapters/deepseek/dom/types').PageRecoverySummary | null;
+  error?: string;
+}
+
 export type ExtensionInternalMessage =
   | SaveSyntheticBatchRequest
   | GetFoundationStatusRequest
@@ -290,6 +365,11 @@ export type ExtensionInternalMessage =
   | PersistCanonicalCheckpointRequest
   | ListArchiveConversationsRequest
   | GetArchiveConversationRequest
-  | GetRevisionContentRequest;
+  | GetRevisionContentRequest
+  | HistoryIngestOpenRequest
+  | HistoryIngestBatchRequest
+  | HistoryIngestCommitRequest
+  | HistoryIngestAbortRequest
+  | GetPageRecoverySummaryRequest;
 
 

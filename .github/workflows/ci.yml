@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: TypeCheck, Test & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript typecheck
+        run: pnpm run typecheck
+
+      - name: Run automated test suite
+        run: pnpm run test
+
+      - name: Build Chromium MV3 extension
+        run: pnpm run build
+
+      - name: Verify build artifacts
+        run: |
+          test -d .output/chrome-mv3
+          test -f .output/chrome-mv3/manifest.json
+          test -f .output/chrome-mv3/sidepanel.html
+          echo "Production extension bundle successfully verified."

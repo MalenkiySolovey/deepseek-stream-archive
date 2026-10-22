@@ -838,4 +838,86 @@ export function validateGetRevisionContentRequest(
   };
 }
 
+export function validateHistoryIngestOpenRequest(
+  raw: unknown
+): import('./messages').HistoryIngestOpenRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_HISTORY_INGEST_OPEN') return null;
+  if (typeof raw.stagingId !== 'string' || raw.stagingId.trim().length === 0) return null;
+  if (typeof raw.sessionId !== 'string' || raw.sessionId.trim().length === 0) return null;
+  if (typeof raw.totalBatches !== 'number' || !Number.isInteger(raw.totalBatches) || raw.totalBatches < 1) return null;
+  if (typeof raw.totalMessages !== 'number' || !Number.isInteger(raw.totalMessages) || raw.totalMessages < 0) return null;
+  if (typeof raw.timestamp !== 'number' || !Number.isFinite(raw.timestamp)) return null;
+
+  return {
+    type: 'STREAMARCHIVE_HISTORY_INGEST_OPEN',
+    stagingId: raw.stagingId.trim(),
+    sessionId: raw.sessionId.trim(),
+    totalBatches: raw.totalBatches,
+    totalMessages: raw.totalMessages,
+    timestamp: raw.timestamp,
+  };
+}
+
+export function validateHistoryIngestBatchRequest(
+  raw: unknown
+): import('./messages').HistoryIngestBatchRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_HISTORY_INGEST_BATCH') return null;
+  if (typeof raw.stagingId !== 'string' || raw.stagingId.trim().length === 0) return null;
+  if (typeof raw.batchIndex !== 'number' || !Number.isInteger(raw.batchIndex) || raw.batchIndex < 0) return null;
+  if (!Array.isArray(raw.messages)) return null;
+
+  return {
+    type: 'STREAMARCHIVE_HISTORY_INGEST_BATCH',
+    stagingId: raw.stagingId.trim(),
+    batchIndex: raw.batchIndex,
+    session: raw.session as any,
+    messages: raw.messages as any,
+  };
+}
+
+export function validateHistoryIngestCommitRequest(
+  raw: unknown
+): import('./messages').HistoryIngestCommitRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_HISTORY_INGEST_COMMIT') return null;
+  if (typeof raw.stagingId !== 'string' || raw.stagingId.trim().length === 0) return null;
+
+  return {
+    type: 'STREAMARCHIVE_HISTORY_INGEST_COMMIT',
+    stagingId: raw.stagingId.trim(),
+  };
+}
+
+export function validateHistoryIngestAbortRequest(
+  raw: unknown
+): import('./messages').HistoryIngestAbortRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_HISTORY_INGEST_ABORT') return null;
+  if (typeof raw.stagingId !== 'string' || raw.stagingId.trim().length === 0) return null;
+
+  return {
+    type: 'STREAMARCHIVE_HISTORY_INGEST_ABORT',
+    stagingId: raw.stagingId.trim(),
+    reason: typeof raw.reason === 'string' ? raw.reason : undefined,
+  };
+}
+
+export function validateGetPageRecoverySummaryRequest(
+  raw: unknown
+): import('./messages').GetPageRecoverySummaryRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_GET_PAGE_RECOVERY_SUMMARY') return null;
+  const currentRouteSessionId =
+    typeof raw.currentRouteSessionId === 'string' && raw.currentRouteSessionId.trim().length > 0
+      ? raw.currentRouteSessionId.trim()
+      : undefined;
+
+  return {
+    type: 'STREAMARCHIVE_GET_PAGE_RECOVERY_SUMMARY',
+    currentRouteSessionId,
+  };
+}
+
 

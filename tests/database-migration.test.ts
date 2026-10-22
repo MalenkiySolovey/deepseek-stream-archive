@@ -11,6 +11,7 @@ import {
   STORE_RAW_STREAMS,
   STORE_RAW_STREAM_BATCHES,
   STORE_CANONICAL_CHECKPOINTS,
+  STORE_HISTORY_STAGING,
 } from '../src/storage/schema';
 
 describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () => {
@@ -71,11 +72,11 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       openReq.onerror = () => reject(openReq.error);
     });
 
-    // 2. Open via openExtensionDatabase at DB_VERSION = 5
-    expect(DB_VERSION).toBe(5);
+    // 2. Open via openExtensionDatabase at DB_VERSION = 6
+    expect(DB_VERSION).toBe(6);
     const upgradedDb = await openExtensionDatabase(fakeFactory);
 
-    expect(upgradedDb.version).toBe(5);
+    expect(upgradedDb.version).toBe(6);
 
     // Verify v1 stores still exist
     expect(upgradedDb.objectStoreNames.contains(STORE_CONVERSATIONS)).toBe(true);
@@ -89,6 +90,9 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
 
     // Verify v5 store was added
     expect(upgradedDb.objectStoreNames.contains(STORE_CANONICAL_CHECKPOINTS)).toBe(true);
+
+    // Verify v6 store was added
+    expect(upgradedDb.objectStoreNames.contains(STORE_HISTORY_STAGING)).toBe(true);
 
     // Verify indexes on messages including new v3 compound index and v4 identityState index
     const tx = upgradedDb.transaction(
@@ -185,9 +189,9 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       openReq.onerror = () => reject(openReq.error);
     });
 
-    // 2. Open via openExtensionDatabase at DB_VERSION = 5
+    // 2. Open via openExtensionDatabase at DB_VERSION = 6
     const upgradedDb = await openExtensionDatabase(fakeFactory);
-    expect(upgradedDb.version).toBe(5);
+    expect(upgradedDb.version).toBe(6);
 
     const tx = upgradedDb.transaction([STORE_MESSAGES, STORE_RAW_STREAMS], 'readonly');
     const msgStore = tx.objectStore(STORE_MESSAGES);
@@ -253,21 +257,79 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       openReq.onerror = () => reject(openReq.error);
     });
 
-    // 2. Open via openExtensionDatabase at DB_VERSION = 5
+    // 2. Open via openExtensionDatabase at DB_VERSION = 6
     const upgradedDb = await openExtensionDatabase(fakeFactory);
-    expect(upgradedDb.version).toBe(5);
+    expect(upgradedDb.version).toBe(6);
 
-    const tx = upgradedDb.transaction([STORE_MESSAGES, STORE_CANONICAL_CHECKPOINTS], 'readonly');
+    const tx = upgradedDb.transaction(
+      [STORE_MESSAGES, STORE_CANONICAL_CHECKPOINTS, STORE_HISTORY_STAGING],
+      'readonly'
+    );
     const msgStore = tx.objectStore(STORE_MESSAGES);
     expect(msgStore.indexNames.contains('conversationId_remoteId')).toBe(true);
     expect(msgStore.indexNames.contains('identityState')).toBe(true);
     expect(upgradedDb.objectStoreNames.contains(STORE_CANONICAL_CHECKPOINTS)).toBe(true);
+    expect(upgradedDb.objectStoreNames.contains(STORE_HISTORY_STAGING)).toBe(true);
 
     const idReq = msgStore.index('identityState').get('reconciled');
     await new Promise<void>((resolve, reject) => {
       tx.oncomplete = () => {
         expect(idReq.result).toBeDefined();
         expect(idReq.result.id).toBe('v3-msg-1');
+        resolve();
+      };
+      tx.onerror = () => reject(tx.error);
+    });
+  });
+
+  it('preserves existing v5 database with canonical checkpoints when upgrading to v6 with history staging', async () => {
+    // 1. Initialize DB at version 5
+    await new Promise<void>((resolve, reject) => {
+      const openReq = fakeFactory.open(DB_NAME, 5);
+      openReq.onupgradeneeded = (e) => {
+        const db = (e.target as IDBOpenDBRequest).result;
+        db.createObjectStore(STORE_CONVERSATIONS, { keyPath: 'id' });
+        db.createObjectStore(STORE_MESSAGES, { keyPath: 'id' });
+        db.createObjectStore(STORE_REVISIONS, { keyPath: 'id' });
+        db.createObjectStore(STORE_RECOVERY_EVENTS, { keyPath: 'id' });
+        db.createObjectStore(STORE_RAW_STREAMS, { keyPath: 'id' });
+        db.createObjectStore(STORE_RAW_STREAM_BATCHES, { keyPath: 'id' });
+        const cpStore = db.createObjectStore(STORE_CANONICAL_CHECKPOINTS, { keyPath: 'streamKey' });
+        cpStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+      };
+      openReq.onsuccess = () => {
+        const db = openReq.result;
+        const tx = db.transaction([STORE_CANONICAL_CHECKPOINTS], 'readwrite');
+        tx.objectStore(STORE_CANONICAL_CHECKPOINTS).put({
+          streamKey: 'prod_v5:stream_v5',
+          lastCommittedCheckpointSeq: 3,
+          isTerminal: true,
+          updatedAt: 5000,
+        });
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+      };
+      openReq.onerror = () => reject(openReq.error);
+    });
+
+    // 2. Open via openExtensionDatabase at DB_VERSION = 6
+    const upgradedDb = await openExtensionDatabase(fakeFactory);
+    expect(upgradedDb.version).toBe(6);
+
+    expect(upgradedDb.objectStoreNames.contains(STORE_HISTORY_STAGING)).toBe(true);
+
+    const tx = upgradedDb.transaction([STORE_CANONICAL_CHECKPOINTS, STORE_HISTORY_STAGING], 'readonly');
+    const cpStore = tx.objectStore(STORE_CANONICAL_CHECKPOINTS);
+    const cpReq = cpStore.get('prod_v5:stream_v5');
+
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => {
+        expect(cpReq.result).toBeDefined();
+        expect(cpReq.result.lastCommittedCheckpointSeq).toBe(3);
+        expect(cpReq.result.isTerminal).toBe(true);
         resolve();
       };
       tx.onerror = () => reject(tx.error);

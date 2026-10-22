@@ -20,6 +20,11 @@ import {
   MESSAGE_LIST_ARCHIVE_CONVERSATIONS,
   MESSAGE_GET_ARCHIVE_CONVERSATION,
   MESSAGE_GET_REVISION_CONTENT,
+  MESSAGE_HISTORY_INGEST_OPEN,
+  MESSAGE_HISTORY_INGEST_BATCH,
+  MESSAGE_HISTORY_INGEST_COMMIT,
+  MESSAGE_HISTORY_INGEST_ABORT,
+  MESSAGE_GET_PAGE_RECOVERY_SUMMARY,
   type SaveSyntheticBatchRequest,
   type SaveSyntheticBatchResponse,
   type FoundationStatusResponse,
@@ -58,11 +63,18 @@ import {
   validateListArchiveConversationsRequest,
   validateGetArchiveConversationRequest,
   validateGetRevisionContentRequest,
+  validateHistoryIngestOpenRequest,
+  validateHistoryIngestBatchRequest,
+  validateHistoryIngestCommitRequest,
+  validateHistoryIngestAbortRequest,
+  validateGetPageRecoverySummaryRequest,
 } from '../src/bridge/validation';
 import type { DeepSeekProtocolDiagnosticsData } from '../src/adapters/deepseek/protocol/types';
 import { DEFAULT_DEEPSEEK_PROFILE } from '../src/adapters/deepseek/compatibility/profiles';
 import { HistoryReconciler } from '../src/core/reconciliation/history-reconciler';
 import { DeepSeekHistoryParser } from '../src/adapters/deepseek/history/parser';
+import type { DeepSeekParsedHistory } from '../src/adapters/deepseek/history/types';
+import type { PageRecoverySummary, PageRecoveryMessageSummary } from '../src/adapters/deepseek/dom/types';
 import { logger } from '../src/shared/logger';
 
 
@@ -669,6 +681,170 @@ export default defineBackground(() => {
       return true;
     }
 
+    // 12b. Handle Bounded History Ingestion: Open
+    if (message.type === MESSAGE_HISTORY_INGEST_OPEN) {
+      const validated = validateHistoryIngestOpenRequest(message);
+      if (!validated) {
+        sendResponse({ success: false, stagingId: '', error: 'invalid_ingest_open_request' });
+        return false;
+      }
+      sendResponse({ success: true, stagingId: validated.stagingId });
+      return true;
+    }
+
+    // 12c. Handle Bounded History Ingestion: Batch
+    if (message.type === MESSAGE_HISTORY_INGEST_BATCH) {
+      const validated = validateHistoryIngestBatchRequest(message);
+      if (!validated) {
+        sendResponse({
+          success: false,
+          stagingId: '',
+          batchIndex: -1,
+          error: 'invalid_ingest_batch_request',
+        });
+        return false;
+      }
+
+      storageRepo
+        .saveHistoryStagingBatch({
+          id: `${validated.stagingId}:${validated.batchIndex}`,
+          stagingId: validated.stagingId,
+          batchIndex: validated.batchIndex,
+          session: validated.session,
+          messages: validated.messages,
+          createdAt: Date.now(),
+        })
+        .then(() => {
+          sendResponse({
+            success: true,
+            stagingId: validated.stagingId,
+            batchIndex: validated.batchIndex,
+          });
+        })
+        .catch((err) => {
+          sendResponse({
+            success: false,
+            stagingId: validated.stagingId,
+            batchIndex: validated.batchIndex,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      return true;
+    }
+
+    // 12d. Handle Bounded History Ingestion: Commit
+    if (message.type === MESSAGE_HISTORY_INGEST_COMMIT) {
+      const validated = validateHistoryIngestCommitRequest(message);
+      if (!validated) {
+        sendResponse({ success: false, stagingId: '', error: 'invalid_ingest_commit_request' });
+        return false;
+      }
+
+      (async () => {
+        try {
+          const batches = await storageRepo.listHistoryStagingBatches(validated.stagingId);
+          if (batches.length === 0) {
+            sendResponse({
+              success: false,
+              stagingId: validated.stagingId,
+              error: 'no_staging_batches_found',
+            });
+            return;
+          }
+
+          let session: any = undefined;
+          const allMessages: any[] = [];
+          for (const b of batches) {
+            if (b.session && !session) session = b.session;
+            allMessages.push(...b.messages);
+          }
+
+          if (!session) {
+            sendResponse({
+              success: false,
+              stagingId: validated.stagingId,
+              error: 'missing_session_in_staging',
+            });
+            return;
+          }
+
+          const parsed: DeepSeekParsedHistory = {
+            session,
+            messages: allMessages,
+          };
+
+          const sessionId = session.sessionId;
+          const prevQueue = historyQueuesBySessionId.get(sessionId) || Promise.resolve();
+
+          const runCommit = async () => {
+            const { plan, result } = await historyReconciler.createPlan(parsed);
+            await storageRepo.commitHistoryStagingPlan(validated.stagingId, plan);
+
+            historyObservationsCount++;
+            lastHistoryObservedAt = Date.now();
+
+            sendResponse({
+              success: true,
+              stagingId: validated.stagingId,
+              conversationId: result.conversationId,
+              messagesCreated: result.messagesCreated,
+              messagesUpdated: result.messagesUpdated,
+              revisionsCreated: result.revisionsCreated,
+              treeLinksResolved: result.treeLinksResolved,
+            });
+          };
+
+          const newQueue = prevQueue
+            .then(runCommit, (err) => {
+              logger.error('Failed to commit history staging', err);
+              sendResponse({
+                success: false,
+                stagingId: validated.stagingId,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            })
+            .finally(() => {
+              if (historyQueuesBySessionId.get(sessionId) === newQueue) {
+                historyQueuesBySessionId.delete(sessionId);
+              }
+            });
+          historyQueuesBySessionId.set(sessionId, newQueue);
+        } catch (err) {
+          logger.error('Failed to process history ingest commit', err);
+          sendResponse({
+            success: false,
+            stagingId: validated.stagingId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      })();
+
+      return true;
+    }
+
+    // 12e. Handle Bounded History Ingestion: Abort
+    if (message.type === MESSAGE_HISTORY_INGEST_ABORT) {
+      const validated = validateHistoryIngestAbortRequest(message);
+      if (!validated) {
+        sendResponse({ success: false, stagingId: '', error: 'invalid_ingest_abort_request' });
+        return false;
+      }
+
+      storageRepo
+        .clearHistoryStaging(validated.stagingId)
+        .then(() => {
+          sendResponse({ success: true, stagingId: validated.stagingId });
+        })
+        .catch((err) => {
+          sendResponse({
+            success: false,
+            stagingId: validated.stagingId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      return true;
+    }
+
     // 13. Handle Canonical Checkpoint Persistence
     if (message.type === MESSAGE_PERSIST_CANONICAL_CHECKPOINT) {
       const validated = validatePersistCanonicalCheckpointRequest(message);
@@ -836,6 +1012,93 @@ export default defineBackground(() => {
           };
           sendResponse(res);
         });
+
+      return true;
+    }
+
+    // 16. Handle Page Recovery Summary Query for Content Script Overlay
+    if (message.type === MESSAGE_GET_PAGE_RECOVERY_SUMMARY) {
+      const validated = validateGetPageRecoverySummaryRequest(message);
+      if (!validated) {
+        sendResponse({ success: false, summary: null, error: 'invalid_request' });
+        return false;
+      }
+
+      (async () => {
+        try {
+          const routeSessionId = validated.currentRouteSessionId;
+          let conv = routeSessionId ? await storageRepo.getConversationByRemoteId(routeSessionId) : null;
+          if (!conv && routeSessionId) {
+            conv = await storageRepo.getConversation(routeSessionId);
+          }
+          if (!conv) {
+            // Find most recently updated conversation as fallback
+            const allConvs = await storageRepo.listConversations();
+            if (allConvs.length > 0) {
+              allConvs.sort((a, b) => b.updatedAt - a.updatedAt);
+              conv = allConvs[0]!;
+            }
+          }
+
+          if (!conv) {
+            sendResponse({ success: true, summary: null });
+            return;
+          }
+
+          const messages = await storageRepo.listMessagesByConversation(conv.id);
+          const recoverable: PageRecoveryMessageSummary[] = [];
+
+          for (const m of messages) {
+            const isFiltered = m.status === 'filtered';
+            const isDegraded =
+              m.status === 'degraded' ||
+              m.status === 'interrupted' ||
+              m.status === 'incomplete';
+
+            const revs = await storageRepo.listRevisionsByMessage(m.id);
+            const lastGood = revs.find((r) => r.isLastGood);
+            const latestNetwork = [...revs]
+              .reverse()
+              .find(
+                (r) =>
+                  r.source === 'network' &&
+                  (r.text.length > 0 || (r.thinking && r.thinking.length > 0))
+              );
+
+            const recoveryRev =
+              lastGood || (isFiltered || isDegraded ? latestNetwork : undefined);
+
+            if (recoveryRev) {
+              recoverable.push({
+                messageId: m.id,
+                remoteId: m.remoteId,
+                role: m.role,
+                status: m.status,
+                hasLastGood: Boolean(lastGood),
+                snippet: (recoveryRev.text || recoveryRev.thinking || '').slice(0, 120),
+                capturedAt: recoveryRev.capturedAt,
+                recoveredRevisionId: recoveryRev.id,
+              });
+            }
+          }
+
+          const summary: PageRecoverySummary = {
+            conversationId: conv.id,
+            remoteSessionId: conv.remoteId,
+            recoverableCount: recoverable.length,
+            messages: recoverable,
+          };
+
+          sendResponse({ success: true, summary });
+        } catch (err) {
+          logger.error('Failed to get page recovery summary', err);
+          sendResponse({
+            success: false,
+            summary: null,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      })();
 
       return true;
     }

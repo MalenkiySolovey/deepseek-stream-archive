@@ -23,9 +23,12 @@ import {
   STORE_REVISIONS,
   STORE_RECOVERY_EVENTS,
   STORE_CANONICAL_CHECKPOINTS,
+  STORE_HISTORY_STAGING,
   type CanonicalStreamCheckpointRecord,
+  type HistoryStagingBatchRecord,
 } from '../schema';
 import { openExtensionDatabase, createDurableWriteTransaction } from '../db';
+import { computeCanonicalCheckpointFingerprintSync } from '../../shared/crypto';
 
 export class IndexedDbStorageRepository implements StorageRepository {
   constructor(private readonly idbFactory?: IDBFactory) {}
@@ -251,6 +254,24 @@ export class IndexedDbStorageRepository implements StorageRepository {
   // ── Atomic Canonical Checkpoint Persistence ──
 
   async saveCanonicalCheckpoint(data: CanonicalCheckpointData): Promise<void> {
+    const fingerprint =
+      data.checkpointSeq !== undefined
+        ? computeCanonicalCheckpointFingerprintSync({
+            streamKey: data.streamKey,
+            checkpointSeq: data.checkpointSeq,
+            conversationId: data.conversation?.id,
+            messageId: data.message.id,
+            messageStatus: data.message.status,
+            messageRemoteId: data.message.remoteId,
+            messageContentLength: data.message.content?.length ?? 0,
+            revisionFingerprints: data.revisions.map(
+              (r) => r.contentFingerprint || `${r.text}::${r.thinking || ''}`
+            ),
+            recoveryEventIds: (data.recoveryEvents || []).map((e) => e.id),
+            isTerminal: Boolean(data.isTerminal),
+          })
+        : undefined;
+
     const db = await this.getDb();
     return new Promise((resolve, reject) => {
       const stores = [
@@ -366,23 +387,46 @@ export class IndexedDbStorageRepository implements StorageRepository {
           const seq = data.checkpointSeq;
 
           if (record) {
+            // Terminal checkpoint locking
+            if (record.isTerminal && seq > record.lastCommittedCheckpointSeq) {
+              fail(
+                new Error(
+                  `terminal_checkpoint_locked: stream ${data.streamKey} is terminal, cannot commit seq ${seq}`
+                )
+              );
+              return;
+            }
+
             if (seq === record.lastCommittedCheckpointSeq) {
+              // Idempotent re-ACK: verify payload fingerprint
+              if (record.lastFingerprint && fingerprint && record.lastFingerprint !== fingerprint) {
+                fail(
+                  new Error(
+                    `checkpoint_conflict: sequence ${seq} already committed with different payload fingerprint`
+                  )
+                );
+                return;
+              }
               // Idempotent re-ACK: already committed up to this sequence.
               // We do not re-apply duplicate data or mutate state.
               return;
             }
+
             if (seq < record.lastCommittedCheckpointSeq) {
               // Stale out-of-order checkpoint, ignore without mutating
               return;
             }
+
             if (seq > record.lastCommittedCheckpointSeq + 1) {
               fail(new Error(`checkpoint_sequence_gap: expected ${record.lastCommittedCheckpointSeq + 1}, got ${seq}`));
               return;
             }
+
             // seq === record.lastCommittedCheckpointSeq + 1
             cpStore.put({
               streamKey: data.streamKey,
               lastCommittedCheckpointSeq: seq,
+              lastFingerprint: fingerprint,
               isTerminal: Boolean(data.isTerminal),
               updatedAt: Date.now(),
             });
@@ -394,6 +438,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
             cpStore.put({
               streamKey: data.streamKey,
               lastCommittedCheckpointSeq: 0,
+              lastFingerprint: fingerprint,
               isTerminal: Boolean(data.isTerminal),
               updatedAt: Date.now(),
             });
@@ -582,6 +627,141 @@ export class IndexedDbStorageRepository implements StorageRepository {
           };
         }
       }
+    });
+  }
+
+  // ── History Staging Operations ──
+
+  async saveHistoryStagingBatch(batch: HistoryStagingBatchRecord): Promise<void> {
+    return this.executeWrite(STORE_HISTORY_STAGING, (store) => store.put(batch));
+  }
+
+  async listHistoryStagingBatches(stagingId: string): Promise<HistoryStagingBatchRecord[]> {
+    const db = await this.getDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_HISTORY_STAGING, 'readonly');
+      const store = tx.objectStore(STORE_HISTORY_STAGING);
+      const index = store.index('stagingId');
+      const req = index.getAll(stagingId);
+      req.onsuccess = () => {
+        const records = (req.result as HistoryStagingBatchRecord[]) || [];
+        records.sort((a, b) => a.batchIndex - b.batchIndex);
+        resolve(records);
+      };
+      req.onerror = () => reject(req.error || new Error('Failed to list history staging batches'));
+    });
+  }
+
+  async clearHistoryStaging(stagingId: string): Promise<void> {
+    const db = await this.getDb();
+    return new Promise((resolve, reject) => {
+      const tx = createDurableWriteTransaction(db, [STORE_HISTORY_STAGING], 'strict');
+      const store = tx.objectStore(STORE_HISTORY_STAGING);
+      const index = store.index('stagingId');
+      const keyRangeFactory =
+        typeof IDBKeyRange !== 'undefined'
+          ? IDBKeyRange
+          : (globalThis as any)?.IDBKeyRange;
+      const keyRange = keyRangeFactory ? keyRangeFactory.only(stagingId) : null;
+      const req = index.openCursor(keyRange);
+      req.onsuccess = (e) => {
+        const cursor = (e.target as IDBRequest).result as IDBCursorWithValue | null;
+        if (cursor) {
+          cursor.delete();
+          cursor.continue();
+        }
+      };
+      req.onerror = () => reject(req.error || new Error('Failed to clear history staging cursor'));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('Clear history staging transaction failed'));
+      tx.onabort = () => reject(tx.error || new Error('Clear history staging transaction aborted'));
+    });
+  }
+
+  async commitHistoryStagingPlan(
+    stagingId: string,
+    plan: HistoryReconciliationPlan
+  ): Promise<void> {
+    const db = await this.getDb();
+    return new Promise((resolve, reject) => {
+      const stores = [
+        STORE_CONVERSATIONS,
+        STORE_MESSAGES,
+        STORE_REVISIONS,
+        STORE_HISTORY_STAGING,
+      ];
+      const tx = createDurableWriteTransaction(db, stores, 'strict');
+
+      let aborted = false;
+      const fail = (err: Error) => {
+        if (aborted) return;
+        aborted = true;
+        try {
+          tx.abort();
+        } catch {
+          // ignore
+        }
+        reject(err);
+      };
+
+      tx.onerror = () => {
+        if (!aborted) reject(tx.error || new Error('Commit history staging plan transaction failed'));
+      };
+      tx.onabort = () => {
+        if (!aborted) reject(tx.error || new Error('Commit history staging plan transaction aborted'));
+      };
+      tx.oncomplete = () => {
+        if (!aborted) resolve();
+      };
+
+      const convStore = tx.objectStore(STORE_CONVERSATIONS);
+      const msgStore = tx.objectStore(STORE_MESSAGES);
+      const revStore = tx.objectStore(STORE_REVISIONS);
+      const stagingStore = tx.objectStore(STORE_HISTORY_STAGING);
+
+      // 1. Conversation upsert
+      const convReq = convStore.get(plan.conversation.id);
+      convReq.onerror = () => fail(convReq.error || new Error('Failed to read conversation'));
+      convReq.onsuccess = () => {
+        const existingConv = convReq.result as Conversation | undefined;
+        if (existingConv) {
+          convStore.put({
+            ...plan.conversation,
+            title: plan.conversation.title || existingConv.title,
+            createdAt: existingConv.createdAt,
+            updatedAt: Math.max(existingConv.updatedAt, plan.conversation.updatedAt),
+          });
+        } else {
+          convStore.put(plan.conversation);
+        }
+      };
+
+      // 2. Messages put
+      for (const msg of plan.messagesToPut) {
+        msgStore.put(msg);
+      }
+
+      // 3. Revisions put
+      for (const rev of plan.revisionsToPut) {
+        revStore.put(rev);
+      }
+
+      // 4. Delete all staging records for stagingId
+      const stagingIndex = stagingStore.index('stagingId');
+      const keyRangeFactory =
+        typeof IDBKeyRange !== 'undefined'
+          ? IDBKeyRange
+          : (globalThis as any)?.IDBKeyRange;
+      const keyRange = keyRangeFactory ? keyRangeFactory.only(stagingId) : null;
+      const curReq = stagingIndex.openCursor(keyRange);
+      curReq.onsuccess = (e) => {
+        const cursor = (e.target as IDBRequest).result as IDBCursorWithValue | null;
+        if (cursor) {
+          cursor.delete();
+          cursor.continue();
+        }
+      };
+      curReq.onerror = () => fail(curReq.error || new Error('Failed to delete staging records'));
     });
   }
 

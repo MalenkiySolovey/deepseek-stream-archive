@@ -1,4 +1,5 @@
 import type { Conversation, Message, ResponseRevision, RecoveryEvent } from '../models';
+import type { HistoryStagingBatchRecord } from '../../storage/schema';
 
 export interface ArchiveSummary {
   conversationsCount: number;
@@ -118,6 +119,12 @@ export interface StorageRepository {
   saveCanonicalCheckpoint(data: CanonicalCheckpointData): Promise<void>;
   applyHistoryReconciliationPlan(plan: HistoryReconciliationPlan): Promise<void>;
   applyReplayPromotionPlan(plan: ReplayPromotionPlan): Promise<void>;
+
+  // History Staging operations
+  saveHistoryStagingBatch(batch: HistoryStagingBatchRecord): Promise<void>;
+  listHistoryStagingBatches(stagingId: string): Promise<HistoryStagingBatchRecord[]>;
+  commitHistoryStagingPlan(stagingId: string, plan: HistoryReconciliationPlan): Promise<void>;
+  clearHistoryStaging(stagingId: string): Promise<void>;
 
   // Read-only Archive Browser queries
   listArchiveConversations(options?: { limit?: number; cursor?: string }): Promise<PaginatedArchiveConversations>;

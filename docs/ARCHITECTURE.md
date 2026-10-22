@@ -415,6 +415,8 @@ Manifest V3 Specification:
 - **Durable Raw Journal:** Raw streams/batches IndexedDB persistence, transactional ACK pipeline, crash durability, storage persistence.
 - **Canonical Model & Passive History Reconciliation:** Canonical domain model (Conversation, Message, ResponseRevision, RecoveryEvent), last-good anti-recall invariant, pure passive history observation, two-pass parent resolution preserving sibling branches.
 - **Side Panel Archive Browser:** Svelte 5 runes UI, conversation list with search and pagination, branch switcher, collapsible thinking process, revision timeline drawer, safe Markdown rendering.
+- **Non-Destructive In-Page Recovery Overlay:** Closed Shadow DOM portal, DOM capability probe, anchored badge for strong identity matching, session-level floating recovery tray fallback, lazy content fetching, zero DOM mutation.
+- **Durable Checkpoint Delivery & Staging Store:** Sealed canonical checkpoints with monotonic backoff retry, pre-transaction SHA-256 fingerprint validation, terminal checkpoint locking, and bounded multi-batch history staging (schema v6 `STORE_HISTORY_STAGING`).
 
 ### Scope Boundaries:
 1. **Zero DOM Pollution by Default:** Clean passive observation without modifying page responses.

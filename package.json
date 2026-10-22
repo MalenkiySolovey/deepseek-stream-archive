@@ -4,6 +4,7 @@
   "description": "Local-first browser extension that records DeepSeek responses while they stream, preserves revisions before filtering or failure, and provides recovery, search and export.",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@9.15.5",
   "scripts": {
     "dev": "wxt",
     "build": "wxt build",
@@ -18,6 +19,7 @@
     "@types/node": "^26.6.4",
     "@wxt-dev/module-svelte": "^2.0.5",
     "fake-indexeddb": "^6.0.0",
+    "happy-dom": "^21.0.4",
     "svelte": "^5.0.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0",

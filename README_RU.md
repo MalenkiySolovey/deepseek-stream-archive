@@ -6,7 +6,7 @@
 
 ![Платформа](https://img.shields.io/badge/платформа-Chrome%20%7C%20Chromium%20MV3-4285F4?logo=googlechrome&logoColor=white)
 ![Фреймворк](https://img.shields.io/badge/фреймворк-WXT%20%2B%20Svelte%205-FF3E00?logo=svelte&logoColor=white)
-![Тесты](https://img.shields.io/badge/тесты-318%20пройдены-3DDC84)
+![Тесты](https://img.shields.io/badge/тесты-334%20пройдены-3DDC84)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
 ![Лицензия](https://img.shields.io/badge/лицензия-MIT-green)
 

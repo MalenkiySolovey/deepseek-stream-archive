@@ -33,7 +33,9 @@ export class HistoryReconciler {
    * 6. User content preservation in Message.content.
    * 7. Atomic batch commit via HistoryReconciliationPlan.
    */
-  async reconcile(parsed: DeepSeekParsedHistory): Promise<HistoryReconciliationResult> {
+  async createPlan(
+    parsed: DeepSeekParsedHistory
+  ): Promise<{ plan: HistoryReconciliationPlan; result: HistoryReconciliationResult }> {
     const { session, messages } = parsed;
     const now = Date.now();
 
@@ -250,7 +252,6 @@ export class HistoryReconciler {
       }
     }
 
-    // ── Phase 4: Atomic Batch Commit ──
     const plan: HistoryReconciliationPlan = {
       conversation,
       messagesToPut,
@@ -258,9 +259,7 @@ export class HistoryReconciler {
       treeLinksResolved,
     };
 
-    await this.storage.applyHistoryReconciliationPlan(plan);
-
-    return {
+    const result: HistoryReconciliationResult = {
       conversationId: conversation.id,
       isNewConversation,
       messagesCreated,
@@ -268,5 +267,13 @@ export class HistoryReconciler {
       revisionsCreated,
       treeLinksResolved,
     };
+
+    return { plan, result };
+  }
+
+  async reconcile(parsed: DeepSeekParsedHistory): Promise<HistoryReconciliationResult> {
+    const { plan, result } = await this.createPlan(parsed);
+    await this.storage.applyHistoryReconciliationPlan(plan);
+    return result;
   }
 }

@@ -5,6 +5,12 @@ import { splitSafeUtf16 } from '../safe-slice';
 
 export type TransportEventEmitter = (event: TransportEvent) => void;
 
+export type HistoryStreamCaptureEvent =
+  | { type: 'open'; historyId: string; url: string; status: number; timestamp: number }
+  | { type: 'chunk'; historyId: string; chunkIndex: number; chunkText: string }
+  | { type: 'complete'; historyId: string; totalChars: number; timestamp: number }
+  | { type: 'abort'; historyId: string; reason: string };
+
 export interface FetchCaptureOptions {
   producerSessionId: string;
   onEvent: TransportEventEmitter;
@@ -12,6 +18,7 @@ export interface FetchCaptureOptions {
   maxChunkChars?: number;
   isCandidate?: (metadata: RequestCandidateMetadata) => boolean;
   onHistoryObservation?: (observation: { url: string; status: number; body: string }) => void;
+  onHistoryStreamEvent?: (event: HistoryStreamCaptureEvent) => void;
   isHistoryCandidate?: (url: string) => boolean;
 }
 
@@ -67,16 +74,34 @@ export function installFetchCapture(options: FetchCaptureOptions): () => void {
         : false;
 
       // Passive history observation (cloning without mutating response to page)
-      if (options.onHistoryObservation && options.isHistoryCandidate && options.isHistoryCandidate(rawUrl)) {
+      const hasHistoryObserver = Boolean(options.onHistoryStreamEvent || options.onHistoryObservation);
+      if (hasHistoryObserver && options.isHistoryCandidate && options.isHistoryCandidate(rawUrl)) {
         if (response.status === 200 && response.body) {
           try {
             const histClone = response.clone();
+            const historyId =
+              typeof crypto !== 'undefined' && crypto.randomUUID
+                ? crypto.randomUUID()
+                : `hist_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
             if (histClone.body && typeof histClone.body.getReader === 'function') {
               const reader = histClone.body.getReader();
               const decoder = new TextDecoder('utf-8');
               const MAX_HISTORY_BYTES = 25 * 1024 * 1024;
               let totalBytes = 0;
-              let accumulatedText = '';
+              let totalChars = 0;
+              let chunkIndex = 0;
+              let accumulatedText = options.onHistoryObservation ? '' : undefined;
+
+              if (options.onHistoryStreamEvent) {
+                options.onHistoryStreamEvent({
+                  type: 'open',
+                  historyId,
+                  url: rawUrl,
+                  status: response.status,
+                  timestamp: Date.now(),
+                });
+              }
 
               (async () => {
                 try {
@@ -91,28 +116,98 @@ export function installFetchCapture(options: FetchCaptureOptions): () => void {
                         } catch {
                           // ignore
                         }
+                        if (options.onHistoryStreamEvent) {
+                          options.onHistoryStreamEvent({
+                            type: 'abort',
+                            historyId,
+                            reason: 'max_bytes_exceeded',
+                          });
+                        }
                         return;
                       }
-                      accumulatedText += decoder.decode(value, { stream: true });
+                      const chunkText = decoder.decode(value, { stream: true });
+                      if (chunkText.length > 0) {
+                        totalChars += chunkText.length;
+                        if (options.onHistoryStreamEvent) {
+                          options.onHistoryStreamEvent({
+                            type: 'chunk',
+                            historyId,
+                            chunkIndex: chunkIndex++,
+                            chunkText,
+                          });
+                        }
+                        if (accumulatedText !== undefined) {
+                          accumulatedText += chunkText;
+                        }
+                      }
                     }
                   }
-                  accumulatedText += decoder.decode();
-                  options.onHistoryObservation!({
-                    url: rawUrl,
-                    status: response.status,
-                    body: accumulatedText,
-                  });
+                  const finalTail = decoder.decode();
+                  if (finalTail.length > 0) {
+                    totalChars += finalTail.length;
+                    if (options.onHistoryStreamEvent) {
+                      options.onHistoryStreamEvent({
+                        type: 'chunk',
+                        historyId,
+                        chunkIndex: chunkIndex++,
+                        chunkText: finalTail,
+                      });
+                    }
+                    if (accumulatedText !== undefined) {
+                      accumulatedText += finalTail;
+                    }
+                  }
+
+                  if (options.onHistoryStreamEvent) {
+                    options.onHistoryStreamEvent({
+                      type: 'complete',
+                      historyId,
+                      totalChars,
+                      timestamp: Date.now(),
+                    });
+                  }
+
+                  if (options.onHistoryObservation && accumulatedText !== undefined) {
+                    options.onHistoryObservation({
+                      url: rawUrl,
+                      status: response.status,
+                      body: accumulatedText,
+                    });
+                  }
                 } catch {
                   // fail-open
                 }
               })().catch(() => {});
             } else {
               histClone.text().then((bodyText: string) => {
-                options.onHistoryObservation!({
-                  url: rawUrl,
-                  status: response.status,
-                  body: bodyText,
-                });
+                if (options.onHistoryStreamEvent) {
+                  options.onHistoryStreamEvent({
+                    type: 'open',
+                    historyId,
+                    url: rawUrl,
+                    status: response.status,
+                    timestamp: Date.now(),
+                  });
+                  options.onHistoryStreamEvent({
+                    type: 'chunk',
+                    historyId,
+                    chunkIndex: 0,
+                    chunkText: bodyText,
+                  });
+                  options.onHistoryStreamEvent({
+                    type: 'complete',
+                    historyId,
+                    totalChars: bodyText.length,
+                    timestamp: Date.now(),
+                  });
+                }
+                if (options.onHistoryObservation) {
+                  options.onHistoryObservation({
+                    url: rawUrl,
+                    status: response.status,
+                    body: bodyText,
+                  });
+                }
               }).catch(() => {});
             }
           } catch {

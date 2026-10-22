@@ -154,13 +154,45 @@ export default defineContentScript({
 
     const isCandidate = createDeepSeekCandidatePredicate();
 
+    const handleHistoryStreamEvent = (
+      ev: import('../src/transport/fetch/capture').HistoryStreamCaptureEvent
+    ) => {
+      if (ev.type === 'open') {
+        const sessionId = extractHistorySessionId(ev.url) || '';
+        dispatchBridgeEnvelope('history.open', {
+          historyId: ev.historyId,
+          url: ev.url,
+          sessionId,
+          status: ev.status,
+          timestamp: ev.timestamp,
+        });
+      } else if (ev.type === 'chunk') {
+        dispatchBridgeEnvelope('history.chunk', {
+          historyId: ev.historyId,
+          chunkIndex: ev.chunkIndex,
+          chunkText: ev.chunkText,
+        });
+      } else if (ev.type === 'complete') {
+        dispatchBridgeEnvelope('history.complete', {
+          historyId: ev.historyId,
+          totalChars: ev.totalChars,
+          timestamp: ev.timestamp,
+        });
+      } else if (ev.type === 'abort') {
+        dispatchBridgeEnvelope('history.abort', {
+          historyId: ev.historyId,
+          reason: ev.reason,
+        });
+      }
+    };
+
     // Install passive transport observers
     installFetchCapture({
       producerSessionId,
       onEvent: handleTransportEvent,
       nextSequence,
       isCandidate,
-      onHistoryObservation: handleHistoryObservation,
+      onHistoryStreamEvent: handleHistoryStreamEvent,
       isHistoryCandidate: isDeepSeekHistoryEndpoint,
     });
 
