@@ -1,0 +1,12 @@
+data: {"p":"response/message_id","o":"SET","v":"msg_fix_002"}
+
+data: {"p":"response/fragments","o":"SET","v":[{"type":"THINK","content":"Let's analyze the input parameters."},{"type":"RESPONSE","content":""}]}
+
+data: {"p":"response/fragments/0/content","o":"APPEND","v":" All constraints satisfied."}
+
+data: {"p":"response/fragments/1/content","o":"APPEND","v":"Execution verified and complete."}
+
+data: {"p":"response/status","o":"SET","v":"FINISHED"}
+
+data: [DONE]
+

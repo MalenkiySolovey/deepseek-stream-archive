@@ -1,0 +1,131 @@
+import type { Conversation, Message, ResponseRevision, RecoveryEvent } from '../models';
+
+export interface ArchiveSummary {
+  conversationsCount: number;
+  messagesCount: number;
+  provisionalMessagesCount: number;
+  reconciledMessagesCount: number;
+  revisionsCount: number;
+  lastGoodRevisionsCount: number;
+  recoveryEventsCount: number;
+}
+
+export interface CanonicalCheckpointData {
+  streamKey: string;
+  checkpointSeq: number;
+  isTerminal?: boolean;
+  conversation?: Conversation;
+  message: Message;
+  revisions: ResponseRevision[];
+  recoveryEvents?: RecoveryEvent[];
+}
+
+export interface HistoryReconciliationPlan {
+  conversation: Conversation;
+  messagesToPut: Message[];
+  revisionsToPut: ResponseRevision[];
+  treeLinksResolved: number;
+  diagnostics?: string[];
+}
+
+export interface ReplayPromotionPlan {
+  conversation: Conversation;
+  message: Message;
+  revisions: ResponseRevision[];
+  recoveryEvents: RecoveryEvent[];
+}
+
+export interface ArchiveConversationSummary {
+  id: string;
+  remoteId?: string;
+  title: string;
+  messageCount: number;
+  recoveredCount: number;
+  hasDegraded: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ArchiveRevisionMetadata {
+  id: string;
+  messageId: string;
+  revisionIndex: number;
+  source: import('../models').CaptureSource;
+  capturedAt: number;
+  isFinal: boolean;
+  isLastGood: boolean;
+  textLength: number;
+  thinkingLength: number;
+  contentFingerprint?: string;
+}
+
+export interface ArchiveMessageSummary {
+  id: string;
+  remoteId?: string;
+  conversationId: string;
+  parentId?: string;
+  remoteParentId?: string;
+  sourceRawStreamKey?: string;
+  identityState: import('../models').MessageIdentityState;
+  role: import('../models').MessageRole;
+  status: import('../models').MessageStatus;
+  content?: string;
+  createdAt: number;
+  updatedAt: number;
+  revisions: ArchiveRevisionMetadata[];
+  recoveryEvents: RecoveryEvent[];
+  preferredRevision?: ResponseRevision;
+}
+
+export interface ArchiveConversationDetail {
+  conversation: Conversation;
+  messages: ArchiveMessageSummary[];
+}
+
+export interface PaginatedArchiveConversations {
+  items: ArchiveConversationSummary[];
+  nextCursor?: string;
+  totalCount: number;
+}
+
+export interface StorageRepository {
+  // Conversation operations
+  saveConversation(conversation: Conversation): Promise<void>;
+  getConversation(id: string): Promise<Conversation | null>;
+  getConversationByRemoteId(remoteId: string): Promise<Conversation | null>;
+  listConversations(): Promise<Conversation[]>;
+
+  // Message operations
+  saveMessage(message: Message): Promise<void>;
+  saveMessages(messages: Message[]): Promise<void>;
+  getMessage(id: string): Promise<Message | null>;
+  getMessageByRemoteId(conversationId: string, remoteId: string): Promise<Message | null>;
+  findMessageByRemoteId(remoteId: string): Promise<Message | null>;
+  listMessagesByConversation(conversationId: string): Promise<Message[]>;
+
+  // Revision operations
+  saveRevision(revision: ResponseRevision): Promise<void>;
+  saveRevisions(revisions: ResponseRevision[]): Promise<void>;
+  getRevision(id: string): Promise<ResponseRevision | null>;
+  listRevisionsByMessage(messageId: string): Promise<ResponseRevision[]>;
+  getLastGoodRevision(messageId: string): Promise<ResponseRevision | null>;
+
+  // Recovery event operations
+  saveRecoveryEvent(event: RecoveryEvent): Promise<void>;
+  listRecoveryEvents(messageId?: string): Promise<RecoveryEvent[]>;
+
+  // Atomic checkpoint, reconciliation & replay promotion operations
+  saveCanonicalCheckpoint(data: CanonicalCheckpointData): Promise<void>;
+  applyHistoryReconciliationPlan(plan: HistoryReconciliationPlan): Promise<void>;
+  applyReplayPromotionPlan(plan: ReplayPromotionPlan): Promise<void>;
+
+  // Read-only Archive Browser queries
+  listArchiveConversations(options?: { limit?: number; cursor?: string }): Promise<PaginatedArchiveConversations>;
+  getArchiveConversation(id: string): Promise<ArchiveConversationDetail | null>;
+  listArchiveMessages(conversationId: string): Promise<ArchiveMessageSummary[]>;
+  getRevisionContent(id: string): Promise<{ text: string; thinking?: string } | null>;
+
+  // Diagnostic & Metrics operations
+  getArchiveSummary(): Promise<ArchiveSummary>;
+}
+

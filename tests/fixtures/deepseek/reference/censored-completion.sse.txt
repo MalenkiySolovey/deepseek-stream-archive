@@ -1,0 +1,8 @@
+data: {"p":"response/message_id","o":"SET","v":"msg_fix_003"}
+
+data: {"p":"response/fragments","o":"SET","v":[{"type":"THINK","content":"Private chain of thought before moderation."},{"type":"RESPONSE","content":"Original unredacted response text."}]}
+
+data: {"p":"response","o":"BATCH","v":[{"p":"fragments","o":"SET","v":[{"type":"TEMPLATE_RESPONSE","content":"Content moderation triggered."}]},{"p":"status","o":"SET","v":"CONTENT_FILTER"}]}
+
+data: [DONE]
+
