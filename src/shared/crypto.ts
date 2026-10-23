@@ -1,7 +1,7 @@
 /**
  * Cryptographic helpers for StreamArchive.
- * Provides standard, deterministic, synchronous SHA-256 hash calculation (FIPS 180-4 compliant).
- * Runs completely synchronously without worker threadpool delays or async queue inversions.
+ * Provides standard, deterministic SHA-256 calculation and canonical checkpoint serialization.
+ * Uses Web Crypto API (globalThis.crypto.subtle) with FIPS 180-4 standard pure JS fallback.
  */
 
 // Initial SHA-256 hash values (first 32 bits of the fractional parts of the square roots of the first 8 primes 2..19)
@@ -27,7 +27,6 @@ function rotr(x: number, n: number): number {
 }
 
 export function computeSha256Sync(data: string): string {
-  // Pure JavaScript FIPS 180-4 standard SHA-256
   const utf8Bytes: number[] = [];
   for (let i = 0; i < data.length; i++) {
     let charCode = data.charCodeAt(i);
@@ -60,7 +59,6 @@ export function computeSha256Sync(data: string): string {
     utf8Bytes.push(0x00);
   }
 
-  // Append 64-bit length (big-endian)
   const highBitLen = Math.floor(bitLength / 0x100000000);
   const lowBitLen = bitLength >>> 0;
   utf8Bytes.push(
@@ -139,43 +137,144 @@ export function computeSha256Sync(data: string): string {
 }
 
 export async function computeSha256(data: string): Promise<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (subtle && typeof subtle.digest === 'function') {
+    const encoder = new TextEncoder();
+    const hashBuf = await subtle.digest('SHA-256', encoder.encode(data));
+    const hashArray = Array.from(new Uint8Array(hashBuf));
+    return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
   return computeSha256Sync(data);
+}
+
+/**
+ * Deterministic JSON serialization ensuring stable property ordering for canonical fingerprinting.
+ * Arrays preserve their semantic order; object keys are sorted alphabetically.
+ */
+export function canonicalStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalStringify(item)).join(',')}]`;
+  }
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  const entries: string[] = [];
+  for (const k of keys) {
+    if (obj[k] !== undefined) {
+      entries.push(`${JSON.stringify(k)}:${canonicalStringify(obj[k])}`);
+    }
+  }
+  return `{${entries.join(',')}}`;
 }
 
 export interface CanonicalCheckpointFingerprintInput {
   streamKey: string;
   checkpointSeq: number;
-  conversationId?: string;
-  messageId: string;
-  messageStatus: string;
-  messageRemoteId?: string;
-  messageContentLength: number;
-  revisionFingerprints: string[];
-  recoveryEventIds: string[];
   isTerminal: boolean;
+  conversation?: {
+    id: string;
+    remoteId?: string;
+    title?: string;
+    createdAt?: number;
+    updatedAt?: number;
+  };
+  message: {
+    id: string;
+    conversationId: string;
+    remoteId?: string;
+    role: string;
+    status: string;
+    content?: string;
+    parentId?: string;
+    remoteParentId?: string;
+    identityState?: string;
+    createdAt?: number;
+    updatedAt?: number;
+  };
+  revisions: Array<{
+    id: string;
+    messageId: string;
+    revisionIndex: number;
+    text: string;
+    thinking?: string;
+    source: string;
+    capturedAt: number;
+    isFinal: boolean;
+    isLastGood: boolean;
+    contentFingerprint?: string;
+  }>;
+  recoveryEvents?: Array<{
+    id: string;
+    messageId: string;
+    kind: string;
+    detectedAt: number;
+    recoveredRevisionId?: string;
+    reason?: string;
+  }>;
 }
 
-export function computeCanonicalCheckpointFingerprintSync(
+export function serializeCanonicalCheckpointForFingerprint(
   input: CanonicalCheckpointFingerprintInput
 ): string {
   const normalized = {
     streamKey: input.streamKey,
     checkpointSeq: input.checkpointSeq,
-    conversationId: input.conversationId ?? null,
-    messageId: input.messageId,
-    messageStatus: input.messageStatus,
-    messageRemoteId: input.messageRemoteId ?? null,
-    messageContentLength: input.messageContentLength,
-    revisionFingerprints: [...input.revisionFingerprints].sort(),
-    recoveryEventIds: [...input.recoveryEventIds].sort(),
     isTerminal: Boolean(input.isTerminal),
+    conversation: input.conversation
+      ? {
+          id: input.conversation.id,
+          remoteId: input.conversation.remoteId ?? null,
+          title: input.conversation.title ?? null,
+        }
+      : null,
+    message: {
+      id: input.message.id,
+      conversationId: input.message.conversationId,
+      remoteId: input.message.remoteId ?? null,
+      role: input.message.role,
+      status: input.message.status,
+      content: input.message.content ?? null,
+      parentId: input.message.parentId ?? null,
+      remoteParentId: input.message.remoteParentId ?? null,
+      identityState: input.message.identityState ?? null,
+    },
+    revisions: input.revisions.map((r) => ({
+      id: r.id,
+      messageId: r.messageId,
+      revisionIndex: r.revisionIndex,
+      text: r.text,
+      thinking: r.thinking ?? null,
+      source: r.source,
+      capturedAt: r.capturedAt,
+      isFinal: Boolean(r.isFinal),
+      isLastGood: Boolean(r.isLastGood),
+      contentFingerprint: r.contentFingerprint ?? null,
+    })),
+    recoveryEvents: (input.recoveryEvents || []).map((e) => ({
+      id: e.id,
+      messageId: e.messageId,
+      kind: e.kind,
+      detectedAt: e.detectedAt,
+      recoveredRevisionId: e.recoveredRevisionId ?? null,
+      reason: e.reason ?? null,
+    })),
   };
-  const serialized = JSON.stringify(normalized);
+
+  return canonicalStringify(normalized);
+}
+
+export function computeCanonicalCheckpointFingerprintSync(
+  input: CanonicalCheckpointFingerprintInput
+): string {
+  const serialized = serializeCanonicalCheckpointForFingerprint(input);
   return computeSha256Sync(serialized);
 }
 
 export async function computeCanonicalCheckpointFingerprint(
   input: CanonicalCheckpointFingerprintInput
 ): Promise<string> {
-  return computeCanonicalCheckpointFingerprintSync(input);
+  const serialized = serializeCanonicalCheckpointForFingerprint(input);
+  return computeSha256(serialized);
 }

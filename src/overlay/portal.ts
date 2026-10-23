@@ -3,20 +3,35 @@ import { locateMessageAnchor } from '../adapters/deepseek/dom/message-locator';
 import type { PageRecoverySummary, PageRecoveryMessageSummary } from '../adapters/deepseek/dom/types';
 import {
   MESSAGE_GET_PAGE_RECOVERY_SUMMARY,
-  MESSAGE_GET_REVISION_CONTENT,
+  MESSAGE_GET_PAGE_RECOVERY_CONTENT,
   type GetPageRecoverySummaryRequest,
   type GetPageRecoverySummaryResponse,
-  type GetRevisionContentRequest,
-  type GetRevisionContentResponse,
+  type GetPageRecoveryContentRequest,
+  type GetPageRecoveryContentResponse,
 } from '../bridge/messages';
 import { extractSessionIdFromUrl } from '../adapters/deepseek/context/session-id';
 import { logger } from '../shared/logger';
 
+export interface OverlayContentResult {
+  text: string;
+  thinking?: string;
+  source?: string;
+  capturedAt?: number;
+  recoveryKind?: 'authoritative_recovery' | 'partial_capture';
+}
+
 export interface OverlayPortalOptions {
   mountTarget?: HTMLElement;
   fetchSummary?: (currentRouteSessionId?: string) => Promise<PageRecoverySummary | null>;
-  fetchContent?: (revisionId: string) => Promise<{ text: string; thinking?: string } | null>;
+  fetchContent?: (req: {
+    currentRouteSessionId: string;
+    messageId: string;
+    recoveryEventId?: string;
+  }) => Promise<OverlayContentResult | null>;
 }
+
+// Track elements created by our extension isolated world to reject spoofed page elements
+const OWNED_PORTAL_HOSTS = new WeakSet<HTMLElement>();
 
 export class StreamArchiveOverlayPortal {
   private rootHost: HTMLElement | null = null;
@@ -25,14 +40,22 @@ export class StreamArchiveOverlayPortal {
   private activeSummary: PageRecoverySummary | null = null;
   private dismissedMessageIds = new Set<string>();
   private activeModalMessageId: string | null = null;
-  private modalContentCache = new Map<string, { text: string; thinking?: string }>();
+  private modalContentCache = new Map<string, OverlayContentResult>();
   private currentUrl = '';
+  private currentSessionId: string | null = null;
+  private routeEpoch = 0;
   private pollInterval: ReturnType<typeof setInterval> | null = null;
   private repositionRaf: number | null = null;
+  private domMutationObserver: MutationObserver | null = null;
   private isDestroyed = false;
+  private isMounted = false;
 
   private readonly fetchSummaryImpl: (currentRouteSessionId?: string) => Promise<PageRecoverySummary | null>;
-  private readonly fetchContentImpl: (revisionId: string) => Promise<{ text: string; thinking?: string } | null>;
+  private readonly fetchContentImpl: (req: {
+    currentRouteSessionId: string;
+    messageId: string;
+    recoveryEventId?: string;
+  }) => Promise<OverlayContentResult | null>;
 
   constructor(options?: OverlayPortalOptions) {
     this.fetchSummaryImpl =
@@ -54,14 +77,16 @@ export class StreamArchiveOverlayPortal {
 
     this.fetchContentImpl =
       options?.fetchContent ||
-      (async (revisionId) => {
+      (async (req) => {
         try {
           const res = await chrome.runtime.sendMessage<
-            GetRevisionContentRequest,
-            GetRevisionContentResponse
+            GetPageRecoveryContentRequest,
+            GetPageRecoveryContentResponse
           >({
-            type: MESSAGE_GET_REVISION_CONTENT,
-            revisionId,
+            type: MESSAGE_GET_PAGE_RECOVERY_CONTENT,
+            currentRouteSessionId: req.currentRouteSessionId,
+            messageId: req.messageId,
+            recoveryEventId: req.recoveryEventId,
           });
           return res?.success && res.data ? res.data : null;
         } catch {
@@ -75,47 +100,71 @@ export class StreamArchiveOverlayPortal {
   private initPortal(customMount?: HTMLElement): void {
     if (typeof document === 'undefined') return;
 
+    // Handle document_start execution where documentElement might not yet exist
+    if (!document.documentElement && !customMount) {
+      const onReady = () => {
+        document.removeEventListener('DOMContentLoaded', onReady);
+        this.initPortal(customMount);
+      };
+      document.addEventListener('DOMContentLoaded', onReady);
+      return;
+    }
+
     const mountParent = customMount || document.documentElement;
     if (!mountParent) return;
 
-    // Check if host already exists
-    let existingHost = mountParent.querySelector<HTMLElement>(
-      'div[data-streamarchive-overlay-root]'
-    );
-    if (!existingHost) {
-      existingHost = document.createElement('div');
-      existingHost.setAttribute('data-streamarchive-overlay-root', 'true');
-      mountParent.appendChild(existingHost);
+    // Verify existing host element ownership to prevent using untrusted page-created spoof roots
+    const candidateHost = mountParent.querySelector<HTMLElement>('div[data-streamarchive-overlay-root]');
+    if (candidateHost) {
+      if (OWNED_PORTAL_HOSTS.has(candidateHost)) {
+        this.rootHost = candidateHost;
+      } else {
+        // Untrusted/spoofed element: remove it from DOM
+        try {
+          candidateHost.remove();
+        } catch {
+          // ignore
+        }
+      }
     }
-    this.rootHost = existingHost;
 
-    // Attach closed ShadowRoot for full style isolation
+    if (!this.rootHost) {
+      const host = document.createElement('div');
+      host.setAttribute('data-streamarchive-overlay-root', 'true');
+      OWNED_PORTAL_HOSTS.add(host);
+      mountParent.appendChild(host);
+      this.rootHost = host;
+    }
+
+    // Attach closed ShadowRoot for full DOM and CSS isolation
     try {
       this.shadow = this.rootHost.attachShadow({ mode: 'closed' });
     } catch {
       // In testing environments where attachShadow might already be called
-      this.shadow = (this.rootHost as any).shadowRoot || (this.rootHost as any);
+      this.shadow = (this.rootHost as any).shadowRoot || null;
     }
 
-    // Inject stylesheet
+    // Security invariant: If closed Shadow DOM attachment fails, NEVER fall back to light DOM!
+    if (!this.shadow) {
+      logger.error('Failed to attach closed ShadowRoot for recovery overlay; disabling overlay.');
+      return;
+    }
+
+    // Inject isolated stylesheet
     const styleEl = document.createElement('style');
     styleEl.textContent = OVERLAY_STYLES;
-    if (this.shadow) {
-      this.shadow.appendChild(styleEl);
-    }
+    this.shadow.appendChild(styleEl);
 
     // Root overlay container
     this.container = document.createElement('div');
     this.container.id = 'streamarchive-overlay-container';
-    if (this.shadow) {
-      this.shadow.appendChild(this.container);
-    }
+    this.shadow.appendChild(this.container);
 
-    // Initial check
+    this.isMounted = true;
     this.currentUrl = typeof window !== 'undefined' ? window.location.href : '';
     this.refreshSummary();
 
-    // Setup scroll / resize listeners for repositioning anchored badges
+    // Listeners for repositioning anchored badges upon scroll or resize
     if (typeof window !== 'undefined') {
       window.addEventListener('scroll', this.handleScrollOrResize, { passive: true });
       window.addEventListener('resize', this.handleScrollOrResize, { passive: true });
@@ -130,10 +179,25 @@ export class StreamArchiveOverlayPortal {
         }
       }, 1000);
     }
+
+    // Bounded debounced observer for DeepSeek virtualization rerenders
+    if (typeof MutationObserver !== 'undefined' && document.body) {
+      this.domMutationObserver = new MutationObserver(() => {
+        this.handleScrollOrResize();
+      });
+      this.domMutationObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+      });
+    }
+  }
+
+  getShadowRoot(): ShadowRoot | null {
+    return this.shadow;
   }
 
   private handleScrollOrResize = (): void => {
-    if (this.repositionRaf !== null || this.isDestroyed) return;
+    if (this.repositionRaf !== null || this.isDestroyed || !this.isMounted) return;
     this.repositionRaf = requestAnimationFrame(() => {
       this.repositionRaf = null;
       this.render();
@@ -141,16 +205,41 @@ export class StreamArchiveOverlayPortal {
   };
 
   async refreshSummary(): Promise<void> {
-    if (this.isDestroyed) return;
-    const routeSessionId = extractSessionIdFromUrl(this.currentUrl) || undefined;
+    if (this.isDestroyed || !this.isMounted) return;
+
+    if (typeof window !== 'undefined') {
+      this.currentUrl = window.location.href;
+    }
+
+    const currentEpoch = ++this.routeEpoch;
+    const routeSessionId = extractSessionIdFromUrl(this.currentUrl) || null;
+    this.currentSessionId = routeSessionId;
+
+    // Route-race invariant: On route change, immediately clear sensitive modal content & summary
+    this.activeModalMessageId = null;
+    this.modalContentCache.clear();
+    this.activeSummary = null;
+    this.render();
+
+    // If on homepage or route without session ID, never fetch summary or show overlay
+    if (!routeSessionId) {
+      return;
+    }
+
     const summary = await this.fetchSummaryImpl(routeSessionId);
     if (this.isDestroyed) return;
+
+    // Discard late response if route navigated away while request was in-flight
+    if (this.routeEpoch !== currentEpoch || this.currentSessionId !== routeSessionId) {
+      return;
+    }
+
     this.activeSummary = summary;
     this.render();
   }
 
   private render(): void {
-    if (!this.container || this.isDestroyed) return;
+    if (!this.container || this.isDestroyed || !this.isMounted) return;
 
     // Clear existing overlay nodes cleanly without innerHTML
     while (this.container.firstChild) {
@@ -184,7 +273,7 @@ export class StreamArchiveOverlayPortal {
       }
     }
 
-    // 2. Fallback: render Floating Recovery Tray for unanchored messages
+    // 2. Fallback: render Floating Recovery Tray for unanchored/virtualized messages
     if (unanchoredMessages.length > 0) {
       this.renderFloatingTray(unanchoredMessages);
     }
@@ -204,14 +293,15 @@ export class StreamArchiveOverlayPortal {
     msg: PageRecoveryMessageSummary,
     rect: DOMRect
   ): void {
+    const isAuthoritative = msg.recoveryKind === 'authoritative_recovery';
     const badge = document.createElement('div');
-    badge.className = `streamarchive-anchored-badge ${msg.status === 'filtered' ? 'filtered' : 'degraded'}`;
+    badge.className = `streamarchive-anchored-badge ${isAuthoritative ? 'filtered' : 'degraded'}`;
     badge.style.top = `${Math.max(10, rect.top - 32)}px`;
     badge.style.left = `${Math.max(10, rect.left + 12)}px`;
 
-    const icon = document.createTextNode(msg.status === 'filtered' ? '🛡️ ' : '⚠️ ');
+    const icon = document.createTextNode(isAuthoritative ? '🛡️ ' : '⚠️ ');
     const text = document.createTextNode(
-      msg.status === 'filtered' ? 'Recovered Pre-Filter Response' : 'Recovered Degraded Response'
+      isAuthoritative ? 'Recovered Pre-Filter Response' : 'Partial Captured Response'
     );
     badge.appendChild(icon);
     badge.appendChild(text);
@@ -250,15 +340,17 @@ export class StreamArchiveOverlayPortal {
     header.appendChild(closeBtn);
     tray.appendChild(header);
 
-    // List unanchored items
+    // List unanchored items (zero snippet/body text preview)
     for (const msg of messages) {
+      const isAuthoritative = msg.recoveryKind === 'authoritative_recovery';
       const item = document.createElement('div');
       item.className = 'streamarchive-tray-item';
 
       const desc = document.createElement('div');
       desc.className = 'streamarchive-item-desc';
-      const label = msg.status === 'filtered' ? '[Filtered] ' : '[Degraded] ';
-      desc.textContent = `${label}${msg.snippet || 'Click to view recovered content'}`;
+      const label = isAuthoritative ? '[Recovered Original] ' : '[Partial Capture] ';
+      const timeStr = msg.capturedAt ? new Date(msg.capturedAt).toLocaleTimeString() : '';
+      desc.textContent = `${label}Captured ${timeStr ? `at ${timeStr}` : 'before filter'}`;
       item.appendChild(desc);
 
       item.addEventListener('click', () => {
@@ -272,23 +364,33 @@ export class StreamArchiveOverlayPortal {
   }
 
   private async openRecoveryModal(messageId: string): Promise<void> {
+    const currentEpoch = this.routeEpoch;
+    const currentSession = this.currentSessionId;
     this.activeModalMessageId = messageId;
     this.render();
 
-    // Lazy load content if not cached
+    // Lazy load content on demand via dedicated endpoint if not cached
     if (!this.modalContentCache.has(messageId)) {
       const msg = this.activeSummary?.messages.find((m) => m.messageId === messageId);
-      if (msg?.recoveredRevisionId) {
-        const content = await this.fetchContentImpl(msg.recoveredRevisionId);
+      if (msg && currentSession) {
+        const content = await this.fetchContentImpl({
+          currentRouteSessionId: currentSession,
+          messageId: msg.messageId,
+          recoveryEventId: msg.recoveryEventId,
+        });
         if (content && !this.isDestroyed) {
-          this.modalContentCache.set(messageId, content);
-          this.render();
+          // Route-race invariant: Discard modal response if route navigated while fetching
+          if (this.routeEpoch === currentEpoch && this.currentSessionId === currentSession) {
+            this.modalContentCache.set(messageId, content);
+            this.render();
+          }
         }
       }
     }
   }
 
   private renderRecoveryModal(msg: PageRecoveryMessageSummary): void {
+    const isAuthoritative = msg.recoveryKind === 'authoritative_recovery';
     const backdrop = document.createElement('div');
     backdrop.className = 'streamarchive-recovery-backdrop';
     backdrop.addEventListener('click', (e) => {
@@ -306,9 +408,10 @@ export class StreamArchiveOverlayPortal {
     header.className = 'streamarchive-card-header';
 
     const statusBadge = document.createElement('span');
-    statusBadge.className = `streamarchive-card-status-badge ${msg.status === 'filtered' ? 'filtered' : 'degraded'}`;
-    statusBadge.textContent =
-      msg.status === 'filtered' ? '🛡️ Filtered (Pre-Filter Preserved)' : '⚠️ Interrupted / Degraded';
+    statusBadge.className = `streamarchive-card-status-badge ${isAuthoritative ? 'filtered' : 'degraded'}`;
+    statusBadge.textContent = isAuthoritative
+      ? '🛡️ Recovered Original (Pre-Filter Preserved)'
+      : '⚠️ Partial Captured Response';
     header.appendChild(statusBadge);
 
     const closeBtn = document.createElement('button');
@@ -333,7 +436,7 @@ export class StreamArchiveOverlayPortal {
       loading.style.color = '#8b949e';
       body.appendChild(loading);
     } else {
-      // Thinking details if present
+      // Thinking trace collapsed by default if present
       if (cached.thinking && cached.thinking.trim().length > 0) {
         const details = document.createElement('details');
         details.className = 'streamarchive-thinking-details';
@@ -351,21 +454,39 @@ export class StreamArchiveOverlayPortal {
         body.appendChild(details);
       }
 
-      // Safe Response Text (zero innerHTML, pre-wrap textContent)
+      // Safe response text (pure DOM element construction, zero innerHTML)
       const textDiv = document.createElement('div');
       textDiv.className = 'streamarchive-text-content';
       textDiv.textContent = cached.text || '(Empty response)';
       body.appendChild(textDiv);
     }
 
-    card.appendChild(body);
-
-    // Footer
+    // Actions Footer
     const footer = document.createElement('div');
     footer.className = 'streamarchive-card-footer';
 
+    if (cached) {
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'streamarchive-action-btn primary';
+      copyBtn.textContent = 'Copy Recovered Answer';
+      copyBtn.addEventListener('click', async () => {
+        try {
+          if (typeof navigator !== 'undefined' && navigator.clipboard) {
+            await navigator.clipboard.writeText(cached.text);
+            copyBtn.textContent = 'Copied!';
+            setTimeout(() => {
+              copyBtn.textContent = 'Copy Recovered Answer';
+            }, 2000);
+          }
+        } catch {
+          copyBtn.textContent = 'Failed to copy';
+        }
+      });
+      footer.appendChild(copyBtn);
+    }
+
     const dismissBtn = document.createElement('button');
-    dismissBtn.className = 'streamarchive-btn streamarchive-btn-dismiss';
+    dismissBtn.className = 'streamarchive-action-btn secondary';
     dismissBtn.textContent = 'Dismiss';
     dismissBtn.addEventListener('click', () => {
       this.dismissedMessageIds.add(msg.messageId);
@@ -374,34 +495,10 @@ export class StreamArchiveOverlayPortal {
     });
     footer.appendChild(dismissBtn);
 
-    const copyBtn = document.createElement('button');
-    copyBtn.className = 'streamarchive-btn streamarchive-btn-copy';
-    copyBtn.textContent = '📋 Copy Text';
-    copyBtn.addEventListener('click', async () => {
-      const textToCopy = cached?.text || '';
-      try {
-        if (typeof navigator !== 'undefined' && navigator.clipboard) {
-          await navigator.clipboard.writeText(textToCopy);
-          copyBtn.textContent = '✓ Copied!';
-          copyBtn.classList.add('copied');
-          setTimeout(() => {
-            copyBtn.textContent = '📋 Copy Text';
-            copyBtn.classList.remove('copied');
-          }, 2000);
-        }
-      } catch {
-        // fail-open
-      }
-    });
-    footer.appendChild(copyBtn);
-
+    card.appendChild(body);
     card.appendChild(footer);
     backdrop.appendChild(card);
     this.container?.appendChild(backdrop);
-  }
-
-  getShadowRoot(): ShadowRoot | null {
-    return this.shadow;
   }
 
   destroy(): void {
@@ -414,15 +511,22 @@ export class StreamArchiveOverlayPortal {
       cancelAnimationFrame(this.repositionRaf);
       this.repositionRaf = null;
     }
+    if (this.domMutationObserver) {
+      this.domMutationObserver.disconnect();
+      this.domMutationObserver = null;
+    }
     if (typeof window !== 'undefined') {
       window.removeEventListener('scroll', this.handleScrollOrResize);
       window.removeEventListener('resize', this.handleScrollOrResize);
     }
-    if (this.rootHost && this.rootHost.parentNode) {
-      this.rootHost.parentNode.removeChild(this.rootHost);
+    if (this.rootHost) {
+      OWNED_PORTAL_HOSTS.delete(this.rootHost);
+      this.rootHost.remove();
+      this.rootHost = null;
     }
-    this.rootHost = null;
     this.shadow = null;
     this.container = null;
+    this.activeSummary = null;
+    this.modalContentCache.clear();
   }
 }

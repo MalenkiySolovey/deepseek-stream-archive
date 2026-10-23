@@ -3,6 +3,18 @@
  * Read-only analysis without mutating or interacting with DeepSeek's DOM or React state.
  */
 
+export type DomCapabilityState =
+  | 'unsupported'
+  | 'assistant_nodes_detected'
+  | 'strong_identity_available'
+  | 'weak_only'
+  | 'degraded';
+
+export type DomIdentityAuthority =
+  | 'verified_message_id_attribute'
+  | 'verified_profile_specific_attribute'
+  | 'none';
+
 export interface DeepSeekDomProbeResult {
   chatContainerFound: boolean;
   messageNodesCount: number;
@@ -11,12 +23,15 @@ export interface DeepSeekDomProbeResult {
     containerSelector?: string;
     messageSelector?: string;
   };
+  domCapabilityState: DomCapabilityState;
+  identityAuthority: DomIdentityAuthority;
 }
 
 export interface LocatedMessageAnchor {
   remoteId: string;
   element: HTMLElement;
   rect: DOMRect;
+  authority: DomIdentityAuthority;
 }
 
 export interface PageRecoveryMessageSummary {
@@ -25,9 +40,10 @@ export interface PageRecoveryMessageSummary {
   role: string;
   status: string;
   hasLastGood: boolean;
-  snippet: string;
+  recoveryKind: 'authoritative_recovery' | 'partial_capture';
   capturedAt: number;
   recoveredRevisionId: string;
+  recoveryEventId?: string;
 }
 
 export interface PageRecoverySummary {

@@ -1,4 +1,4 @@
-import type { DeepSeekDomProbeResult } from './types';
+import type { DeepSeekDomProbeResult, DomCapabilityState, DomIdentityAuthority } from './types';
 import { normalizeRemoteId } from '../history/types';
 
 const CANDIDATE_CONTAINER_SELECTORS = [
@@ -30,6 +30,8 @@ export function probeDeepSeekDom(
       messageNodesCount: 0,
       identifiedMessageRemoteIds: [],
       observedSelectors: {},
+      domCapabilityState: 'unsupported',
+      identityAuthority: 'none',
     };
   }
 
@@ -49,6 +51,7 @@ export function probeDeepSeekDom(
   let matchedMessageSelector: string | undefined = undefined;
   const identifiedIds = new Set<string>();
   let totalMessageNodes = 0;
+  let hasVerifiedMessageIdAttr = false;
 
   for (const selector of CANDIDATE_MESSAGE_SELECTORS) {
     try {
@@ -59,15 +62,14 @@ export function probeDeepSeekDom(
 
         for (let i = 0; i < nodes.length; i++) {
           const node = nodes[i] as HTMLElement;
-          const rawId =
-            node.getAttribute('data-message-id') ||
-            node.getAttribute('data-id') ||
-            node.getAttribute('id') ||
-            undefined;
-
-          const normalized = normalizeRemoteId(rawId);
-          if (normalized) {
-            identifiedIds.add(normalized);
+          // Only authoritative data-message-id provides strong identity
+          const rawId = node.getAttribute('data-message-id');
+          if (rawId) {
+            const normalized = normalizeRemoteId(rawId);
+            if (normalized) {
+              identifiedIds.add(normalized);
+              hasVerifiedMessageIdAttr = true;
+            }
           }
         }
 
@@ -80,6 +82,20 @@ export function probeDeepSeekDom(
     }
   }
 
+  let domCapabilityState: DomCapabilityState = 'unsupported';
+  let identityAuthority: DomIdentityAuthority = 'none';
+
+  if (hasVerifiedMessageIdAttr && identifiedIds.size > 0) {
+    domCapabilityState = 'strong_identity_available';
+    identityAuthority = 'verified_message_id_attribute';
+  } else if (totalMessageNodes > 0) {
+    domCapabilityState = 'assistant_nodes_detected';
+    identityAuthority = 'none';
+  } else if (matchedContainerSelector) {
+    domCapabilityState = 'weak_only';
+    identityAuthority = 'none';
+  }
+
   return {
     chatContainerFound: Boolean(matchedContainerSelector),
     messageNodesCount: totalMessageNodes,
@@ -88,5 +104,7 @@ export function probeDeepSeekDom(
       containerSelector: matchedContainerSelector,
       messageSelector: matchedMessageSelector,
     },
+    domCapabilityState,
+    identityAuthority,
   };
 }

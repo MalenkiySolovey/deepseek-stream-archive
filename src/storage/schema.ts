@@ -1,5 +1,5 @@
 export const DB_NAME = 'StreamArchiveDB' as const;
-export const DB_VERSION = 6 as const;
+export const DB_VERSION = 7 as const;
 
 export const STORE_CONVERSATIONS = 'conversations' as const;
 export const STORE_MESSAGES = 'messages' as const;
@@ -9,6 +9,7 @@ export const STORE_RAW_STREAMS = 'raw_streams' as const;
 export const STORE_RAW_STREAM_BATCHES = 'raw_stream_batches' as const;
 export const STORE_CANONICAL_CHECKPOINTS = 'canonical_checkpoints' as const;
 export const STORE_HISTORY_STAGING = 'history_staging' as const;
+export const STORE_HISTORY_STAGING_MANIFESTS = 'history_staging_manifests' as const;
 
 export interface CanonicalStreamCheckpointRecord {
   streamKey: string;
@@ -25,6 +26,17 @@ export interface HistoryStagingBatchRecord {
   session?: import('../adapters/deepseek/history/types').NormalizedHistorySession;
   messages: import('../adapters/deepseek/history/types').NormalizedHistoryMessage[];
   createdAt: number;
+}
+
+export interface HistoryStagingManifestRecord {
+  stagingId: string;
+  sessionId: string;
+  expectedBatchCount: number;
+  expectedMessageCount: number;
+  receivedBatchCount: number;
+  state: 'open' | 'committing' | 'completed' | 'aborted';
+  createdAt: number;
+  updatedAt: number;
 }
 
 export function configureDatabaseSchema(db: IDBDatabase, tx?: IDBTransaction | null): void {
@@ -97,5 +109,13 @@ export function configureDatabaseSchema(db: IDBDatabase, tx?: IDBTransaction | n
     const stagingStore = db.createObjectStore(STORE_HISTORY_STAGING, { keyPath: 'id' });
     stagingStore.createIndex('stagingId', 'stagingId', { unique: false });
     stagingStore.createIndex('createdAt', 'createdAt', { unique: false });
+  }
+
+  // Store: history_staging_manifests (v7)
+  if (!db.objectStoreNames.contains(STORE_HISTORY_STAGING_MANIFESTS)) {
+    const manifestStore = db.createObjectStore(STORE_HISTORY_STAGING_MANIFESTS, { keyPath: 'stagingId' });
+    manifestStore.createIndex('sessionId', 'sessionId', { unique: false });
+    manifestStore.createIndex('state', 'state', { unique: false });
+    manifestStore.createIndex('createdAt', 'createdAt', { unique: false });
   }
 }

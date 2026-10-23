@@ -24,11 +24,13 @@ import {
   STORE_RECOVERY_EVENTS,
   STORE_CANONICAL_CHECKPOINTS,
   STORE_HISTORY_STAGING,
+  STORE_HISTORY_STAGING_MANIFESTS,
   type CanonicalStreamCheckpointRecord,
   type HistoryStagingBatchRecord,
+  type HistoryStagingManifestRecord,
 } from '../schema';
 import { openExtensionDatabase, createDurableWriteTransaction } from '../db';
-import { computeCanonicalCheckpointFingerprintSync } from '../../shared/crypto';
+import { computeCanonicalCheckpointFingerprint } from '../../shared/crypto';
 
 export class IndexedDbStorageRepository implements StorageRepository {
   constructor(private readonly idbFactory?: IDBFactory) {}
@@ -233,6 +235,17 @@ export class IndexedDbStorageRepository implements StorageRepository {
     return this.executeWrite(STORE_RECOVERY_EVENTS, (store) => store.put(event));
   }
 
+  async getRecoveryEvent(id: string): Promise<RecoveryEvent | null> {
+    const db = await this.getDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_RECOVERY_EVENTS, 'readonly');
+      const store = tx.objectStore(STORE_RECOVERY_EVENTS);
+      const req = store.get(id);
+      req.onsuccess = () => resolve((req.result as RecoveryEvent) || null);
+      req.onerror = () => reject(req.error || new Error('Failed to get recovery event'));
+    });
+  }
+
   async listRecoveryEvents(messageId?: string): Promise<RecoveryEvent[]> {
     const db = await this.getDb();
     return new Promise((resolve, reject) => {
@@ -256,19 +269,48 @@ export class IndexedDbStorageRepository implements StorageRepository {
   async saveCanonicalCheckpoint(data: CanonicalCheckpointData): Promise<void> {
     const fingerprint =
       data.checkpointSeq !== undefined
-        ? computeCanonicalCheckpointFingerprintSync({
+        ? await computeCanonicalCheckpointFingerprint({
             streamKey: data.streamKey,
             checkpointSeq: data.checkpointSeq,
-            conversationId: data.conversation?.id,
-            messageId: data.message.id,
-            messageStatus: data.message.status,
-            messageRemoteId: data.message.remoteId,
-            messageContentLength: data.message.content?.length ?? 0,
-            revisionFingerprints: data.revisions.map(
-              (r) => r.contentFingerprint || `${r.text}::${r.thinking || ''}`
-            ),
-            recoveryEventIds: (data.recoveryEvents || []).map((e) => e.id),
             isTerminal: Boolean(data.isTerminal),
+            conversation: data.conversation
+              ? {
+                  id: data.conversation.id,
+                  remoteId: data.conversation.remoteId,
+                  title: data.conversation.title,
+                }
+              : undefined,
+            message: {
+              id: data.message.id,
+              conversationId: data.message.conversationId,
+              remoteId: data.message.remoteId,
+              role: data.message.role,
+              status: data.message.status,
+              content: data.message.content,
+              parentId: data.message.parentId,
+              remoteParentId: data.message.remoteParentId,
+              identityState: data.message.identityState,
+            },
+            revisions: data.revisions.map((r) => ({
+              id: r.id,
+              messageId: r.messageId,
+              revisionIndex: r.revisionIndex,
+              text: r.text,
+              thinking: r.thinking,
+              source: r.source,
+              capturedAt: r.capturedAt,
+              isFinal: r.isFinal,
+              isLastGood: r.isLastGood,
+              contentFingerprint: r.contentFingerprint,
+            })),
+            recoveryEvents: (data.recoveryEvents || []).map((e) => ({
+              id: e.id,
+              messageId: e.messageId,
+              kind: e.kind,
+              detectedAt: e.detectedAt,
+              recoveredRevisionId: e.recoveredRevisionId,
+              reason: e.reason,
+            })),
           })
         : undefined;
 
@@ -413,7 +455,11 @@ export class IndexedDbStorageRepository implements StorageRepository {
             }
 
             if (seq < record.lastCommittedCheckpointSeq) {
-              // Stale out-of-order checkpoint, ignore without mutating
+              fail(
+                new Error(
+                  `stale_checkpoint: stream ${data.streamKey} received seq ${seq} below lastCommitted ${record.lastCommittedCheckpointSeq}`
+                )
+              );
               return;
             }
 
@@ -454,6 +500,56 @@ export class IndexedDbStorageRepository implements StorageRepository {
 
   // ── Atomic History Reconciliation Plan Persistence ──
 
+  private applyReconciliationPlanToStores(
+    plan: HistoryReconciliationPlan,
+    convStore: IDBObjectStore,
+    msgStore: IDBObjectStore,
+    revStore: IDBObjectStore,
+    fail: (err: Error) => void
+  ): void {
+  const convReq = convStore.get(plan.conversation.id);
+  convReq.onerror = () => fail(convReq.error || new Error('Failed to read conversation for reconciliation'));
+  convReq.onsuccess = () => {
+    const existingConv = convReq.result as Conversation | undefined;
+    if (existingConv) {
+      convStore.put({
+        ...plan.conversation,
+        title: plan.conversation.title || existingConv.title,
+        createdAt: existingConv.createdAt,
+        updatedAt: Math.max(existingConv.updatedAt, plan.conversation.updatedAt),
+      });
+    } else {
+      convStore.put(plan.conversation);
+    }
+  };
+
+  for (const incomingMsg of plan.messagesToPut) {
+    const msgReq = msgStore.get(incomingMsg.id);
+    msgReq.onerror = () => fail(msgReq.error || new Error(`Failed to read message ${incomingMsg.id} for reconciliation`));
+    msgReq.onsuccess = () => {
+      const existingMsg = msgReq.result as Message | undefined;
+      const merged = mergeCanonicalMessage(existingMsg, incomingMsg, 'history');
+      msgStore.put(merged);
+    };
+  }
+
+  for (const rev of plan.revisionsToPut) {
+    const revReq = revStore.get(rev.id);
+    revReq.onerror = () => fail(revReq.error || new Error(`Failed to check existing revision ${rev.id}`));
+    revReq.onsuccess = () => {
+      const existingRev = revReq.result as ResponseRevision | undefined;
+      if (existingRev) {
+        if (!isRevisionPayloadIdentical(existingRev, rev)) {
+          fail(new Error(`revision_conflict: cannot mutate existing revision ${rev.id}`));
+          return;
+        }
+      } else {
+        revStore.put(rev);
+      }
+    };
+  }
+}
+
   async applyHistoryReconciliationPlan(plan: HistoryReconciliationPlan): Promise<void> {
     const db = await this.getDb();
     return new Promise((resolve, reject) => {
@@ -486,47 +582,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
       const msgStore = tx.objectStore(STORE_MESSAGES);
       const revStore = tx.objectStore(STORE_REVISIONS);
 
-      const convReq = convStore.get(plan.conversation.id);
-      convReq.onerror = () => fail(convReq.error || new Error('Failed to read conversation for reconciliation'));
-      convReq.onsuccess = () => {
-        const existingConv = convReq.result as Conversation | undefined;
-        if (existingConv) {
-          convStore.put({
-            ...plan.conversation,
-            title: plan.conversation.title || existingConv.title,
-            createdAt: existingConv.createdAt,
-            updatedAt: Math.max(existingConv.updatedAt, plan.conversation.updatedAt),
-          });
-        } else {
-          convStore.put(plan.conversation);
-        }
-      };
-
-      for (const incomingMsg of plan.messagesToPut) {
-        const msgReq = msgStore.get(incomingMsg.id);
-        msgReq.onerror = () => fail(msgReq.error || new Error(`Failed to read message ${incomingMsg.id} for reconciliation`));
-        msgReq.onsuccess = () => {
-          const existingMsg = msgReq.result as Message | undefined;
-          const merged = mergeCanonicalMessage(existingMsg, incomingMsg, 'history');
-          msgStore.put(merged);
-        };
-      }
-
-      for (const rev of plan.revisionsToPut) {
-        const revReq = revStore.get(rev.id);
-        revReq.onerror = () => fail(revReq.error || new Error(`Failed to check existing revision ${rev.id}`));
-        revReq.onsuccess = () => {
-          const existingRev = revReq.result as ResponseRevision | undefined;
-          if (existingRev) {
-            if (!isRevisionPayloadIdentical(existingRev, rev)) {
-              fail(new Error(`revision_conflict: cannot mutate existing revision ${rev.id}`));
-              return;
-            }
-          } else {
-            revStore.put(rev);
-          }
-        };
-      }
+      this.applyReconciliationPlanToStores(plan, convStore, msgStore, revStore, fail);
     });
   }
 
@@ -632,8 +688,141 @@ export class IndexedDbStorageRepository implements StorageRepository {
 
   // ── History Staging Operations ──
 
+  async saveHistoryStagingManifest(manifest: HistoryStagingManifestRecord): Promise<void> {
+    const db = await this.getDb();
+    return new Promise((resolve, reject) => {
+      const tx = createDurableWriteTransaction(db, [STORE_HISTORY_STAGING_MANIFESTS], 'strict');
+      const store = tx.objectStore(STORE_HISTORY_STAGING_MANIFESTS);
+      const req = store.get(manifest.stagingId);
+      req.onerror = () => reject(req.error || new Error('Failed to check staging manifest'));
+      req.onsuccess = () => {
+        const existing = req.result as HistoryStagingManifestRecord | undefined;
+        if (existing) {
+          if (
+            existing.sessionId === manifest.sessionId &&
+            existing.expectedBatchCount === manifest.expectedBatchCount &&
+            existing.expectedMessageCount === manifest.expectedMessageCount
+          ) {
+            // Idempotent success
+            return;
+          }
+          reject(
+            new Error(
+              `history_staging_conflict: manifest ${manifest.stagingId} exists with different configuration`
+            )
+          );
+          return;
+        }
+        const recordToSave: HistoryStagingManifestRecord = {
+          ...manifest,
+          receivedBatchCount: manifest.receivedBatchCount ?? 0,
+        };
+        store.put(recordToSave);
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('Save history staging manifest tx failed'));
+      tx.onabort = () => reject(tx.error || new Error('Save history staging manifest tx aborted'));
+    });
+  }
+
+  async getHistoryStagingManifest(stagingId: string): Promise<HistoryStagingManifestRecord | null> {
+    const db = await this.getDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_HISTORY_STAGING_MANIFESTS, 'readonly');
+      const store = tx.objectStore(STORE_HISTORY_STAGING_MANIFESTS);
+      const req = store.get(stagingId);
+      req.onsuccess = () => resolve((req.result as HistoryStagingManifestRecord) || null);
+      req.onerror = () => reject(req.error || new Error('Failed to get staging manifest'));
+    });
+  }
+
   async saveHistoryStagingBatch(batch: HistoryStagingBatchRecord): Promise<void> {
-    return this.executeWrite(STORE_HISTORY_STAGING, (store) => store.put(batch));
+    const db = await this.getDb();
+    return new Promise((resolve, reject) => {
+      const tx = createDurableWriteTransaction(
+        db,
+        [STORE_HISTORY_STAGING, STORE_HISTORY_STAGING_MANIFESTS],
+        'strict'
+      );
+      let aborted = false;
+      const fail = (err: Error) => {
+        if (aborted) return;
+        aborted = true;
+        try {
+          tx.abort();
+        } catch {
+          // ignore
+        }
+        reject(err);
+      };
+
+      tx.onerror = () => {
+        if (!aborted) reject(tx.error || new Error('Save staging batch tx failed'));
+      };
+      tx.onabort = () => {
+        if (!aborted) reject(tx.error || new Error('Save staging batch tx aborted'));
+      };
+      tx.oncomplete = () => {
+        if (!aborted) resolve();
+      };
+
+      const manifestStore = tx.objectStore(STORE_HISTORY_STAGING_MANIFESTS);
+      const stagingStore = tx.objectStore(STORE_HISTORY_STAGING);
+
+      const mReq = manifestStore.get(batch.stagingId);
+      mReq.onerror = () => fail(mReq.error || new Error('Failed to read manifest for batch'));
+      mReq.onsuccess = () => {
+        const manifest = mReq.result as HistoryStagingManifestRecord | undefined;
+        if (!manifest) {
+          fail(new Error(`history_staging_missing: manifest not found for stagingId ${batch.stagingId}`));
+          return;
+        }
+        if (manifest.state !== 'open') {
+          fail(new Error(`history_staging_not_open: manifest in state ${manifest.state}`));
+          return;
+        }
+        if (batch.batchIndex < 0 || batch.batchIndex >= manifest.expectedBatchCount) {
+          fail(
+            new Error(
+              `history_batch_bounds: invalid batchIndex ${batch.batchIndex} (expected 0..${manifest.expectedBatchCount - 1})`
+            )
+          );
+          return;
+        }
+        if (batch.session && batch.session.sessionId !== manifest.sessionId) {
+          fail(
+            new Error(
+              `history_session_mismatch: batch session ${batch.session.sessionId} does not match manifest ${manifest.sessionId}`
+            )
+          );
+          return;
+        }
+
+        const bReq = stagingStore.get(batch.id);
+        bReq.onerror = () => fail(bReq.error || new Error('Failed to check existing batch'));
+        bReq.onsuccess = () => {
+          const existing = bReq.result as HistoryStagingBatchRecord | undefined;
+          if (existing) {
+            const isIdentical =
+              existing.stagingId === batch.stagingId &&
+              existing.batchIndex === batch.batchIndex &&
+              existing.messages.length === batch.messages.length &&
+              JSON.stringify(existing.messages) === JSON.stringify(batch.messages);
+            if (!isIdentical) {
+              fail(new Error(`history_batch_conflict: duplicate batch ${batch.id} with different payload`));
+              return;
+            }
+            // Idempotent re-ACK
+            return;
+          }
+
+          stagingStore.put(batch);
+          manifest.receivedBatchCount++;
+          manifest.updatedAt = Date.now();
+          manifestStore.put(manifest);
+        };
+      };
+    });
   }
 
   async listHistoryStagingBatches(stagingId: string): Promise<HistoryStagingBatchRecord[]> {
@@ -655,9 +844,17 @@ export class IndexedDbStorageRepository implements StorageRepository {
   async clearHistoryStaging(stagingId: string): Promise<void> {
     const db = await this.getDb();
     return new Promise((resolve, reject) => {
-      const tx = createDurableWriteTransaction(db, [STORE_HISTORY_STAGING], 'strict');
-      const store = tx.objectStore(STORE_HISTORY_STAGING);
-      const index = store.index('stagingId');
+      const tx = createDurableWriteTransaction(
+        db,
+        [STORE_HISTORY_STAGING, STORE_HISTORY_STAGING_MANIFESTS],
+        'strict'
+      );
+      const manifestStore = tx.objectStore(STORE_HISTORY_STAGING_MANIFESTS);
+      const stagingStore = tx.objectStore(STORE_HISTORY_STAGING);
+
+      manifestStore.delete(stagingId);
+
+      const index = stagingStore.index('stagingId');
       const keyRangeFactory =
         typeof IDBKeyRange !== 'undefined'
           ? IDBKeyRange
@@ -678,6 +875,52 @@ export class IndexedDbStorageRepository implements StorageRepository {
     });
   }
 
+  async cleanupStaleHistoryStaging(ttlMs = 24 * 60 * 60 * 1000): Promise<number> {
+    const db = await this.getDb();
+    const cutoff = Date.now() - ttlMs;
+    return new Promise((resolve, reject) => {
+      const tx = createDurableWriteTransaction(
+        db,
+        [STORE_HISTORY_STAGING, STORE_HISTORY_STAGING_MANIFESTS],
+        'strict'
+      );
+      const manifestStore = tx.objectStore(STORE_HISTORY_STAGING_MANIFESTS);
+      const stagingStore = tx.objectStore(STORE_HISTORY_STAGING);
+
+      let cleaned = 0;
+      const curReq = manifestStore.openCursor();
+      curReq.onsuccess = (e) => {
+        const cursor = (e.target as IDBRequest).result as IDBCursorWithValue | null;
+        if (cursor) {
+          const record = cursor.value as HistoryStagingManifestRecord;
+          if (record.createdAt < cutoff || record.state === 'aborted' || record.state === 'completed') {
+            const stagingId = record.stagingId;
+            cursor.delete();
+            cleaned++;
+
+            const bIndex = stagingStore.index('stagingId');
+            const keyRangeFactory =
+              typeof IDBKeyRange !== 'undefined'
+                ? IDBKeyRange
+                : (globalThis as any)?.IDBKeyRange;
+            const bReq = bIndex.openCursor(keyRangeFactory ? keyRangeFactory.only(stagingId) : null);
+            bReq.onsuccess = (be) => {
+              const bCursor = (be.target as IDBRequest).result as IDBCursorWithValue | null;
+              if (bCursor) {
+                bCursor.delete();
+                bCursor.continue();
+              }
+            };
+          }
+          cursor.continue();
+        }
+      };
+
+      tx.oncomplete = () => resolve(cleaned);
+      tx.onerror = () => reject(tx.error || new Error('Cleanup stale staging transaction failed'));
+    });
+  }
+
   async commitHistoryStagingPlan(
     stagingId: string,
     plan: HistoryReconciliationPlan
@@ -689,6 +932,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
         STORE_MESSAGES,
         STORE_REVISIONS,
         STORE_HISTORY_STAGING,
+        STORE_HISTORY_STAGING_MANIFESTS,
       ];
       const tx = createDurableWriteTransaction(db, stores, 'strict');
 
@@ -714,54 +958,87 @@ export class IndexedDbStorageRepository implements StorageRepository {
         if (!aborted) resolve();
       };
 
+      const manifestStore = tx.objectStore(STORE_HISTORY_STAGING_MANIFESTS);
+      const stagingStore = tx.objectStore(STORE_HISTORY_STAGING);
       const convStore = tx.objectStore(STORE_CONVERSATIONS);
       const msgStore = tx.objectStore(STORE_MESSAGES);
       const revStore = tx.objectStore(STORE_REVISIONS);
-      const stagingStore = tx.objectStore(STORE_HISTORY_STAGING);
 
-      // 1. Conversation upsert
-      const convReq = convStore.get(plan.conversation.id);
-      convReq.onerror = () => fail(convReq.error || new Error('Failed to read conversation'));
-      convReq.onsuccess = () => {
-        const existingConv = convReq.result as Conversation | undefined;
-        if (existingConv) {
-          convStore.put({
-            ...plan.conversation,
-            title: plan.conversation.title || existingConv.title,
-            createdAt: existingConv.createdAt,
-            updatedAt: Math.max(existingConv.updatedAt, plan.conversation.updatedAt),
-          });
-        } else {
-          convStore.put(plan.conversation);
+      const mReq = manifestStore.get(stagingId);
+      mReq.onerror = () => fail(mReq.error || new Error('Failed to read staging manifest on commit'));
+      mReq.onsuccess = () => {
+        const manifest = mReq.result as HistoryStagingManifestRecord | undefined;
+        if (!manifest) {
+          fail(new Error(`history_staging_missing: manifest not found for ${stagingId}`));
+          return;
         }
-      };
-
-      // 2. Messages put
-      for (const msg of plan.messagesToPut) {
-        msgStore.put(msg);
-      }
-
-      // 3. Revisions put
-      for (const rev of plan.revisionsToPut) {
-        revStore.put(rev);
-      }
-
-      // 4. Delete all staging records for stagingId
-      const stagingIndex = stagingStore.index('stagingId');
-      const keyRangeFactory =
-        typeof IDBKeyRange !== 'undefined'
-          ? IDBKeyRange
-          : (globalThis as any)?.IDBKeyRange;
-      const keyRange = keyRangeFactory ? keyRangeFactory.only(stagingId) : null;
-      const curReq = stagingIndex.openCursor(keyRange);
-      curReq.onsuccess = (e) => {
-        const cursor = (e.target as IDBRequest).result as IDBCursorWithValue | null;
-        if (cursor) {
-          cursor.delete();
-          cursor.continue();
+        if (manifest.state !== 'open') {
+          fail(new Error(`history_staging_not_open: staging state is ${manifest.state}`));
+          return;
         }
+        if (manifest.receivedBatchCount !== manifest.expectedBatchCount) {
+          fail(
+            new Error(
+              `history_staging_incomplete: received ${manifest.receivedBatchCount} of ${manifest.expectedBatchCount} batches`
+            )
+          );
+          return;
+        }
+
+        const stagingIndex = stagingStore.index('stagingId');
+        const keyRangeFactory =
+          typeof IDBKeyRange !== 'undefined'
+            ? IDBKeyRange
+            : (globalThis as any)?.IDBKeyRange;
+        const keyRange = keyRangeFactory ? keyRangeFactory.only(stagingId) : null;
+        const allReq = stagingIndex.getAll(keyRange);
+        allReq.onerror = () => fail(allReq.error || new Error('Failed to load batches for commit verification'));
+        allReq.onsuccess = () => {
+          const batches = (allReq.result as HistoryStagingBatchRecord[]) || [];
+          if (batches.length !== manifest.expectedBatchCount) {
+            fail(
+              new Error(
+                `history_staging_incomplete: expected ${manifest.expectedBatchCount} batches, found ${batches.length}`
+              )
+            );
+            return;
+          }
+
+          const indices = new Set(batches.map((b) => b.batchIndex));
+          for (let i = 0; i < manifest.expectedBatchCount; i++) {
+            if (!indices.has(i)) {
+              fail(new Error(`history_staging_incomplete: missing batch index ${i}`));
+              return;
+            }
+          }
+
+          const totalMessages = batches.reduce((acc, b) => acc + b.messages.length, 0);
+          if (totalMessages !== manifest.expectedMessageCount) {
+            fail(
+              new Error(
+                `history_staging_incomplete: expected ${manifest.expectedMessageCount} messages, found ${totalMessages}`
+              )
+            );
+            return;
+          }
+
+          // Apply reconciliation with full canonical invariants!
+          this.applyReconciliationPlanToStores(plan, convStore, msgStore, revStore, fail);
+
+          // Atomically delete manifest and all staging batches
+          manifestStore.delete(stagingId);
+
+          const curReq = stagingIndex.openCursor(keyRange);
+          curReq.onsuccess = (e) => {
+            const cursor = (e.target as IDBRequest).result as IDBCursorWithValue | null;
+            if (cursor) {
+              cursor.delete();
+              cursor.continue();
+            }
+          };
+          curReq.onerror = () => fail(curReq.error || new Error('Failed to delete staging records'));
+        };
       };
-      curReq.onerror = () => fail(curReq.error || new Error('Failed to delete staging records'));
     });
   }
 

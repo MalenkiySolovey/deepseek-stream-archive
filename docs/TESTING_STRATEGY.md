@@ -350,3 +350,53 @@ The automated regression corpus contains **318 tests across 48 test files (100% 
 
 3. **Schema Version 5 Migration (`tests/database-migration.test.ts`):**
    - Verifies automatic migration from schema v4 to schema v5, creating `STORE_CANONICAL_CHECKPOINTS = 'canonical_checkpoints'` with keyPath `streamKey` and index `updatedAt`.
+
+---
+
+## 16. Tier 14: Non-Destructive In-Page Recovery Overlay (Milestone 2D.2)
+
+1. **Overlay Portal Isolation (`tests/recovery-overlay-portal.test.ts`):**
+   - Verifies closed Shadow DOM attachment and scoped stylesheet containment.
+   - Proves zero DOM mutation of DeepSeek page container.
+   - Verifies strong identity badge anchoring when remote IDs are present.
+   - Verifies fallback floating tray rendering when DOM nodes are unanchored or virtualized.
+   - Verifies lazy loading of full recovery text on user click.
+
+2. **DOM Capability Probe & Message Locator (`tests/deepseek-dom-capability-probe.test.ts`):**
+   - Verifies non-destructive layout probing and safe message node targeting.
+   - Verifies fail-open handling when container or message elements are absent.
+
+---
+
+## 17. Tier 15: Trust Boundary, Durable Finalization & Live Readiness Gate (Milestone 2D.2.1)
+
+The automated regression corpus contains **348 tests across 52 test files (100% green)**:
+
+1. **Terminal Checkpoint Finalization & Retry Queue (`tests/canonical-checkpoint-integrity.test.ts`):**
+   - Verifies terminal checkpoint retry backoff survives coordinator disposal until terminal outcome (`committed` or `failed`).
+   - Verifies `awaitFinalPersistence()` resolves committed on ACK and failed on retry exhaustion.
+   - Verifies new semantic events arriving during retry backoff do not bypass the retry timer (`needsFollowup`).
+   - Verifies semantic SHA-256 fingerprint collision detection across all domain properties (parent ID, identity state, content byte variations with identical length, recovery reasons).
+   - Verifies rejection of stale sequence numbers (`seq < lastCommittedSeq`).
+
+2. **History Staging Manifest Integrity & Completeness Barrier (`tests/history-bounded-ingest.test.ts`):**
+   - Verifies manifest persistence prior to batch ingestion.
+   - Verifies duplicate open manifest idempotency and rejects configuration conflicts.
+   - Enforces strict completeness barrier: missing batch indices or count mismatches reject reconciliation commit (`history_staging_incomplete`).
+   - Verifies periodic stale staging cleanup (`cleanupStaleHistoryStaging`).
+
+3. **In-Page Privacy Boundary & Route-Race Isolation (`tests/recovery-overlay-portal.test.ts`):**
+   - Verifies zero summary queries on homepage or non-session routes.
+   - Verifies monotonic route epoch tokens immediately purge cached state and discard late async responses on navigation.
+   - Verifies complete removal of text snippets from summary payloads.
+   - Verifies dedicated `MESSAGE_GET_PAGE_RECOVERY_CONTENT` validates route session match, message membership, and `isLastGood === true` status.
+   - Verifies rejection of foreign or spoofed root elements and safe disablement if closed Shadow DOM attachment fails.
+
+4. **DOM Identity Hardening (`tests/deepseek-dom-capability-probe.test.ts`):**
+   - Verifies direct attribute comparison on verified `data-message-id` attributes without CSS string interpolation, eliminating selector injection vectors and generic selector false positives.
+
+5. **Schema Version 7 Migration (`tests/database-migration.test.ts`):**
+   - Verifies seamless multi-version migration preserving legacy data through v1..v6 and adding `STORE_HISTORY_STAGING_MANIFESTS` at `DB_VERSION = 7`.
+
+> [!IMPORTANT]
+> For instructions on executing real-world manual acceptance testing against live `chat.deepseek.com`, see the [Live Acceptance Testing Guide](./LIVE_ACCEPTANCE.md).

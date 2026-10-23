@@ -136,10 +136,9 @@ DeepSeek StreamArchive handles highly confidential user information: complete co
 |---|---|
 | `storage` | Storing user preferences, retention flags, and UI states in `chrome.storage.local`. |
 | `sidePanel` | Hosting the persistent archive viewer, search panel, and revision inspector. |
-| `scripting` | Declarative or programmatic injection of the minimal MAIN-world interceptor. |
 | `host_permissions: ["https://chat.deepseek.com/*"]` | Intercepting streaming responses on the DeepSeek web application and rendering non-destructive inline recovery badges. |
 
-StreamArchive requests **zero unnecessary permissions** (e.g. no `<all_urls>`, no `webRequestBlocking`, no `cookies`, no `history`).
+StreamArchive requests **zero unnecessary permissions** (e.g. no `scripting`, no `<all_urls>`, no `webRequest`, no `webRequestBlocking`, no `cookies`, no `tabs`, no `history`). Declarative content scripts with `"world": "MAIN"` eliminate the need for `scripting` permission.
 
 ---
 
@@ -153,4 +152,22 @@ StreamArchive requests **zero unnecessary permissions** (e.g. no `<all_urls>`, n
 3. **Strict Query Parameter Allowlisting:**
    - Candidate history endpoints are matched against exact origin (`https://chat.deepseek.com`) and pathname (`/api/v0/chat/history_messages`).
    - Query parameters are strictly filtered against an allowlist (`chat_session_id`, `cache_version`, `before_message_id`, etc.). Any unexpected query parameters, hashes, or fragments are discarded before forwarding.
+
+---
+
+## 8. In-Page Recovery Trust Boundaries & Route Isolation
+
+1. **Exact Route Session Boundary:**
+   - Background queries (`MESSAGE_GET_PAGE_RECOVERY_SUMMARY`) require an exact match with the active route session ID (`remoteId === routeSessionId`).
+   - Non-session routes (`/`, `/chat`, `/sign_in`) and homepage return null immediately, guaranteeing that recovery indicators from one conversation never leak into another.
+2. **Zero Snippet Leakage:**
+   - Page recovery summaries transfer only metadata (`messageId`, `remoteId`, `recoveryKind`, timestamps). Pre-filter text snippets are strictly forbidden from summary payloads.
+3. **Authoritative Recovery Validation:**
+   - Dedicated endpoint `MESSAGE_GET_PAGE_RECOVERY_CONTENT` validates that:
+     - The requested message belongs to the active conversation.
+     - A structured `RecoveryEvent` exists for the turn.
+     - The target revision is verified as `isLastGood === true`.
+4. **Closed Shadow DOM & Anti-Spoofing:**
+   - All recovery UI is mounted within `attachShadow({ mode: 'closed' })`. Page scripts have zero DOM query access to recovery cards or clipboard buttons.
+   - Unowned or spoofed root elements injected by page scripts are immediately evicted via `WeakSet` ownership tracking. If closed Shadow DOM attachment fails, the overlay disables itself safely rather than degrading to light DOM.
 

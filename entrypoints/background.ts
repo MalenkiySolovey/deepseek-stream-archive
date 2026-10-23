@@ -25,6 +25,7 @@ import {
   MESSAGE_HISTORY_INGEST_COMMIT,
   MESSAGE_HISTORY_INGEST_ABORT,
   MESSAGE_GET_PAGE_RECOVERY_SUMMARY,
+  MESSAGE_GET_PAGE_RECOVERY_CONTENT,
   type SaveSyntheticBatchRequest,
   type SaveSyntheticBatchResponse,
   type FoundationStatusResponse,
@@ -68,6 +69,7 @@ import {
   validateHistoryIngestCommitRequest,
   validateHistoryIngestAbortRequest,
   validateGetPageRecoverySummaryRequest,
+  validateGetPageRecoveryContentRequest,
 } from '../src/bridge/validation';
 import type { DeepSeekProtocolDiagnosticsData } from '../src/adapters/deepseek/protocol/types';
 import { DEFAULT_DEEPSEEK_PROFILE } from '../src/adapters/deepseek/compatibility/profiles';
@@ -77,6 +79,19 @@ import type { DeepSeekParsedHistory } from '../src/adapters/deepseek/history/typ
 import type { PageRecoverySummary, PageRecoveryMessageSummary } from '../src/adapters/deepseek/dom/types';
 import { logger } from '../src/shared/logger';
 
+
+export function isAuthorizedSender(sender: chrome.runtime.MessageSender): boolean {
+  const url = sender.url || sender.tab?.url;
+  if (!url) return true; // Direct internal extension calls, unit tests
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === 'chrome-extension:') return true;
+    if (parsed.origin === 'https://chat.deepseek.com') return true;
+  } catch {
+    return false;
+  }
+  return false;
+}
 
 const MAX_TRACKED_STREAMS = 100;
 
@@ -221,6 +236,11 @@ export default defineBackground(() => {
   // Handle incoming internal extension messages
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || typeof message !== 'object') return false;
+
+    if (!isAuthorizedSender(_sender)) {
+      sendResponse({ success: false, error: 'unauthorized_sender' });
+      return false;
+    }
 
     // 1. Bridge Observed Notification from Content Script
     if (message.type === MESSAGE_NOTIFY_BRIDGE_OBSERVED) {
@@ -626,9 +646,18 @@ export default defineBackground(() => {
       return true;
     }
 
-    // 12. Handle Forward History Observation from Content Script
+    // 12. Handle Forward History Observation from Content Script (Deprecated legacy path)
     if (message.type === MESSAGE_FORWARD_HISTORY_OBSERVATION) {
       const req = message as ForwardHistoryObservationRequest;
+      if (req.payload?.body && req.payload.body.length > 65536) {
+        logger.warn('[StreamArchive] Legacy history observation exceeds 64KB bound, rejected in favor of chunked staging');
+        sendResponse({
+          success: false,
+          error: 'legacy_unbounded_history_rejected: payload exceeds 64KB, use bounded chunked staging',
+        });
+        return false;
+      }
+
       const parsed = DeepSeekHistoryParser.parse(req.payload?.body, {
         expectedSessionId: req.payload?.sessionId,
         observedAt: req.payload?.timestamp,
@@ -688,7 +717,29 @@ export default defineBackground(() => {
         sendResponse({ success: false, stagingId: '', error: 'invalid_ingest_open_request' });
         return false;
       }
-      sendResponse({ success: true, stagingId: validated.stagingId });
+
+      (async () => {
+        try {
+          await storageRepo.cleanupStaleHistoryStaging();
+          await storageRepo.saveHistoryStagingManifest({
+            stagingId: validated.stagingId,
+            sessionId: validated.sessionId,
+            expectedBatchCount: validated.totalBatches,
+            expectedMessageCount: validated.totalMessages,
+            receivedBatchCount: 0,
+            state: 'open',
+            createdAt: validated.timestamp || Date.now(),
+            updatedAt: Date.now(),
+          });
+          sendResponse({ success: true, stagingId: validated.stagingId });
+        } catch (err) {
+          sendResponse({
+            success: false,
+            stagingId: validated.stagingId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      })();
       return true;
     }
 
@@ -1027,17 +1078,16 @@ export default defineBackground(() => {
       (async () => {
         try {
           const routeSessionId = validated.currentRouteSessionId;
-          let conv = routeSessionId ? await storageRepo.getConversationByRemoteId(routeSessionId) : null;
-          if (!conv && routeSessionId) {
-            conv = await storageRepo.getConversation(routeSessionId);
+          // Privacy invariant: Page overlay requires exact session match.
+          // Homepage (no session ID) or un-archived routes must return null. Never fall back to latest conversation!
+          if (!routeSessionId) {
+            sendResponse({ success: true, summary: null });
+            return;
           }
+
+          let conv = await storageRepo.getConversationByRemoteId(routeSessionId);
           if (!conv) {
-            // Find most recently updated conversation as fallback
-            const allConvs = await storageRepo.listConversations();
-            if (allConvs.length > 0) {
-              allConvs.sort((a, b) => b.updatedAt - a.updatedAt);
-              conv = allConvs[0]!;
-            }
+            conv = await storageRepo.getConversation(routeSessionId);
           }
 
           if (!conv) {
@@ -1049,36 +1099,57 @@ export default defineBackground(() => {
           const recoverable: PageRecoveryMessageSummary[] = [];
 
           for (const m of messages) {
-            const isFiltered = m.status === 'filtered';
-            const isDegraded =
+            // 1. Authoritative recovery check: message has a validated RecoveryEvent pointing to an isLastGood revision
+            const events = await storageRepo.listRecoveryEvents(m.id);
+            const authEvent = events.find((e) => e.recoveredRevisionId);
+
+            if (authEvent && authEvent.recoveredRevisionId) {
+              const rev = await storageRepo.getRevision(authEvent.recoveredRevisionId);
+              if (rev && rev.isLastGood) {
+                recoverable.push({
+                  messageId: m.id,
+                  remoteId: m.remoteId,
+                  role: m.role,
+                  status: m.status,
+                  hasLastGood: true,
+                  recoveryKind: 'authoritative_recovery',
+                  capturedAt: rev.capturedAt,
+                  recoveredRevisionId: rev.id,
+                  recoveryEventId: authEvent.id,
+                });
+                continue;
+              }
+            }
+
+            // 2. Partial network capture check: uncompleted/degraded messages with partial network revisions
+            const isInterrupted =
+              m.status === 'filtered' ||
               m.status === 'degraded' ||
               m.status === 'interrupted' ||
               m.status === 'incomplete';
 
-            const revs = await storageRepo.listRevisionsByMessage(m.id);
-            const lastGood = revs.find((r) => r.isLastGood);
-            const latestNetwork = [...revs]
-              .reverse()
-              .find(
-                (r) =>
-                  r.source === 'network' &&
-                  (r.text.length > 0 || (r.thinking && r.thinking.length > 0))
-              );
+            if (isInterrupted) {
+              const revs = await storageRepo.listRevisionsByMessage(m.id);
+              const latestNetwork = [...revs]
+                .reverse()
+                .find(
+                  (r) =>
+                    r.source === 'network' &&
+                    (r.text.length > 0 || (r.thinking && r.thinking.length > 0))
+                );
 
-            const recoveryRev =
-              lastGood || (isFiltered || isDegraded ? latestNetwork : undefined);
-
-            if (recoveryRev) {
-              recoverable.push({
-                messageId: m.id,
-                remoteId: m.remoteId,
-                role: m.role,
-                status: m.status,
-                hasLastGood: Boolean(lastGood),
-                snippet: (recoveryRev.text || recoveryRev.thinking || '').slice(0, 120),
-                capturedAt: recoveryRev.capturedAt,
-                recoveredRevisionId: recoveryRev.id,
-              });
+              if (latestNetwork) {
+                recoverable.push({
+                  messageId: m.id,
+                  remoteId: m.remoteId,
+                  role: m.role,
+                  status: m.status,
+                  hasLastGood: Boolean(latestNetwork.isLastGood),
+                  recoveryKind: 'partial_capture',
+                  capturedAt: latestNetwork.capturedAt,
+                  recoveredRevisionId: latestNetwork.id,
+                });
+              }
             }
           }
 
@@ -1095,6 +1166,86 @@ export default defineBackground(() => {
           sendResponse({
             success: false,
             summary: null,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      })();
+
+      return true;
+    }
+
+    // 17. Handle Dedicated Page Recovery Content Query
+    if (message.type === MESSAGE_GET_PAGE_RECOVERY_CONTENT) {
+      const validated = validateGetPageRecoveryContentRequest(message);
+      if (!validated) {
+        sendResponse({ success: false, data: null, error: 'invalid_recovery_content_request' });
+        return false;
+      }
+
+      (async () => {
+        try {
+          let conv = await storageRepo.getConversationByRemoteId(validated.currentRouteSessionId);
+          if (!conv) {
+            conv = await storageRepo.getConversation(validated.currentRouteSessionId);
+          }
+          if (!conv) {
+            sendResponse({ success: false, data: null, error: 'conversation_not_found' });
+            return;
+          }
+
+          const msg = await storageRepo.getMessage(validated.messageId);
+          if (!msg || msg.conversationId !== conv.id) {
+            sendResponse({ success: false, data: null, error: 'message_mismatch' });
+            return;
+          }
+
+          if (validated.recoveryEventId) {
+            const event = await storageRepo.getRecoveryEvent(validated.recoveryEventId);
+            if (!event || event.messageId !== msg.id || !event.recoveredRevisionId) {
+              sendResponse({ success: false, data: null, error: 'recovery_event_invalid' });
+              return;
+            }
+            const rev = await storageRepo.getRevision(event.recoveredRevisionId);
+            if (!rev || rev.messageId !== msg.id || !rev.isLastGood) {
+              sendResponse({ success: false, data: null, error: 'recovered_revision_invalid' });
+              return;
+            }
+            sendResponse({
+              success: true,
+              data: {
+                text: rev.text,
+                thinking: rev.thinking,
+                source: rev.source,
+                capturedAt: rev.capturedAt,
+                recoveryKind: 'authoritative_recovery',
+              },
+            });
+            return;
+          }
+
+          // Fallback for partial network capture
+          const revs = await storageRepo.listRevisionsByMessage(msg.id);
+          const netRev = [...revs].reverse().find((r) => r.source === 'network');
+          if (!netRev) {
+            sendResponse({ success: false, data: null, error: 'revision_not_found' });
+            return;
+          }
+
+          sendResponse({
+            success: true,
+            data: {
+              text: netRev.text,
+              thinking: netRev.thinking,
+              source: netRev.source,
+              capturedAt: netRev.capturedAt,
+              recoveryKind: 'partial_capture',
+            },
+          });
+        } catch (err) {
+          logger.error('Failed to get page recovery content', err);
+          sendResponse({
+            success: false,
+            data: null,
             error: err instanceof Error ? err.message : String(err),
           });
         }

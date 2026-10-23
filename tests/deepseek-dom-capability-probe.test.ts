@@ -72,4 +72,24 @@ describe('DeepSeek DOM Capability Probe & Safe Message Locator', () => {
     const missing = locateMessageAnchor('unknown-id', testRoot);
     expect(missing).toBeNull();
   });
+
+  it('rejects generic unverified selectors like id or data-id and prevents CSS injection attacks', () => {
+    // Generic elements that lack verified data-message-id attribute
+    const genericIdEl = document.createElement('div');
+    genericIdEl.id = 'msg-generic-1';
+    testRoot.appendChild(genericIdEl);
+
+    const genericDataIdEl = document.createElement('div');
+    genericDataIdEl.setAttribute('data-id', 'msg-generic-2');
+    testRoot.appendChild(genericDataIdEl);
+
+    // Neither generic ID nor data-id should be treated as authoritative anchor
+    expect(locateMessageAnchor('msg-generic-1', testRoot)).toBeNull();
+    expect(locateMessageAnchor('msg-generic-2', testRoot)).toBeNull();
+
+    // Malicious injection attempt in remoteId
+    const injectionPayload = '"><script>alert(1)</script><div [data-id]="';
+    expect(() => locateMessageAnchor(injectionPayload, testRoot)).not.toThrow();
+    expect(locateMessageAnchor(injectionPayload, testRoot)).toBeNull();
+  });
 });

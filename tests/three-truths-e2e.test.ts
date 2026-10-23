@@ -203,6 +203,8 @@ describe('Three Truths End-to-End Convergence', () => {
       terminalReason: 'filtered',
     });
 
+    await coordinator.awaitFinalPersistence(5000);
+
     // Verify Truth 2 in Canonical DB
     const liveConv = await storageRepo.getConversation(remoteSessionId);
     expect(liveConv).not.toBeNull();

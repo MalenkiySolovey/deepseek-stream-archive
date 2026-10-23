@@ -495,9 +495,14 @@ export default defineContentScript({
             // Flush and finalize canonical checkpoint sequentially before cleaning up session
             session.sendQueue = session.sendQueue.then(async () => {
               try {
-                await session.canonicalCoordinator.triggerCheckpoint(true);
+                const finalRes = await session.canonicalCoordinator.awaitFinalPersistence();
+                if (finalRes.state === 'failed') {
+                  logger.warn('Final canonical checkpoint failed after retry policy', finalRes);
+                  canonicalDurabilityGap = true;
+                }
               } catch (err) {
-                logger.warn('Failed to commit final canonical checkpoint', err);
+                logger.warn('Failed in awaitFinalPersistence', err);
+                canonicalDurabilityGap = true;
               } finally {
                 session.canonicalCoordinator.dispose();
               }
@@ -628,7 +633,10 @@ export default defineContentScript({
               totalMessages: messages.length,
               timestamp: histStream.startedAt,
             };
-            await chrome.runtime.sendMessage(openReq);
+            const openAck = await chrome.runtime.sendMessage(openReq);
+            if (!openAck?.success) {
+              throw new Error(`History staging OPEN failed: ${openAck?.error}`);
+            }
 
             // 2. Send bounded batches
             for (let b = 0; b < totalBatches; b++) {
@@ -641,7 +649,10 @@ export default defineContentScript({
                 session: b === 0 ? parsed.session : undefined,
                 messages: batchMessages,
               };
-              await chrome.runtime.sendMessage(batchReq);
+              const batchAck = await chrome.runtime.sendMessage(batchReq);
+              if (!batchAck?.success) {
+                throw new Error(`History staging BATCH ${b} failed: ${batchAck?.error}`);
+              }
             }
 
             // 3. Commit staging
@@ -649,7 +660,10 @@ export default defineContentScript({
               type: MESSAGE_HISTORY_INGEST_COMMIT,
               stagingId,
             };
-            await chrome.runtime.sendMessage(commitReq);
+            const commitAck = await chrome.runtime.sendMessage(commitReq);
+            if (!commitAck?.success) {
+              throw new Error(`History staging COMMIT failed: ${commitAck?.error}`);
+            }
             overlayPortal.refreshSummary().catch(() => {});
           } catch (err) {
             logger.warn('Error in bounded history staging transfer; aborting', err);
@@ -677,11 +691,16 @@ export default defineContentScript({
         return;
       }
 
-      // 4e. Handle Legacy Direct History Observation (backward compatibility)
+      // 4e. Handle Legacy Direct History Observation (Deprecated)
       if (envelope.type === 'history.observation') {
         const payload = validateHistoryObservationPayload(envelope.payload);
         if (!payload) {
           logger.warn('Bridge history payload rejected: invalid schema');
+          return;
+        }
+
+        if (payload.body && payload.body.length > 65536) {
+          logger.warn('[StreamArchive] Dropped legacy un-chunked history observation exceeding 64KB bound');
           return;
         }
 

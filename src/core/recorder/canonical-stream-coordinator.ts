@@ -27,6 +27,18 @@ export interface CanonicalCheckpointAck {
   error?: string;
 }
 
+export type FinalPersistenceResult =
+  | { state: 'committed'; checkpointSeq: number }
+  | { state: 'failed'; reason: string; checkpointSeq?: number };
+
+export type CoordinatorState =
+  | 'idle'
+  | 'sealed_pending'
+  | 'in_flight'
+  | 'backoff_wait'
+  | 'committed'
+  | 'failed';
+
 export interface CanonicalStreamCoordinatorConfig {
   producerSessionId: string;
   streamId: string;
@@ -41,6 +53,7 @@ export interface CanonicalStreamCoordinatorConfig {
 
 export interface CanonicalCoordinatorDiagnostics {
   streamKey: string;
+  state: CoordinatorState;
   lastAckedSeq: number;
   nextCheckpointSeq: number;
   hasPendingCheckpoint: boolean;
@@ -68,11 +81,12 @@ export class CanonicalStreamCoordinator {
   private readonly maxRetryAttempts: number;
 
   private readonly recorder: CanonicalRevisionRecorder;
+  private state: CoordinatorState = 'idle';
   private nextCheckpointSeq = 0;
   private pendingCheckpoint: SealedCanonicalCheckpoint | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
-  private inFlightCheckpoint: Promise<CanonicalCheckpointAck | null> | null = null;
+  private inFlightPromise: Promise<CanonicalCheckpointAck | null> | null = null;
   private lastAckedSeq = -1;
   private lastAckedRevisionCount = 0;
   private lastAckedRecoveryEventCount = 0;
@@ -81,9 +95,12 @@ export class CanonicalStreamCoordinator {
   private isDisposed = false;
   private initialConversationSent = false;
   private isTerminalLocked = false;
+  private isTerminalRequested = false;
   private isTerminalCommitted = false;
+  private needsFollowup = false;
   private retryAttempts = 0;
   private lastAttemptError?: string;
+  private readonly finalPersistenceWaiters: Array<(result: FinalPersistenceResult) => void> = [];
 
   constructor(config: CanonicalStreamCoordinatorConfig) {
     this.producerSessionId = config.producerSessionId;
@@ -131,9 +148,14 @@ export class CanonicalStreamCoordinator {
     return this.pendingCheckpoint !== null;
   }
 
+  getState(): CoordinatorState {
+    return this.state;
+  }
+
   getDiagnostics(): CanonicalCoordinatorDiagnostics {
     return {
       streamKey: this.rawStreamKey,
+      state: this.state,
       lastAckedSeq: this.lastAckedSeq,
       nextCheckpointSeq: this.nextCheckpointSeq,
       hasPendingCheckpoint: this.pendingCheckpoint !== null,
@@ -149,32 +171,41 @@ export class CanonicalStreamCoordinator {
   }
 
   feedSemanticEvent(event: DeepSeekSemanticEvent): void {
-    if (this.isDisposed || this.isTerminalLocked) return;
+    if (this.isDisposed || this.isTerminalCommitted || this.state === 'failed') return;
 
     this.recorder.feedSemanticEvent(event);
 
-    const isImmediate =
-      event.type === 'message_id_identified' ||
-      event.type === 'answer_replace' ||
-      event.type === 'thinking_replace' ||
-      event.type === 'filter_triggered' ||
+    const isTerminal =
       event.type === 'stream_finished' ||
       event.type === 'stream_transport_ended' ||
       event.type === 'stream_interrupted' ||
       event.type === 'stream_degraded' ||
       event.type === 'stream_error';
 
+    if (isTerminal) {
+      this.isTerminalRequested = true;
+      this.isTerminalLocked = true;
+    }
+
+    // Invariant: If a checkpoint is in-flight or waiting in backoff,
+    // do NOT issue an immediate send that bypasses the backoff schedule.
+    if (this.state === 'in_flight' || this.state === 'backoff_wait') {
+      this.needsFollowup = true;
+      return;
+    }
+
+    const isImmediate =
+      isTerminal ||
+      event.type === 'message_id_identified' ||
+      event.type === 'answer_replace' ||
+      event.type === 'thinking_replace' ||
+      event.type === 'filter_triggered';
+
     if (isImmediate) {
       if (this.debounceTimer) {
         clearTimeout(this.debounceTimer);
         this.debounceTimer = null;
       }
-      const isTerminal =
-        event.type === 'stream_finished' ||
-        event.type === 'stream_transport_ended' ||
-        event.type === 'stream_interrupted' ||
-        event.type === 'stream_degraded' ||
-        event.type === 'stream_error';
       this.triggerCheckpoint(isTerminal);
     } else if (this.recorder.shouldFlush()) {
       if (this.debounceTimer) {
@@ -188,7 +219,7 @@ export class CanonicalStreamCoordinator {
   }
 
   private scheduleDebounce(): void {
-    if (this.debounceTimer || this.isDisposed || this.isTerminalLocked) return;
+    if (this.debounceTimer || this.isDisposed || this.isTerminalLocked || this.state !== 'idle') return;
     this.debounceTimer = setTimeout(() => {
       this.debounceTimer = null;
       this.triggerCheckpoint(false);
@@ -200,6 +231,7 @@ export class CanonicalStreamCoordinator {
     if (this.isTerminalCommitted) return null;
 
     if (isFinal) {
+      this.isTerminalRequested = true;
       this.isTerminalLocked = true;
       if (this.debounceTimer) {
         clearTimeout(this.debounceTimer);
@@ -207,35 +239,84 @@ export class CanonicalStreamCoordinator {
       }
     }
 
-    if (this.inFlightCheckpoint) {
-      const queued = this.inFlightCheckpoint
-        .catch(() => null)
-        .then(() => this.executeCheckpoint(isFinal));
-      this.inFlightCheckpoint = queued;
-      return queued;
+    if (this.state === 'in_flight' || this.state === 'backoff_wait') {
+      this.needsFollowup = true;
+      return this.inFlightPromise;
     }
 
-    const current = this.executeCheckpoint(isFinal);
-    this.inFlightCheckpoint = current;
-    current.finally(() => {
-      if (this.inFlightCheckpoint === current) {
-        this.inFlightCheckpoint = null;
-      }
-    });
-    return current;
+    if (this.state === 'failed') {
+      return null;
+    }
+
+    return this.executeCheckpoint(isFinal || this.isTerminalRequested);
   }
 
-  async awaitFinalPersistence(): Promise<CanonicalCheckpointAck | null> {
+  async awaitFinalPersistence(timeoutMs = 35000): Promise<FinalPersistenceResult> {
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
-    return this.triggerCheckpoint(true);
+
+    this.isTerminalRequested = true;
+    this.isTerminalLocked = true;
+
+    if (this.isTerminalCommitted) {
+      return { state: 'committed', checkpointSeq: this.lastAckedSeq };
+    }
+
+    if (this.state === 'failed') {
+      return {
+        state: 'failed',
+        reason: this.lastAttemptError || 'retry_exhausted',
+        checkpointSeq: this.pendingCheckpoint?.checkpointSeq,
+      };
+    }
+
+    if (this.state === 'idle') {
+      this.executeCheckpoint(true).catch(() => {});
+    }
+
+    return new Promise<FinalPersistenceResult>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const waiter = (res: FinalPersistenceResult) => {
+        if (timer) clearTimeout(timer);
+        resolve(res);
+      };
+      this.finalPersistenceWaiters.push(waiter);
+
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          const idx = this.finalPersistenceWaiters.indexOf(waiter);
+          if (idx >= 0) {
+            this.finalPersistenceWaiters.splice(idx, 1);
+          }
+          resolve({
+            state: 'failed',
+            reason: 'await_final_persistence_timeout',
+            checkpointSeq: this.pendingCheckpoint?.checkpointSeq,
+          });
+        }, timeoutMs);
+      }
+    });
+  }
+
+  private resolveWaiters(result: FinalPersistenceResult): void {
+    const waiters = [...this.finalPersistenceWaiters];
+    this.finalPersistenceWaiters.length = 0;
+    for (const w of waiters) {
+      try {
+        w(result);
+      } catch {
+        // ignore waiter errors
+      }
+    }
   }
 
   private async executeCheckpoint(isFinal: boolean): Promise<CanonicalCheckpointAck | null> {
+    if (this.isTerminalCommitted) return null;
+
     // 1. If we already have a sealed pending checkpoint that failed previously,
-    // we MUST retry this exact sealed checkpoint without altering sequence or content.
+    // retry this exact sealed checkpoint without altering sequence or content.
     let sealedToDeliver = this.pendingCheckpoint;
 
     if (!sealedToDeliver) {
@@ -301,60 +382,82 @@ export class CanonicalStreamCoordinator {
       };
 
       this.pendingCheckpoint = sealedToDeliver;
+      this.state = 'sealed_pending';
+    } else if (isFinal && !sealedToDeliver.isFinal) {
+      // Elevate terminal flag if requested
+      sealedToDeliver.isFinal = true;
     }
 
+    this.state = 'in_flight';
     sealedToDeliver.attempts++;
 
-    try {
-      const ack = await this.onCheckpoint(sealedToDeliver);
+    const runPromise: Promise<CanonicalCheckpointAck | null> = (async () => {
+      try {
+        const ack = await this.onCheckpoint(sealedToDeliver!);
 
-      if (
-        ack &&
-        ack.success &&
-        ack.streamKey === this.rawStreamKey &&
-        ack.checkpointSeq === sealedToDeliver.checkpointSeq
-      ) {
-        // Successful ACK
-        this.lastAckedSeq = sealedToDeliver.checkpointSeq;
-        this.nextCheckpointSeq = sealedToDeliver.checkpointSeq + 1;
-        this.lastAckedRevisionCount += sealedToDeliver.revisions.length;
-        this.lastAckedRecoveryEventCount += sealedToDeliver.recoveryEvents.length;
-        this.lastAckedRemoteId = sealedToDeliver.message.remoteId;
-        this.lastAckedStatus = sealedToDeliver.message.status;
-        if (sealedToDeliver.conversation) {
-          this.initialConversationSent = true;
+        if (
+          ack &&
+          ack.success &&
+          ack.streamKey === this.rawStreamKey &&
+          ack.checkpointSeq === sealedToDeliver!.checkpointSeq
+        ) {
+          // Authoritative positive ACK
+          this.lastAckedSeq = sealedToDeliver!.checkpointSeq;
+          this.nextCheckpointSeq = sealedToDeliver!.checkpointSeq + 1;
+          this.lastAckedRevisionCount += sealedToDeliver!.revisions.length;
+          this.lastAckedRecoveryEventCount += sealedToDeliver!.recoveryEvents.length;
+          this.lastAckedRemoteId = sealedToDeliver!.message.remoteId;
+          this.lastAckedStatus = sealedToDeliver!.message.status;
+          if (sealedToDeliver!.conversation) {
+            this.initialConversationSent = true;
+          }
+
+          this.pendingCheckpoint = null;
+          this.retryAttempts = 0;
+          this.lastAttemptError = undefined;
+
+          if (this.retryTimer) {
+            clearTimeout(this.retryTimer);
+            this.retryTimer = null;
+          }
+
+          if (sealedToDeliver!.isFinal) {
+            this.isTerminalCommitted = true;
+            this.isTerminalLocked = true;
+            this.state = 'committed';
+            this.resolveWaiters({ state: 'committed', checkpointSeq: sealedToDeliver!.checkpointSeq });
+            return ack;
+          }
+
+          this.state = 'idle';
+
+          // If new semantic events or terminal was queued while sending, trigger next checkpoint
+          if (this.needsFollowup || this.isTerminalRequested) {
+            this.needsFollowup = false;
+            return this.executeCheckpoint(this.isTerminalRequested);
+          }
+
+          return ack;
+        } else {
+          const errorMsg = ack?.error || 'checkpoint_nack_or_mismatch';
+          this.handleDeliveryFailure(sealedToDeliver!, errorMsg);
+          return ack || null;
         }
-
-        if (sealedToDeliver.isFinal) {
-          this.isTerminalCommitted = true;
-          this.isTerminalLocked = true;
-        }
-
-        this.pendingCheckpoint = null;
-        this.retryAttempts = 0;
-        this.lastAttemptError = undefined;
-
-        if (this.retryTimer) {
-          clearTimeout(this.retryTimer);
-          this.retryTimer = null;
-        }
-
-        // If another flush or terminal was requested while this one was sending, trigger next checkpoint
-        if (isFinal && !sealedToDeliver.isFinal) {
-          return this.executeCheckpoint(true);
-        }
-
-        return ack;
-      } else {
-        const errorMsg = ack?.error || 'checkpoint_nack_or_mismatch';
-        this.handleDeliveryFailure(sealedToDeliver, errorMsg);
-        return ack || null;
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        this.handleDeliveryFailure(sealedToDeliver!, errorMsg);
+        return null;
       }
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      this.handleDeliveryFailure(sealedToDeliver, errorMsg);
-      return null;
-    }
+    })();
+
+    this.inFlightPromise = runPromise;
+    runPromise.finally(() => {
+      if (this.inFlightPromise === runPromise) {
+        this.inFlightPromise = null;
+      }
+    });
+
+    return runPromise;
   }
 
   private handleDeliveryFailure(checkpoint: SealedCanonicalCheckpoint, error: string): void {
@@ -375,30 +478,57 @@ export class CanonicalStreamCoordinator {
         seq: checkpoint.checkpointSeq,
         attempts: checkpoint.attempts,
       });
+      this.state = 'failed';
+      this.resolveWaiters({
+        state: 'failed',
+        reason: `max_retries_exhausted:${error}`,
+        checkpointSeq: checkpoint.checkpointSeq,
+      });
       return;
     }
 
-    if (!this.retryTimer && !this.isDisposed) {
+    this.state = 'backoff_wait';
+
+    const isTerminalPending = checkpoint.isFinal || this.isTerminalRequested;
+
+    if (!this.retryTimer && (!this.isDisposed || isTerminalPending)) {
       const delay =
         this.retryBackoffMs[
           Math.min(this.retryAttempts - 1, this.retryBackoffMs.length - 1)
         ] ?? 1000;
       this.retryTimer = setTimeout(() => {
         this.retryTimer = null;
-        this.triggerCheckpoint(checkpoint.isFinal || this.isTerminalLocked);
+        this.executeCheckpoint(checkpoint.isFinal || this.isTerminalRequested);
       }, delay);
     }
   }
 
   dispose(): void {
+    const isTerminalPending =
+      (this.isTerminalRequested || this.pendingCheckpoint?.isFinal) &&
+      !this.isTerminalCommitted &&
+      this.state !== 'failed';
+
     this.isDisposed = true;
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
-    if (this.retryTimer) {
-      clearTimeout(this.retryTimer);
-      this.retryTimer = null;
+
+    // Terminal invariant: Never destroy retry timer or abort waiters if a terminal checkpoint
+    // is in-flight or retrying! Let the retry backoff run to its committed or failed conclusion.
+    if (!isTerminalPending) {
+      if (this.retryTimer) {
+        clearTimeout(this.retryTimer);
+        this.retryTimer = null;
+      }
+      if (this.finalPersistenceWaiters.length > 0) {
+        this.resolveWaiters({
+          state: 'failed',
+          reason: 'coordinator_disposed',
+          checkpointSeq: this.pendingCheckpoint?.checkpointSeq,
+        });
+      }
     }
   }
 }

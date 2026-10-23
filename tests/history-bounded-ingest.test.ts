@@ -117,6 +117,18 @@ describe('History Bounded Streaming & Staging Store Lifecycle', () => {
         fragmentsCount: 2,
       };
 
+      // 0. Save Staging Manifest
+      await storageRepo.saveHistoryStagingManifest({
+        stagingId,
+        sessionId: session.sessionId,
+        expectedBatchCount: 2,
+        expectedMessageCount: 2,
+        receivedBatchCount: 0,
+        state: 'open',
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+
       // 1. Save Batch 0
       await storageRepo.saveHistoryStagingBatch({
         id: `${stagingId}:0`,
@@ -216,6 +228,17 @@ describe('History Bounded Streaming & Staging Store Lifecycle', () => {
     it('clears staging store when staging is aborted', async () => {
       const stagingId = 'stage-abort-test';
 
+      await storageRepo.saveHistoryStagingManifest({
+        stagingId,
+        sessionId: 'sess-abort',
+        expectedBatchCount: 1,
+        expectedMessageCount: 0,
+        receivedBatchCount: 0,
+        state: 'open',
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+
       await storageRepo.saveHistoryStagingBatch({
         id: `${stagingId}:0`,
         stagingId,
@@ -231,6 +254,130 @@ describe('History Bounded Streaming & Staging Store Lifecycle', () => {
 
       batches = await storageRepo.listHistoryStagingBatches(stagingId);
       expect(batches).toHaveLength(0);
+
+      const manifest = await storageRepo.getHistoryStagingManifest(stagingId);
+      expect(manifest).toBeNull();
+    });
+
+    it('handles idempotent manifest save and rejects manifest conflict with history_staging_conflict', async () => {
+      const stagingId = 'stage-conflict-test';
+
+      await storageRepo.saveHistoryStagingManifest({
+        stagingId,
+        sessionId: 'sess-conf',
+        expectedBatchCount: 2,
+        expectedMessageCount: 5,
+        receivedBatchCount: 0,
+        state: 'open',
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+
+      // Idempotent re-save of exact same manifest succeeds
+      await expect(
+        storageRepo.saveHistoryStagingManifest({
+          stagingId,
+          sessionId: 'sess-conf',
+          expectedBatchCount: 2,
+          expectedMessageCount: 5,
+          receivedBatchCount: 0,
+          state: 'open',
+          createdAt: 1000,
+          updatedAt: 1000,
+        })
+      ).resolves.toBeUndefined();
+
+      // Conflicting manifest with different expectedBatchCount rejects
+      await expect(
+        storageRepo.saveHistoryStagingManifest({
+          stagingId,
+          sessionId: 'sess-conf',
+          expectedBatchCount: 3, // Conflict!
+          expectedMessageCount: 5,
+          receivedBatchCount: 0,
+          state: 'open',
+          createdAt: 1000,
+          updatedAt: 1000,
+        })
+      ).rejects.toThrow('history_staging_conflict');
+    });
+
+    it('completeness barrier: rejects commit when received batches are incomplete', async () => {
+      const stagingId = 'stage-incomplete-test';
+
+      await storageRepo.saveHistoryStagingManifest({
+        stagingId,
+        sessionId: 'sess-incomp',
+        expectedBatchCount: 2,
+        expectedMessageCount: 2,
+        receivedBatchCount: 0,
+        state: 'open',
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+
+      // Save only 1 of 2 expected batches
+      await storageRepo.saveHistoryStagingBatch({
+        id: `${stagingId}:0`,
+        stagingId,
+        batchIndex: 0,
+        messages: [],
+        createdAt: 1000,
+      });
+
+      const plan: HistoryReconciliationPlan = {
+        conversation: {
+          id: 'conv-incomp',
+          remoteId: 'sess-incomp',
+          title: 'Incomplete Test',
+          createdAt: 1000,
+          updatedAt: 1000,
+        },
+        messagesToPut: [],
+        revisionsToPut: [],
+        treeLinksResolved: 0,
+      };
+
+      await expect(
+        storageRepo.commitHistoryStagingPlan(stagingId, plan)
+      ).rejects.toThrow('history_staging_incomplete: received 1 of 2 batches');
+    });
+
+    it('cleans up stale open staging sessions older than ttl', async () => {
+      const staleStagingId = 'stage-stale-cleanup';
+      const tenMinutesAgo = Date.now() - 600000;
+
+      await storageRepo.saveHistoryStagingManifest({
+        stagingId: staleStagingId,
+        sessionId: 'sess-stale',
+        expectedBatchCount: 1,
+        expectedMessageCount: 1,
+        receivedBatchCount: 0,
+        state: 'open',
+        createdAt: tenMinutesAgo,
+        updatedAt: tenMinutesAgo,
+      });
+
+      await storageRepo.saveHistoryStagingBatch({
+        id: `${staleStagingId}:0`,
+        stagingId: staleStagingId,
+        batchIndex: 0,
+        messages: [],
+        createdAt: tenMinutesAgo,
+      });
+
+      let batches = await storageRepo.listHistoryStagingBatches(staleStagingId);
+      expect(batches).toHaveLength(1);
+
+      // Clean up staging older than 5 minutes (300,000ms)
+      const cleaned = await storageRepo.cleanupStaleHistoryStaging(300000);
+      expect(cleaned).toBeGreaterThanOrEqual(1);
+
+      batches = await storageRepo.listHistoryStagingBatches(staleStagingId);
+      expect(batches).toHaveLength(0);
+
+      const manifest = await storageRepo.getHistoryStagingManifest(staleStagingId);
+      expect(manifest).toBeNull();
     });
   });
 });

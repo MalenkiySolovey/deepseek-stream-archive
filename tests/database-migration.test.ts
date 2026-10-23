@@ -12,6 +12,7 @@ import {
   STORE_RAW_STREAM_BATCHES,
   STORE_CANONICAL_CHECKPOINTS,
   STORE_HISTORY_STAGING,
+  STORE_HISTORY_STAGING_MANIFESTS,
 } from '../src/storage/schema';
 
 describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () => {
@@ -72,11 +73,11 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       openReq.onerror = () => reject(openReq.error);
     });
 
-    // 2. Open via openExtensionDatabase at DB_VERSION = 6
-    expect(DB_VERSION).toBe(6);
+    // 2. Open via openExtensionDatabase at DB_VERSION = 7
+    expect(DB_VERSION).toBe(7);
     const upgradedDb = await openExtensionDatabase(fakeFactory);
 
-    expect(upgradedDb.version).toBe(6);
+    expect(upgradedDb.version).toBe(7);
 
     // Verify v1 stores still exist
     expect(upgradedDb.objectStoreNames.contains(STORE_CONVERSATIONS)).toBe(true);
@@ -91,8 +92,9 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
     // Verify v5 store was added
     expect(upgradedDb.objectStoreNames.contains(STORE_CANONICAL_CHECKPOINTS)).toBe(true);
 
-    // Verify v6 store was added
+    // Verify v6 and v7 stores were added
     expect(upgradedDb.objectStoreNames.contains(STORE_HISTORY_STAGING)).toBe(true);
+    expect(upgradedDb.objectStoreNames.contains(STORE_HISTORY_STAGING_MANIFESTS)).toBe(true);
 
     // Verify indexes on messages including new v3 compound index and v4 identityState index
     const tx = upgradedDb.transaction(
@@ -189,9 +191,9 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       openReq.onerror = () => reject(openReq.error);
     });
 
-    // 2. Open via openExtensionDatabase at DB_VERSION = 6
+    // 2. Open via openExtensionDatabase at DB_VERSION = 7
     const upgradedDb = await openExtensionDatabase(fakeFactory);
-    expect(upgradedDb.version).toBe(6);
+    expect(upgradedDb.version).toBe(7);
 
     const tx = upgradedDb.transaction([STORE_MESSAGES, STORE_RAW_STREAMS], 'readonly');
     const msgStore = tx.objectStore(STORE_MESSAGES);
@@ -257,9 +259,9 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       openReq.onerror = () => reject(openReq.error);
     });
 
-    // 2. Open via openExtensionDatabase at DB_VERSION = 6
+    // 2. Open via openExtensionDatabase at DB_VERSION = 7
     const upgradedDb = await openExtensionDatabase(fakeFactory);
-    expect(upgradedDb.version).toBe(6);
+    expect(upgradedDb.version).toBe(7);
 
     const tx = upgradedDb.transaction(
       [STORE_MESSAGES, STORE_CANONICAL_CHECKPOINTS, STORE_HISTORY_STAGING],
@@ -315,11 +317,12 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       openReq.onerror = () => reject(openReq.error);
     });
 
-    // 2. Open via openExtensionDatabase at DB_VERSION = 6
+    // 2. Open via openExtensionDatabase at DB_VERSION = 7
     const upgradedDb = await openExtensionDatabase(fakeFactory);
-    expect(upgradedDb.version).toBe(6);
+    expect(upgradedDb.version).toBe(7);
 
     expect(upgradedDb.objectStoreNames.contains(STORE_HISTORY_STAGING)).toBe(true);
+    expect(upgradedDb.objectStoreNames.contains(STORE_HISTORY_STAGING_MANIFESTS)).toBe(true);
 
     const tx = upgradedDb.transaction([STORE_CANONICAL_CHECKPOINTS, STORE_HISTORY_STAGING], 'readonly');
     const cpStore = tx.objectStore(STORE_CANONICAL_CHECKPOINTS);
@@ -330,6 +333,63 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
         expect(cpReq.result).toBeDefined();
         expect(cpReq.result.lastCommittedCheckpointSeq).toBe(3);
         expect(cpReq.result.isTerminal).toBe(true);
+        resolve();
+      };
+      tx.onerror = () => reject(tx.error);
+    });
+  });
+
+  it('preserves existing v6 database and adds v7 history staging manifests store', async () => {
+    // 1. Initialize DB at version 6
+    await new Promise<void>((resolve, reject) => {
+      const openReq = fakeFactory.open(DB_NAME, 6);
+      openReq.onupgradeneeded = (e) => {
+        const db = (e.target as IDBOpenDBRequest).result;
+        db.createObjectStore(STORE_CONVERSATIONS, { keyPath: 'id' });
+        db.createObjectStore(STORE_MESSAGES, { keyPath: 'id' });
+        db.createObjectStore(STORE_REVISIONS, { keyPath: 'id' });
+        db.createObjectStore(STORE_RECOVERY_EVENTS, { keyPath: 'id' });
+        db.createObjectStore(STORE_RAW_STREAMS, { keyPath: 'id' });
+        db.createObjectStore(STORE_RAW_STREAM_BATCHES, { keyPath: 'id' });
+        db.createObjectStore(STORE_CANONICAL_CHECKPOINTS, { keyPath: 'streamKey' });
+        const stagingStore = db.createObjectStore(STORE_HISTORY_STAGING, { keyPath: 'id' });
+        stagingStore.createIndex('stagingId', 'stagingId', { unique: false });
+        stagingStore.createIndex('stagingId_batchIndex', ['stagingId', 'batchIndex'], { unique: true });
+      };
+      openReq.onsuccess = () => {
+        const db = openReq.result;
+        const tx = db.transaction([STORE_HISTORY_STAGING], 'readwrite');
+        tx.objectStore(STORE_HISTORY_STAGING).put({
+          id: 'v6-stage:0',
+          stagingId: 'v6-stage',
+          batchIndex: 0,
+          messages: [],
+          createdAt: 6000,
+        });
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+      };
+      openReq.onerror = () => reject(openReq.error);
+    });
+
+    // 2. Open via openExtensionDatabase at DB_VERSION = 7
+    const upgradedDb = await openExtensionDatabase(fakeFactory);
+    expect(upgradedDb.version).toBe(7);
+
+    expect(upgradedDb.objectStoreNames.contains(STORE_HISTORY_STAGING)).toBe(true);
+    expect(upgradedDb.objectStoreNames.contains(STORE_HISTORY_STAGING_MANIFESTS)).toBe(true);
+
+    const tx = upgradedDb.transaction([STORE_HISTORY_STAGING, STORE_HISTORY_STAGING_MANIFESTS], 'readonly');
+    const stageStore = tx.objectStore(STORE_HISTORY_STAGING);
+    const stageReq = stageStore.get('v6-stage:0');
+
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => {
+        expect(stageReq.result).toBeDefined();
+        expect(stageReq.result.stagingId).toBe('v6-stage');
         resolve();
       };
       tx.onerror = () => reject(tx.error);

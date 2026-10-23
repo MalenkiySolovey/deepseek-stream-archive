@@ -33,6 +33,7 @@ export const MESSAGE_HISTORY_INGEST_BATCH = 'STREAMARCHIVE_HISTORY_INGEST_BATCH'
 export const MESSAGE_HISTORY_INGEST_COMMIT = 'STREAMARCHIVE_HISTORY_INGEST_COMMIT' as const;
 export const MESSAGE_HISTORY_INGEST_ABORT = 'STREAMARCHIVE_HISTORY_INGEST_ABORT' as const;
 export const MESSAGE_GET_PAGE_RECOVERY_SUMMARY = 'STREAMARCHIVE_GET_PAGE_RECOVERY_SUMMARY' as const;
+export const MESSAGE_GET_PAGE_RECOVERY_CONTENT = 'STREAMARCHIVE_GET_PAGE_RECOVERY_CONTENT' as const;
 
 
 export type ObservationState = 'not_observed' | 'observed' | 'failed' | 'unsupported';
@@ -347,6 +348,25 @@ export interface GetPageRecoverySummaryResponse {
   error?: string;
 }
 
+export interface GetPageRecoveryContentRequest {
+  type: typeof MESSAGE_GET_PAGE_RECOVERY_CONTENT;
+  currentRouteSessionId: string;
+  messageId: string;
+  recoveryEventId?: string;
+}
+
+export interface GetPageRecoveryContentResponse {
+  success: boolean;
+  data?: {
+    text: string;
+    thinking?: string;
+    source: string;
+    capturedAt: number;
+    recoveryKind: 'authoritative_recovery' | 'partial_capture';
+  } | null;
+  error?: string;
+}
+
 export type ExtensionInternalMessage =
   | SaveSyntheticBatchRequest
   | GetFoundationStatusRequest
@@ -370,6 +390,7 @@ export type ExtensionInternalMessage =
   | HistoryIngestBatchRequest
   | HistoryIngestCommitRequest
   | HistoryIngestAbortRequest
-  | GetPageRecoverySummaryRequest;
+  | GetPageRecoverySummaryRequest
+  | GetPageRecoveryContentRequest;
 
 

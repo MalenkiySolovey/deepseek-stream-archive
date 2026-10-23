@@ -113,6 +113,7 @@ export interface StorageRepository {
 
   // Recovery event operations
   saveRecoveryEvent(event: RecoveryEvent): Promise<void>;
+  getRecoveryEvent(id: string): Promise<RecoveryEvent | null>;
   listRecoveryEvents(messageId?: string): Promise<RecoveryEvent[]>;
 
   // Atomic checkpoint, reconciliation & replay promotion operations
@@ -121,10 +122,13 @@ export interface StorageRepository {
   applyReplayPromotionPlan(plan: ReplayPromotionPlan): Promise<void>;
 
   // History Staging operations
+  saveHistoryStagingManifest(manifest: import('../../storage/schema').HistoryStagingManifestRecord): Promise<void>;
+  getHistoryStagingManifest(stagingId: string): Promise<import('../../storage/schema').HistoryStagingManifestRecord | null>;
   saveHistoryStagingBatch(batch: HistoryStagingBatchRecord): Promise<void>;
   listHistoryStagingBatches(stagingId: string): Promise<HistoryStagingBatchRecord[]>;
   commitHistoryStagingPlan(stagingId: string, plan: HistoryReconciliationPlan): Promise<void>;
   clearHistoryStaging(stagingId: string): Promise<void>;
+  cleanupStaleHistoryStaging(ttlMs?: number): Promise<number>;
 
   // Read-only Archive Browser queries
   listArchiveConversations(options?: { limit?: number; cursor?: string }): Promise<PaginatedArchiveConversations>;

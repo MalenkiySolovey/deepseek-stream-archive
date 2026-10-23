@@ -85,6 +85,13 @@ When DeepSeek returns history messages, the payload structure adheres to:
 - Bounded memory limits: max payload 25MB, max 1000 chunks.
 - In `src/transport/fetch/capture.ts`, cloned bodies are read using an incremental `TextDecoder` stream reader that aborts safely if the 25MB ceiling is exceeded.
 
+### History Staging Manifests & Completeness Barrier (Schema v7)
+- Multi-batch history streams are buffered in IndexedDB stores `history_staging` and `history_staging_manifests` (v7).
+- Ingest begins with `openHistoryStagingSession`, creating an immutable manifest with `expectedBatchCount` and `expectedMessageCount`.
+- Batches are validated against manifest bounds and session identity before writing.
+- `commitHistoryStagingPlan` requires `manifest.receivedBatchCount === manifest.expectedBatchCount`. If truncated or incomplete, the commit transaction is aborted and cleared.
+- Orphan staging data older than 5 minutes is purged automatically via `cleanupStaleHistoryStaging`.
+
 ### Background Concurrency Serialization
 - The background service worker queues incoming reconciliation requests per remote session ID using `historyQueuesBySessionId = new Map<string, Promise<void>>()`.
 - Prevents race conditions from simultaneous tab loads or rapid navigation.

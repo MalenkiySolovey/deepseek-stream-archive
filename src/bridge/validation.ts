@@ -920,4 +920,21 @@ export function validateGetPageRecoverySummaryRequest(
   };
 }
 
+export function validateGetPageRecoveryContentRequest(
+  raw: unknown
+): import('./messages').GetPageRecoveryContentRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_GET_PAGE_RECOVERY_CONTENT') return null;
+  if (typeof raw.currentRouteSessionId !== 'string' || !raw.currentRouteSessionId.trim()) return null;
+  if (typeof raw.messageId !== 'string' || !raw.messageId.trim()) return null;
+
+  return {
+    type: 'STREAMARCHIVE_GET_PAGE_RECOVERY_CONTENT',
+    currentRouteSessionId: raw.currentRouteSessionId.trim(),
+    messageId: raw.messageId.trim(),
+    recoveryEventId: typeof raw.recoveryEventId === 'string' && raw.recoveryEventId.trim() ? raw.recoveryEventId.trim() : undefined,
+  };
+}
+
+
 

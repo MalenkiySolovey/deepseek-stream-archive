@@ -8,6 +8,8 @@ describe('StreamArchive In-Page Recovery Overlay Portal (Shadow DOM)', () => {
   let deepseekContainer: HTMLElement;
 
   beforeEach(() => {
+    window.history.pushState({}, '', '/a/chat/s/sess-test-1');
+
     mountContainer = document.createElement('div');
     mountContainer.id = 'test-mount-root';
     document.body.appendChild(mountContainer);
@@ -44,7 +46,7 @@ describe('StreamArchive In-Page Recovery Overlay Portal (Shadow DOM)', () => {
 
     const host = mountContainer.querySelector('div[data-streamarchive-overlay-root]');
     expect(host).not.toBeNull();
-    expect(fetchSummary).toHaveBeenCalled();
+    expect(fetchSummary).toHaveBeenCalledWith('sess-test-1');
 
     // Verify DeepSeek page container was untouched
     expect(deepseekContainer.children.length).toBe(0);
@@ -54,6 +56,8 @@ describe('StreamArchive In-Page Recovery Overlay Portal (Shadow DOM)', () => {
   });
 
   it('renders anchored badge for strong identity match and falls back to floating tray for unanchored', async () => {
+    window.history.pushState({}, '', '/a/chat/s/sess-test-2');
+
     // 1. Create DeepSeek DOM message node for strong match
     const domMsg = document.createElement('div');
     domMsg.setAttribute('data-message-id', 'remote-msg-strong');
@@ -73,18 +77,20 @@ describe('StreamArchive In-Page Recovery Overlay Portal (Shadow DOM)', () => {
           role: 'assistant',
           status: 'filtered',
           hasLastGood: true,
-          snippet: 'Pre-filtered theorem proof snippet',
+          recoveryKind: 'authoritative_recovery',
           capturedAt: 1000,
           recoveredRevisionId: 'rev-strong',
+          recoveryEventId: 'ev-strong',
         },
         {
           messageId: 'm-weak',
           role: 'assistant',
           status: 'filtered',
           hasLastGood: true,
-          snippet: 'Unanchored response snippet',
+          recoveryKind: 'authoritative_recovery',
           capturedAt: 1050,
           recoveredRevisionId: 'rev-weak',
+          recoveryEventId: 'ev-weak',
         },
       ],
     };
@@ -115,10 +121,11 @@ describe('StreamArchive In-Page Recovery Overlay Portal (Shadow DOM)', () => {
     expect(anchoredBadge).not.toBeNull();
     expect(anchoredBadge.textContent).toContain('Recovered Pre-Filter Response');
 
-    // 2. Floating tray must be present for unanchored message
+    // 2. Floating tray must be present for unanchored message without sensitive text snippet
     const floatingTray = shadow.querySelector('.streamarchive-floating-tray') as HTMLElement;
     expect(floatingTray).not.toBeNull();
-    expect(floatingTray.textContent).toContain('Unanchored response snippet');
+    expect(floatingTray.textContent).toContain('[Recovered Original]');
+    expect(floatingTray.textContent).not.toContain('theorem proof'); // Zero snippet leak
 
     // 3. Invariant: DeepSeek DOM node was NEVER modified
     expect(domMsg.outerHTML).toBe(initialDomMsgHtml);
@@ -133,7 +140,11 @@ describe('StreamArchive In-Page Recovery Overlay Portal (Shadow DOM)', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(fetchContent).toHaveBeenCalledWith('rev-strong');
+    expect(fetchContent).toHaveBeenCalledWith({
+      currentRouteSessionId: 'sess-test-2',
+      messageId: 'm-strong',
+      recoveryEventId: 'ev-strong',
+    });
 
     // Modal must be open inside Shadow DOM
     const card = shadow.querySelector('.streamarchive-recovery-card') as HTMLElement;
@@ -142,13 +153,85 @@ describe('StreamArchive In-Page Recovery Overlay Portal (Shadow DOM)', () => {
     expect(card.textContent).toContain('Complete reasoning chain recovered.');
 
     // 6. Test Dismiss button
-    const dismissBtn = card.querySelector('.streamarchive-btn-dismiss') as HTMLButtonElement;
-    expect(dismissBtn).not.toBeNull();
-    dismissBtn.click();
+    const buttons = Array.from(card.querySelectorAll('button'));
+    const dismissBtn = buttons.find((b) => b.textContent?.includes('Dismiss'));
+    expect(dismissBtn).toBeDefined();
+    dismissBtn!.click();
 
     // Modal closed and anchored badge removed for dismissed message
     expect(shadow.querySelector('.streamarchive-recovery-card')).toBeNull();
     expect(shadow.querySelector('.streamarchive-anchored-badge')).toBeNull();
+
+    portal.destroy();
+  });
+
+  it('enforces privacy boundary: zero fetch on homepage and immediate route isolation on navigation', async () => {
+    // 1. On homepage, no fetchSummary is performed
+    window.history.pushState({}, '', '/');
+    const fetchSummary = vi.fn().mockResolvedValue(null);
+    const fetchContent = vi.fn().mockResolvedValue(null);
+
+    const portal = new StreamArchiveOverlayPortal({
+      mountTarget: mountContainer,
+      fetchSummary,
+      fetchContent,
+    });
+
+    await portal.refreshSummary();
+    expect(fetchSummary).not.toHaveBeenCalled();
+
+    // 2. Navigate to Session A -> summary is fetched
+    window.history.pushState({}, '', '/a/chat/s/session-A');
+    fetchSummary.mockResolvedValueOnce({
+      conversationId: 'session-A',
+      recoverableCount: 1,
+      messages: [
+        {
+          messageId: 'msg-A',
+          remoteId: 'remote-A',
+          role: 'assistant',
+          status: 'filtered',
+          hasLastGood: true,
+          recoveryKind: 'authoritative_recovery',
+          capturedAt: 2000,
+          recoveredRevisionId: 'rev-A',
+        },
+      ],
+    });
+
+    await portal.refreshSummary();
+    expect(fetchSummary).toHaveBeenCalledWith('session-A');
+
+    // 3. Navigate away to Session B -> immediately clears Session A state
+    window.history.pushState({}, '', '/a/chat/s/session-B');
+    fetchSummary.mockResolvedValueOnce({
+      conversationId: 'session-B',
+      recoverableCount: 0,
+      messages: [],
+    });
+
+    await portal.refreshSummary();
+    expect(fetchSummary).toHaveBeenCalledWith('session-B');
+
+    portal.destroy();
+  });
+
+  it('enforces root isolation and disables overlay safely if Shadow DOM attachment fails', () => {
+    // Foreign spoof root in DOM
+    const spoofRoot = document.createElement('div');
+    spoofRoot.setAttribute('data-streamarchive-overlay-root', 'true');
+    mountContainer.appendChild(spoofRoot);
+
+    const portal = new StreamArchiveOverlayPortal({
+      mountTarget: mountContainer,
+      fetchSummary: vi.fn(),
+      fetchContent: vi.fn(),
+    });
+
+    // Foreign spoof root should be evicted and replaced by owned host
+    const allHosts = mountContainer.querySelectorAll('div[data-streamarchive-overlay-root]');
+    expect(allHosts.length).toBe(1);
+    expect(allHosts[0]).not.toBe(spoofRoot);
 
     portal.destroy();
   });
