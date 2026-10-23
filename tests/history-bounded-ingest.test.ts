@@ -379,5 +379,126 @@ describe('History Bounded Streaming & Staging Store Lifecycle', () => {
       const manifest = await storageRepo.getHistoryStagingManifest(staleStagingId);
       expect(manifest).toBeNull();
     });
+
+    it('rejects duplicate batch with conflicting session metadata with history_staging_conflict', async () => {
+      const stagingId = 'stage-session-conf';
+
+      await storageRepo.saveHistoryStagingManifest({
+        stagingId,
+        sessionId: 'sess-match',
+        expectedBatchCount: 1,
+        expectedMessageCount: 1,
+        receivedBatchCount: 0,
+        state: 'open',
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+
+      // Batch 0 with session title A
+      await storageRepo.saveHistoryStagingBatch({
+        id: `${stagingId}:0`,
+        stagingId,
+        batchIndex: 0,
+        session: {
+          sessionId: 'sess-match',
+          title: 'Initial Title',
+          updatedAt: 1000,
+          pinned: false,
+        },
+        messages: [],
+        createdAt: 1000,
+      });
+
+      // Idempotent save with exact same session metadata succeeds
+      await expect(
+        storageRepo.saveHistoryStagingBatch({
+          id: `${stagingId}:0`,
+          stagingId,
+          batchIndex: 0,
+          session: {
+            sessionId: 'sess-match',
+            title: 'Initial Title',
+            updatedAt: 1000,
+            pinned: false,
+          },
+          messages: [],
+          createdAt: 1000,
+        })
+      ).resolves.toBeUndefined();
+
+      // Conflicting save with different session metadata rejects
+      await expect(
+        storageRepo.saveHistoryStagingBatch({
+          id: `${stagingId}:0`,
+          stagingId,
+          batchIndex: 0,
+          session: {
+            sessionId: 'sess-match',
+            title: 'DIFFERENT CONFLICTING TITLE',
+            updatedAt: 2000,
+            pinned: false,
+          },
+          messages: [],
+          createdAt: 1000,
+        })
+      ).rejects.toThrow('history_batch_conflict');
+    });
+
+    it('rejects plan when conversation remoteId does not match manifest sessionId (history_plan_session_mismatch)', async () => {
+      const stagingId = 'stage-mismatch-test';
+
+      await storageRepo.saveHistoryStagingManifest({
+        stagingId,
+        sessionId: 'sess-expected-authority',
+        expectedBatchCount: 1,
+        expectedMessageCount: 0,
+        receivedBatchCount: 0,
+        state: 'open',
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+
+      await storageRepo.saveHistoryStagingBatch({
+        id: `${stagingId}:0`,
+        stagingId,
+        batchIndex: 0,
+        messages: [],
+        createdAt: 1000,
+      });
+
+      // Plan has conflicting remoteId 'sess-unauthorized-wrong'
+      const plan: HistoryReconciliationPlan = {
+        conversation: {
+          id: 'conv-mismatch',
+          remoteId: 'sess-unauthorized-wrong',
+          title: 'Mismatched Remote ID',
+          createdAt: 1000,
+          updatedAt: 1000,
+        },
+        messagesToPut: [
+          {
+            id: 'msg-mismatch-1',
+            conversationId: 'conv-mismatch',
+            identityState: 'reconciled',
+            role: 'assistant',
+            status: 'finished',
+            createdAt: 1000,
+            updatedAt: 1000,
+          },
+        ],
+        revisionsToPut: [],
+        treeLinksResolved: 0,
+      };
+
+      await expect(
+        storageRepo.commitHistoryStagingPlan(stagingId, plan)
+      ).rejects.toThrow('history_plan_session_mismatch');
+
+      // Verify ZERO canonical mutations occurred in storage
+      const conv = await storageRepo.getConversation('conv-mismatch');
+      expect(conv).toBeNull();
+      const msgs = await storageRepo.listMessagesByConversation('conv-mismatch');
+      expect(msgs).toHaveLength(0);
+    });
   });
 });

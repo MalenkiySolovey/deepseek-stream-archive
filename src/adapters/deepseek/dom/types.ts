@@ -34,13 +34,19 @@ export interface LocatedMessageAnchor {
   authority: DomIdentityAuthority;
 }
 
+export type PageRecoveryPresentationKind =
+  | 'pre_filter_recovery'
+  | 'interruption_recovery'
+  | 'partial_capture';
+
 export interface PageRecoveryMessageSummary {
   messageId: string;
   remoteId?: string;
   role: string;
   status: string;
   hasLastGood: boolean;
-  recoveryKind: 'authoritative_recovery' | 'partial_capture';
+  recoveryKind: 'authoritative_recovery' | 'partial_capture' | PageRecoveryPresentationKind;
+  presentationKind?: PageRecoveryPresentationKind;
   capturedAt: number;
   recoveredRevisionId: string;
   recoveryEventId?: string;

@@ -68,6 +68,7 @@ describe('CanonicalStreamCoordinator', () => {
     });
 
     await Promise.resolve();
+    await Promise.resolve();
 
     expect(receivedCheckpoints).toHaveLength(2);
     expect(receivedCheckpoints[1]!.checkpointSeq).toBe(1);

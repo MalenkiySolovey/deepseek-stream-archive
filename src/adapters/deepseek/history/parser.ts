@@ -46,8 +46,8 @@ export class DeepSeekHistoryParser {
     if (parsed.code !== undefined && parsed.code !== 0) return null;
     if (parsed.data?.biz_code !== undefined && parsed.data.biz_code !== 0) return null;
 
-    // Extract biz_data from standard wrapper data.biz_data or direct biz_data
-    const bizData = parsed.data?.biz_data || parsed.biz_data || parsed;
+    // Extract biz_data from standard wrapper data.biz_data, direct data, or root
+    const bizData = parsed.data?.biz_data || parsed.biz_data || parsed.data || parsed;
     if (!bizData || typeof bizData !== 'object') return null;
 
     // 1. Session extraction

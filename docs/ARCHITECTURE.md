@@ -416,7 +416,8 @@ Manifest V3 Specification:
 - **Canonical Model & Passive History Reconciliation:** Canonical domain model (Conversation, Message, ResponseRevision, RecoveryEvent), last-good anti-recall invariant, pure passive history observation, two-pass parent resolution preserving sibling branches.
 - **Side Panel Archive Browser:** Svelte 5 runes UI, conversation list with search and pagination, branch switcher, collapsible thinking process, revision timeline drawer, safe Markdown rendering.
 - **Non-Destructive In-Page Recovery Overlay:** Closed Shadow DOM portal, DOM capability probe, anchored badge for strong identity matching, session-level floating recovery tray fallback, lazy content fetching, route epoch fencing, zero DOM mutation.
-- **Durable Checkpoint Delivery & Staging Store:** Sealed canonical checkpoints with terminal backoff retry surviving coordinator disposal, pre-transaction SHA-256 fingerprint validation, terminal checkpoint locking, and bounded multi-batch history staging with completeness manifests (schema v7 `STORE_HISTORY_STAGING`, `STORE_HISTORY_STAGING_MANIFESTS`).
+- **Durable Checkpoint Delivery & Staging Store:** Sealed immutable canonical checkpoints with terminal backoff retry surviving coordinator disposal, monotonic lost-ACK handling, pre-transaction Web Crypto SHA-256 fingerprint validation, terminal checkpoint locking, and bounded multi-batch history staging with completeness manifests and session remoteId validation (schema v7 `STORE_HISTORY_STAGING`, `STORE_HISTORY_STAGING_MANIFESTS`).
+- **Browser Compatibility Gate:** Playwright Chromium MV3 end-to-end regression harness verifying all streaming, recovery overlay, and reconciliation invariants against synthetic offline fixtures without external network traffic.
 
 ### Scope Boundaries:
 1. **Zero DOM Pollution by Default:** Clean passive observation without modifying page responses.

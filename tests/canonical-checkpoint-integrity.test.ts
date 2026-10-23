@@ -24,7 +24,9 @@ describe('Canonical Checkpoint Delivery Integrity & Terminal Locking', () => {
 
   describe('CanonicalStreamCoordinator: Sealed Checkpoint & Retry Queue', () => {
     beforeEach(() => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({
+        toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+      });
     });
 
     afterEach(() => {
@@ -312,9 +314,289 @@ describe('Canonical Checkpoint Delivery Integrity & Terminal Locking', () => {
 
       coordinator.dispose();
     });
-  });
 
-  describe('StorageRepository: Durable Fingerprints & Conflict Rejection', () => {
+    it('handles lost-ACK on non-terminal checkpoint when terminal event arrives during backoff: idempotently ACKs seq 0 then emits seq 1 terminal', async () => {
+      let simulateLostAck = true;
+      const sentCheckpoints: CanonicalCheckpointDto[] = [];
+      const repoAcks: CanonicalCheckpointAck[] = [];
+
+      const coordinator = new CanonicalStreamCoordinator({
+        producerSessionId: 'prod-lost-ack',
+        streamId: 'stream-lost-ack',
+        provisionalSessionId: 'conv-lost-ack',
+        retryBackoffMs: [100],
+        debounceMs: 50,
+        onCheckpoint: async (cp) => {
+          sentCheckpoints.push(JSON.parse(JSON.stringify(cp)));
+          try {
+            await storageRepo.saveCanonicalCheckpoint(cp);
+          } catch (err: any) {
+            const nack: CanonicalCheckpointAck = {
+              success: false,
+              streamKey: cp.streamKey,
+              checkpointSeq: cp.checkpointSeq,
+              error: err?.message || 'save_failed',
+            };
+            repoAcks.push(nack);
+            return nack;
+          }
+          const positiveAck: CanonicalCheckpointAck = {
+            success: true,
+            streamKey: cp.streamKey,
+            checkpointSeq: cp.checkpointSeq,
+            persistedAt: Date.now(),
+          };
+          repoAcks.push(positiveAck);
+          if (cp.checkpointSeq === 0 && simulateLostAck) {
+            simulateLostAck = false;
+            // Repository committed seq 0, but network dropped the ACK to coordinator!
+            return {
+              success: false,
+              streamKey: cp.streamKey,
+              checkpointSeq: cp.checkpointSeq,
+              error: 'simulated_network_ack_loss',
+            };
+          }
+          return positiveAck;
+        },
+      });
+
+      // 1. Non-terminal delta event
+      coordinator.feedSemanticEvent({
+        streamId: 'stream-lost-ack',
+        sequence: 1,
+        timestamp: 100,
+        type: 'answer_delta',
+        delta: 'Chunk 1 before terminal',
+      });
+
+      // Flush debounce timer -> triggers seq 0
+      await vi.advanceTimersByTimeAsync(60);
+      await vi.waitFor(() => {
+        expect(repoAcks).toHaveLength(1);
+      });
+
+      // Verify Attempt 1 of seq 0 was delivered to repo
+      expect(sentCheckpoints).toHaveLength(1);
+      expect(sentCheckpoints[0]!.checkpointSeq).toBe(0);
+      expect(sentCheckpoints[0]!.isFinal).toBe(false);
+      // Repo committed seq 0
+      expect(repoAcks).toHaveLength(1);
+      expect(repoAcks[0]!.success).toBe(true);
+
+      // Coordinator received failure (simulated lost ACK) and entered backoff_wait (100ms)
+      expect(coordinator.getState()).toBe('backoff_wait');
+
+      // 2. Terminal event arrives during backoff!
+      coordinator.feedSemanticEvent({
+        streamId: 'stream-lost-ack',
+        sequence: 2,
+        timestamp: 120,
+        type: 'stream_finished',
+        terminalReason: 'completed',
+      });
+
+      const outcomePromise = coordinator.awaitFinalPersistence(5000);
+
+      // Advance timers to trigger backoff retry of seq 0 and subsequent followup
+      await vi.advanceTimersByTimeAsync(150);
+
+      const outcome = await outcomePromise;
+      expect(outcome.state).toBe('committed');
+
+      // Checkpoints delivered:
+      // [0] seq 0 (isFinal=false, attempt 1 - committed in repo, ACK lost)
+      // [1] seq 0 (isFinal=false, attempt 2 - MUST be identical payload, idempotent ACK!)
+      // [2] seq 1 (isFinal=true - emitted AFTER seq 0 ACKed, containing terminal state)
+      expect(sentCheckpoints.length).toBeGreaterThanOrEqual(3);
+      expect(sentCheckpoints[1]!.checkpointSeq).toBe(0);
+      expect(sentCheckpoints[1]!.isFinal).toBe(false); // MUST NOT BE MUTATED TO TRUE!
+
+      expect(sentCheckpoints[2]!.checkpointSeq).toBe(1);
+      expect(sentCheckpoints[2]!.isFinal).toBe(true);
+
+      // Repository state assertions
+      const streamState = await storageRepo.getCanonicalCheckpoint('prod-lost-ack:stream-lost-ack');
+      expect(streamState).not.toBeNull();
+      expect(streamState!.lastCommittedCheckpointSeq).toBe(1);
+      expect(streamState!.isTerminal).toBe(true);
+
+      coordinator.dispose();
+    });
+
+    it('handles terminal event arriving while non-terminal checkpoint is in-flight: completes seq 0 then emits seq 1 terminal', async () => {
+      let resolveInFlightSeq0: ((ack: CanonicalCheckpointAck) => void) | null = null;
+      const sentCheckpoints: CanonicalCheckpointDto[] = [];
+
+      const coordinator = new CanonicalStreamCoordinator({
+        producerSessionId: 'prod-inflight-term',
+        streamId: 'stream-inflight-term',
+        debounceMs: 50,
+        onCheckpoint: async (cp) => {
+          sentCheckpoints.push(JSON.parse(JSON.stringify(cp)));
+          if (cp.checkpointSeq === 0 && !resolveInFlightSeq0) {
+            return new Promise<CanonicalCheckpointAck>((resolve) => {
+              resolveInFlightSeq0 = resolve;
+            });
+          }
+          return {
+            success: true,
+            streamKey: cp.streamKey,
+            checkpointSeq: cp.checkpointSeq,
+            persistedAt: Date.now(),
+          };
+        },
+      });
+
+      // 1. Non-terminal event
+      coordinator.feedSemanticEvent({
+        streamId: 'stream-inflight-term',
+        sequence: 1,
+        timestamp: 100,
+        type: 'answer_delta',
+        delta: 'In-flight delta',
+      });
+
+      // Advance debounce to put seq 0 in-flight
+      await vi.advanceTimersByTimeAsync(60);
+      expect(sentCheckpoints).toHaveLength(1);
+      expect(sentCheckpoints[0]!.checkpointSeq).toBe(0);
+      expect(sentCheckpoints[0]!.isFinal).toBe(false);
+      expect(coordinator.getState()).toBe('in_flight');
+
+      // 2. Terminal event arrives while seq 0 is in-flight!
+      coordinator.feedSemanticEvent({
+        streamId: 'stream-inflight-term',
+        sequence: 2,
+        timestamp: 120,
+        type: 'stream_finished',
+        terminalReason: 'completed',
+      });
+
+      // Seq 0 must NOT have mutated in-flight
+      expect(sentCheckpoints[0]!.isFinal).toBe(false);
+
+      // Now resolve in-flight seq 0
+      resolveInFlightSeq0!({
+        success: true,
+        streamKey: 'prod-inflight-term:stream-inflight-term',
+        checkpointSeq: 0,
+        persistedAt: Date.now(),
+      });
+
+      // Advance microtasks/timers for seq 1 emission
+      await vi.runAllTimersAsync();
+
+      // Seq 1 must now be delivered with isFinal = true
+      expect(sentCheckpoints).toHaveLength(2);
+      expect(sentCheckpoints[1]!.checkpointSeq).toBe(1);
+      expect(sentCheckpoints[1]!.isFinal).toBe(true);
+      expect(coordinator.getLastAckedSeq()).toBe(1);
+      expect(coordinator.getDiagnostics().isTerminalCommitted).toBe(true);
+
+      coordinator.dispose();
+    });
+
+    it('attempt timeout bounds single delivery attempt and retries exact sealed checkpoint', async () => {
+      const deliveredCheckpoints: CanonicalCheckpointDto[] = [];
+      let attemptCount = 0;
+
+      const coordinator = new CanonicalStreamCoordinator({
+        producerSessionId: 'prod-timeout',
+        streamId: 'stream-timeout',
+        debounceMs: 50,
+        checkpointAttemptTimeoutMs: 100,
+        retryBackoffMs: [200],
+        onCheckpoint: async (cp) => {
+          deliveredCheckpoints.push(JSON.parse(JSON.stringify(cp)));
+          attemptCount++;
+          if (attemptCount === 1) {
+            // Hang longer than checkpointAttemptTimeoutMs (100ms)
+            return new Promise<CanonicalCheckpointAck>(() => {});
+          }
+          return {
+            success: true,
+            streamKey: cp.streamKey,
+            checkpointSeq: cp.checkpointSeq,
+            persistedAt: Date.now(),
+          };
+        },
+      });
+
+      coordinator.feedSemanticEvent({
+        streamId: 'stream-timeout',
+        sequence: 1,
+        timestamp: 100,
+        type: 'answer_delta',
+        delta: 'Timeout content',
+      });
+
+      // Trigger debounce (50ms)
+      await vi.advanceTimersByTimeAsync(60);
+      expect(deliveredCheckpoints).toHaveLength(1);
+      expect(coordinator.getState()).toBe('in_flight');
+
+      // Advance 110ms to trigger checkpointAttemptTimeoutMs (100ms)
+      await vi.advanceTimersByTimeAsync(110);
+      expect(coordinator.getState()).toBe('backoff_wait');
+
+      // Advance backoff delay (200ms) to trigger retry
+      await vi.advanceTimersByTimeAsync(210);
+
+      expect(deliveredCheckpoints).toHaveLength(2);
+      expect(deliveredCheckpoints[1]!.checkpointSeq).toBe(0);
+      expect(deliveredCheckpoints[1]!.message.id).toBe(deliveredCheckpoints[0]!.message.id);
+      expect(coordinator.getLastAckedSeq()).toBe(0);
+
+      coordinator.dispose();
+    });
+
+    it('ignores duplicate or subsequent terminal semantic events', async () => {
+      const deliveredCheckpoints: CanonicalCheckpointDto[] = [];
+
+      const coordinator = new CanonicalStreamCoordinator({
+        producerSessionId: 'prod-multi-term',
+        streamId: 'stream-multi-term',
+        onCheckpoint: async (cp) => {
+          deliveredCheckpoints.push(JSON.parse(JSON.stringify(cp)));
+          return {
+            success: true,
+            streamKey: cp.streamKey,
+            checkpointSeq: cp.checkpointSeq,
+            persistedAt: Date.now(),
+          };
+        },
+      });
+
+      // First terminal event
+      coordinator.feedSemanticEvent({
+        streamId: 'stream-multi-term',
+        sequence: 1,
+        timestamp: 100,
+        type: 'stream_finished',
+        terminalReason: 'completed',
+      });
+
+      await vi.runAllTimersAsync();
+      expect(deliveredCheckpoints).toHaveLength(1);
+      expect(deliveredCheckpoints[0]!.isFinal).toBe(true);
+
+      // Subsequent terminal events
+      coordinator.feedSemanticEvent({
+        streamId: 'stream-multi-term',
+        sequence: 2,
+        timestamp: 150,
+        type: 'stream_finished',
+        terminalReason: 'completed',
+      });
+
+      await vi.runAllTimersAsync();
+      expect(deliveredCheckpoints).toHaveLength(1);
+
+      coordinator.dispose();
+      expect(coordinator.getState()).toBe('committed');
+      expect(coordinator.getDiagnostics().isTerminalCommitted).toBe(true);
+    });
     it('accepts valid sequential checkpoints (seq 0, seq 1)', async () => {
       const conv: Conversation = {
         id: 'conv-integ-1',
@@ -716,6 +998,131 @@ describe('Canonical Checkpoint Delivery Integrity & Terminal Locking', () => {
           revisions: [],
           recoveryEvents: [recB],
           isTerminal: false,
+        })
+      ).rejects.toThrow('checkpoint_conflict');
+    });
+
+    it('detects checkpoint fingerprint conflict when Conversation createdAt or updatedAt differs', async () => {
+      const convA: Conversation = {
+        id: 'conv-time-diff',
+        title: 'Time Diff Test',
+        createdAt: 1000,
+        updatedAt: 1000,
+      };
+      const convB: Conversation = {
+        ...convA,
+        createdAt: 2000, // Differing createdAt
+      };
+      const msg: Message = {
+        id: 'msg-time-diff',
+        conversationId: 'conv-time-diff',
+        identityState: 'provisional',
+        role: 'assistant',
+        status: 'streaming',
+        createdAt: 1000,
+        updatedAt: 1000,
+      };
+
+      await storageRepo.saveCanonicalCheckpoint({
+        streamKey: 'prod-timediff:stream-timediff',
+        checkpointSeq: 0,
+        conversation: convA,
+        message: msg,
+        revisions: [],
+        isTerminal: false,
+      });
+
+      await expect(
+        storageRepo.saveCanonicalCheckpoint({
+          streamKey: 'prod-timediff:stream-timediff',
+          checkpointSeq: 0,
+          conversation: convB,
+          message: msg,
+          revisions: [],
+          isTerminal: false,
+        })
+      ).rejects.toThrow('checkpoint_conflict');
+    });
+
+    it('detects checkpoint fingerprint conflict when Message sourceRawStreamKey or remoteCreatedAt differs', async () => {
+      const conv: Conversation = {
+        id: 'conv-raw-diff',
+        title: 'Raw Diff Test',
+        createdAt: 1000,
+        updatedAt: 1000,
+      };
+      const msgA: Message = {
+        id: 'msg-raw-diff',
+        conversationId: 'conv-raw-diff',
+        identityState: 'provisional',
+        role: 'assistant',
+        status: 'streaming',
+        sourceRawStreamKey: 'prod:s1',
+        remoteCreatedAt: 12345,
+        createdAt: 1000,
+        updatedAt: 1000,
+      };
+      const msgB: Message = {
+        ...msgA,
+        sourceRawStreamKey: 'prod:s2', // Differing sourceRawStreamKey
+      };
+
+      await storageRepo.saveCanonicalCheckpoint({
+        streamKey: 'prod-rawdiff:stream-rawdiff',
+        checkpointSeq: 0,
+        conversation: conv,
+        message: msgA,
+        revisions: [],
+        isTerminal: false,
+      });
+
+      await expect(
+        storageRepo.saveCanonicalCheckpoint({
+          streamKey: 'prod-rawdiff:stream-rawdiff',
+          checkpointSeq: 0,
+          conversation: conv,
+          message: msgB,
+          revisions: [],
+          isTerminal: false,
+        })
+      ).rejects.toThrow('checkpoint_conflict');
+    });
+
+    it('detects checkpoint fingerprint conflict when isTerminal differs on same sequence', async () => {
+      const conv: Conversation = {
+        id: 'conv-term-flag',
+        title: 'Term Flag Test',
+        createdAt: 1000,
+        updatedAt: 1000,
+      };
+      const msg: Message = {
+        id: 'msg-term-flag',
+        conversationId: 'conv-term-flag',
+        identityState: 'provisional',
+        role: 'assistant',
+        status: 'streaming',
+        createdAt: 1000,
+        updatedAt: 1000,
+      };
+
+      await storageRepo.saveCanonicalCheckpoint({
+        streamKey: 'prod-termflag:stream-termflag',
+        checkpointSeq: 0,
+        conversation: conv,
+        message: msg,
+        revisions: [],
+        isTerminal: false,
+      });
+
+      // Same seq 0 but isTerminal=true (mutated terminal flag)
+      await expect(
+        storageRepo.saveCanonicalCheckpoint({
+          streamKey: 'prod-termflag:stream-termflag',
+          checkpointSeq: 0,
+          conversation: conv,
+          message: msg,
+          revisions: [],
+          isTerminal: true,
         })
       ).rejects.toThrow('checkpoint_conflict');
     });

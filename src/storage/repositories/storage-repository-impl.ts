@@ -30,7 +30,10 @@ import {
   type HistoryStagingManifestRecord,
 } from '../schema';
 import { openExtensionDatabase, createDurableWriteTransaction } from '../db';
-import { computeCanonicalCheckpointFingerprint } from '../../shared/crypto';
+import {
+  computeCanonicalCheckpointFingerprint,
+  serializeHistoryStagingBatchForFingerprint,
+} from '../../shared/crypto';
 
 export class IndexedDbStorageRepository implements StorageRepository {
   constructor(private readonly idbFactory?: IDBFactory) {}
@@ -267,50 +270,17 @@ export class IndexedDbStorageRepository implements StorageRepository {
   // ── Atomic Canonical Checkpoint Persistence ──
 
   async saveCanonicalCheckpoint(data: CanonicalCheckpointData): Promise<void> {
+    const isTerm = Boolean(data.isTerminal ?? data.isFinal);
     const fingerprint =
       data.checkpointSeq !== undefined
         ? await computeCanonicalCheckpointFingerprint({
             streamKey: data.streamKey,
             checkpointSeq: data.checkpointSeq,
-            isTerminal: Boolean(data.isTerminal),
-            conversation: data.conversation
-              ? {
-                  id: data.conversation.id,
-                  remoteId: data.conversation.remoteId,
-                  title: data.conversation.title,
-                }
-              : undefined,
-            message: {
-              id: data.message.id,
-              conversationId: data.message.conversationId,
-              remoteId: data.message.remoteId,
-              role: data.message.role,
-              status: data.message.status,
-              content: data.message.content,
-              parentId: data.message.parentId,
-              remoteParentId: data.message.remoteParentId,
-              identityState: data.message.identityState,
-            },
-            revisions: data.revisions.map((r) => ({
-              id: r.id,
-              messageId: r.messageId,
-              revisionIndex: r.revisionIndex,
-              text: r.text,
-              thinking: r.thinking,
-              source: r.source,
-              capturedAt: r.capturedAt,
-              isFinal: r.isFinal,
-              isLastGood: r.isLastGood,
-              contentFingerprint: r.contentFingerprint,
-            })),
-            recoveryEvents: (data.recoveryEvents || []).map((e) => ({
-              id: e.id,
-              messageId: e.messageId,
-              kind: e.kind,
-              detectedAt: e.detectedAt,
-              recoveredRevisionId: e.recoveredRevisionId,
-              reason: e.reason,
-            })),
+            isTerminal: isTerm,
+            conversation: data.conversation,
+            message: data.message,
+            revisions: data.revisions,
+            recoveryEvents: data.recoveryEvents,
           })
         : undefined;
 
@@ -473,7 +443,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
               streamKey: data.streamKey,
               lastCommittedCheckpointSeq: seq,
               lastFingerprint: fingerprint,
-              isTerminal: Boolean(data.isTerminal),
+              isTerminal: isTerm,
               updatedAt: Date.now(),
             });
           } else {
@@ -485,7 +455,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
               streamKey: data.streamKey,
               lastCommittedCheckpointSeq: 0,
               lastFingerprint: fingerprint,
-              isTerminal: Boolean(data.isTerminal),
+              isTerminal: isTerm,
               updatedAt: Date.now(),
             });
           }
@@ -495,6 +465,19 @@ export class IndexedDbStorageRepository implements StorageRepository {
       } else {
         executePayloadWrites();
       }
+    });
+  }
+
+  async getCanonicalCheckpoint(
+    streamKey: string
+  ): Promise<CanonicalStreamCheckpointRecord | null> {
+    const db = await this.getDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_CANONICAL_CHECKPOINTS, 'readonly');
+      const store = tx.objectStore(STORE_CANONICAL_CHECKPOINTS);
+      const req = store.get(streamKey);
+      req.onsuccess = () => resolve((req.result as CanonicalStreamCheckpointRecord) || null);
+      req.onerror = () => reject(req.error || new Error('Failed to get canonical checkpoint'));
     });
   }
 
@@ -804,10 +787,8 @@ export class IndexedDbStorageRepository implements StorageRepository {
           const existing = bReq.result as HistoryStagingBatchRecord | undefined;
           if (existing) {
             const isIdentical =
-              existing.stagingId === batch.stagingId &&
-              existing.batchIndex === batch.batchIndex &&
-              existing.messages.length === batch.messages.length &&
-              JSON.stringify(existing.messages) === JSON.stringify(batch.messages);
+              serializeHistoryStagingBatchForFingerprint(existing) ===
+              serializeHistoryStagingBatchForFingerprint(batch);
             if (!isIdentical) {
               fail(new Error(`history_batch_conflict: duplicate batch ${batch.id} with different payload`));
               return;
@@ -974,6 +955,15 @@ export class IndexedDbStorageRepository implements StorageRepository {
         }
         if (manifest.state !== 'open') {
           fail(new Error(`history_staging_not_open: staging state is ${manifest.state}`));
+          return;
+        }
+        const planSessionId = plan.conversation.remoteId || plan.conversation.id;
+        if (planSessionId !== manifest.sessionId) {
+          fail(
+            new Error(
+              `history_plan_session_mismatch: plan session ${planSessionId} does not match manifest ${manifest.sessionId}`
+            )
+          );
           return;
         }
         if (manifest.receivedBatchCount !== manifest.expectedBatchCount) {
@@ -1295,6 +1285,124 @@ export class IndexedDbStorageRepository implements StorageRepository {
       text: revision.text,
       thinking: revision.thinking,
     };
+  }
+
+  async getRecoveryMetadataForConversation(
+    conversationId: string
+  ): Promise<import('../../adapters/deepseek/dom/types').PageRecoveryMessageSummary[]> {
+    const db = await this.getDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(
+        [STORE_MESSAGES, STORE_RECOVERY_EVENTS, STORE_REVISIONS],
+        'readonly'
+      );
+      const msgStore = tx.objectStore(STORE_MESSAGES);
+      const recStore = tx.objectStore(STORE_RECOVERY_EVENTS);
+      const revStore = tx.objectStore(STORE_REVISIONS);
+
+      const msgIndex = msgStore.index('conversationId');
+      const msgReq = msgIndex.getAll(conversationId);
+
+      msgReq.onerror = () => reject(msgReq.error || new Error('Failed to query messages for recovery metadata'));
+      msgReq.onsuccess = () => {
+        const messages = (msgReq.result as Message[]) || [];
+        if (messages.length === 0) {
+          resolve([]);
+          return;
+        }
+
+        const results: import('../../adapters/deepseek/dom/types').PageRecoveryMessageSummary[] = [];
+        let pendingChecks = messages.length;
+
+        const checkDone = () => {
+          pendingChecks--;
+          if (pendingChecks === 0) {
+            resolve(results);
+          }
+        };
+
+        const recIndex = recStore.index('messageId');
+
+        for (const m of messages) {
+          const recReq = recIndex.getAll(m.id);
+          recReq.onerror = () => checkDone();
+          recReq.onsuccess = () => {
+            const events = (recReq.result as RecoveryEvent[]) || [];
+            const authEvent = events.find((e) => e.recoveredRevisionId && e.messageId === m.id);
+
+            if (authEvent && authEvent.recoveredRevisionId) {
+              const revReq = revStore.get(authEvent.recoveredRevisionId);
+              revReq.onerror = () => checkDone();
+              revReq.onsuccess = () => {
+                const rev = revReq.result as ResponseRevision | undefined;
+                if (rev && rev.isLastGood && rev.messageId === m.id) {
+                  const presKind =
+                    authEvent.kind === 'network_interruption'
+                      ? 'interruption_recovery'
+                      : 'pre_filter_recovery';
+                  results.push({
+                    messageId: m.id,
+                    remoteId: m.remoteId,
+                    role: m.role,
+                    status: m.status,
+                    hasLastGood: true,
+                    recoveryKind: 'authoritative_recovery',
+                    presentationKind: presKind,
+                    capturedAt: rev.capturedAt,
+                    recoveredRevisionId: rev.id,
+                    recoveryEventId: authEvent.id,
+                  });
+                }
+                checkDone();
+              };
+              return;
+            }
+
+            // Fallback for interrupted / degraded messages
+            const isInterrupted =
+              m.status === 'filtered' ||
+              m.status === 'degraded' ||
+              m.status === 'interrupted' ||
+              m.status === 'incomplete';
+
+            if (isInterrupted) {
+              const revIndex = revStore.index('messageId');
+              const revReq = revIndex.getAll(m.id);
+              revReq.onerror = () => checkDone();
+              revReq.onsuccess = () => {
+                const revs = (revReq.result as ResponseRevision[]) || [];
+                const latestNetwork = [...revs]
+                  .reverse()
+                  .find(
+                    (r) =>
+                      r.source === 'network' &&
+                      (r.text.length > 0 || (r.thinking && r.thinking.length > 0))
+                  );
+                if (latestNetwork) {
+                  results.push({
+                    messageId: m.id,
+                    remoteId: m.remoteId,
+                    role: m.role,
+                    status: m.status,
+                    hasLastGood: Boolean(latestNetwork.isLastGood),
+                    recoveryKind: 'partial_capture',
+                    presentationKind: 'partial_capture',
+                    capturedAt: latestNetwork.capturedAt,
+                    recoveredRevisionId: latestNetwork.id,
+                  });
+                }
+                checkDone();
+              };
+              return;
+            }
+
+            checkDone();
+          };
+        }
+      };
+
+      tx.onerror = () => reject(tx.error || new Error('Recovery metadata transaction failed'));
+    });
   }
 
   // ── Diagnostic & Summary Metrics ──

@@ -68,6 +68,22 @@ export interface GetFoundationStatusRequest {
   type: typeof MESSAGE_GET_FOUNDATION_STATUS;
 }
 
+export type PipelineStageStatus =
+  | 'not_observed'
+  | 'observed'
+  | 'healthy'
+  | 'degraded'
+  | 'failed'
+  | 'not_applicable';
+
+export interface PipelineDiagnosticStage {
+  id: string;
+  name: string;
+  status: PipelineStageStatus;
+  lastObservedAt?: number;
+  details?: string;
+}
+
 export interface FoundationStatusResponse {
   bridgeState: ObservationState;
   backgroundAlive: boolean;
@@ -76,6 +92,7 @@ export interface FoundationStatusResponse {
   lastPersistedAt?: number;
   transport: TransportDiagnostics;
   protocol?: DeepSeekProtocolDiagnosticsData;
+  pipelineStages?: PipelineDiagnosticStage[];
 }
 
 export interface ListSyntheticRevisionsRequest {

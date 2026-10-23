@@ -88,8 +88,8 @@ When DeepSeek returns history messages, the payload structure adheres to:
 ### History Staging Manifests & Completeness Barrier (Schema v7)
 - Multi-batch history streams are buffered in IndexedDB stores `history_staging` and `history_staging_manifests` (v7).
 - Ingest begins with `openHistoryStagingSession`, creating an immutable manifest with `expectedBatchCount` and `expectedMessageCount`.
-- Batches are validated against manifest bounds and session identity before writing.
-- `commitHistoryStagingPlan` requires `manifest.receivedBatchCount === manifest.expectedBatchCount`. If truncated or incomplete, the commit transaction is aborted and cleared.
+- Batches are validated against manifest bounds and session identity before writing. Duplicate batch submissions are fingerprinted using Web Crypto SHA-256 and acknowledged idempotently.
+- `commitHistoryStagingPlan` requires `manifest.receivedBatchCount === manifest.expectedBatchCount` and strictly enforces `manifest.sessionId === sessionRemoteId`. If truncated, mismatched, or incomplete, the commit transaction is aborted and cleared.
 - Orphan staging data older than 5 minutes is purged automatically via `cleanupStaleHistoryStaging`.
 
 ### Background Concurrency Serialization

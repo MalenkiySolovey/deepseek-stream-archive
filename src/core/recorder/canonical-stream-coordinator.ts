@@ -48,7 +48,9 @@ export interface CanonicalStreamCoordinatorConfig {
   debounceMs?: number;
   minCharsForFlush?: number;
   retryBackoffMs?: number[];
+  maxRetries?: number;
   maxRetryAttempts?: number;
+  checkpointAttemptTimeoutMs?: number;
 }
 
 export interface CanonicalCoordinatorDiagnostics {
@@ -69,6 +71,14 @@ export interface CanonicalCoordinatorDiagnostics {
 
 const DEFAULT_RETRY_BACKOFF_MS = [250, 1000, 4000, 10000, 30000];
 
+function deepClone<T>(value: T): T {
+  if (value === undefined || value === null) return value;
+  if (typeof structuredClone === 'function') {
+    return structuredClone(value);
+  }
+  return JSON.parse(JSON.stringify(value));
+}
+
 export class CanonicalStreamCoordinator {
   private readonly producerSessionId: string;
   private readonly streamId: string;
@@ -78,7 +88,8 @@ export class CanonicalStreamCoordinator {
   private readonly onCheckpoint: (checkpoint: CanonicalCheckpointDto) => Promise<CanonicalCheckpointAck>;
   private readonly debounceMs: number;
   private readonly retryBackoffMs: number[];
-  private readonly maxRetryAttempts: number;
+  private readonly maxRetries: number;
+  private readonly checkpointAttemptTimeoutMs: number;
 
   private readonly recorder: CanonicalRevisionRecorder;
   private state: CoordinatorState = 'idle';
@@ -112,7 +123,8 @@ export class CanonicalStreamCoordinator {
     this.onCheckpoint = config.onCheckpoint;
     this.debounceMs = config.debounceMs ?? 500;
     this.retryBackoffMs = config.retryBackoffMs ?? DEFAULT_RETRY_BACKOFF_MS;
-    this.maxRetryAttempts = config.maxRetryAttempts ?? 10;
+    this.maxRetries = config.maxRetries ?? config.maxRetryAttempts ?? 10;
+    this.checkpointAttemptTimeoutMs = config.checkpointAttemptTimeoutMs ?? 15000;
 
     const deterministicMessageId = makeProvisionalMessageId(this.rawStreamKey);
     this.recorder = new CanonicalRevisionRecorder({
@@ -251,7 +263,7 @@ export class CanonicalStreamCoordinator {
     return this.executeCheckpoint(isFinal || this.isTerminalRequested);
   }
 
-  async awaitFinalPersistence(timeoutMs = 35000): Promise<FinalPersistenceResult> {
+  async awaitFinalPersistence(timeoutMs = 0): Promise<FinalPersistenceResult> {
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
@@ -317,6 +329,8 @@ export class CanonicalStreamCoordinator {
 
     // 1. If we already have a sealed pending checkpoint that failed previously,
     // retry this exact sealed checkpoint without altering sequence or content.
+    // Invariant: A sealed checkpoint must NEVER mutate. Terminal events arriving
+    // during backoff are queued for the subsequent checkpoint seq.
     let sealedToDeliver = this.pendingCheckpoint;
 
     if (!sealedToDeliver) {
@@ -367,15 +381,15 @@ export class CanonicalStreamCoordinator {
         };
       }
 
-      // Seal the checkpoint immutably
+      // Seal the checkpoint immutably via defensive deep clone
       const seq = this.nextCheckpointSeq;
       sealedToDeliver = {
         streamKey: this.rawStreamKey,
         checkpointSeq: seq,
-        conversation,
-        message: messageSnapshot,
-        revisions: newRevisions,
-        recoveryEvents: newRecoveryEvents,
+        conversation: conversation ? deepClone(conversation) : undefined,
+        message: deepClone(messageSnapshot),
+        revisions: deepClone(newRevisions),
+        recoveryEvents: deepClone(newRecoveryEvents),
         isFinal,
         sealedAt: Date.now(),
         attempts: 0,
@@ -383,17 +397,30 @@ export class CanonicalStreamCoordinator {
 
       this.pendingCheckpoint = sealedToDeliver;
       this.state = 'sealed_pending';
-    } else if (isFinal && !sealedToDeliver.isFinal) {
-      // Elevate terminal flag if requested
-      sealedToDeliver.isFinal = true;
     }
 
     this.state = 'in_flight';
-    sealedToDeliver.attempts++;
+    (sealedToDeliver as { attempts: number }).attempts++;
 
     const runPromise: Promise<CanonicalCheckpointAck | null> = (async () => {
       try {
-        const ack = await this.onCheckpoint(sealedToDeliver!);
+        const timeoutMs = this.checkpointAttemptTimeoutMs;
+        let attemptTimer: ReturnType<typeof setTimeout> | null = null;
+        const attemptPromise = this.onCheckpoint(sealedToDeliver!);
+        const timeoutPromise = new Promise<CanonicalCheckpointAck>((_, reject) => {
+          if (timeoutMs > 0) {
+            attemptTimer = setTimeout(() => {
+              reject(new Error('checkpoint_attempt_timeout'));
+            }, timeoutMs);
+          }
+        });
+
+        let ack: CanonicalCheckpointAck;
+        try {
+          ack = await Promise.race([attemptPromise, timeoutPromise]);
+        } finally {
+          if (attemptTimer) clearTimeout(attemptTimer);
+        }
 
         if (
           ack &&
@@ -472,11 +499,12 @@ export class CanonicalStreamCoordinator {
       error,
     });
 
-    if (this.retryAttempts > this.maxRetryAttempts) {
+    if (this.retryAttempts > this.maxRetries) {
       logger.error('Canonical checkpoint exceeded maximum retry attempts', {
         streamKey: this.rawStreamKey,
         seq: checkpoint.checkpointSeq,
         attempts: checkpoint.attempts,
+        maxRetries: this.maxRetries,
       });
       this.state = 'failed';
       this.resolveWaiters({
@@ -498,7 +526,7 @@ export class CanonicalStreamCoordinator {
         ] ?? 1000;
       this.retryTimer = setTimeout(() => {
         this.retryTimer = null;
-        this.executeCheckpoint(checkpoint.isFinal || this.isTerminalRequested);
+        this.executeCheckpoint(checkpoint.isFinal);
       }, delay);
     }
   }

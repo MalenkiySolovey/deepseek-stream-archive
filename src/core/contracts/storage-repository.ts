@@ -15,6 +15,7 @@ export interface CanonicalCheckpointData {
   streamKey: string;
   checkpointSeq: number;
   isTerminal?: boolean;
+  isFinal?: boolean;
   conversation?: Conversation;
   message: Message;
   revisions: ResponseRevision[];
@@ -118,6 +119,7 @@ export interface StorageRepository {
 
   // Atomic checkpoint, reconciliation & replay promotion operations
   saveCanonicalCheckpoint(data: CanonicalCheckpointData): Promise<void>;
+  getCanonicalCheckpoint(streamKey: string): Promise<import('../../storage/schema').CanonicalStreamCheckpointRecord | null>;
   applyHistoryReconciliationPlan(plan: HistoryReconciliationPlan): Promise<void>;
   applyReplayPromotionPlan(plan: ReplayPromotionPlan): Promise<void>;
 
@@ -135,6 +137,7 @@ export interface StorageRepository {
   getArchiveConversation(id: string): Promise<ArchiveConversationDetail | null>;
   listArchiveMessages(conversationId: string): Promise<ArchiveMessageSummary[]>;
   getRevisionContent(id: string): Promise<{ text: string; thinking?: string } | null>;
+  getRecoveryMetadataForConversation(conversationId: string): Promise<import('../../adapters/deepseek/dom/types').PageRecoveryMessageSummary[]>;
 
   // Diagnostic & Metrics operations
   getArchiveSummary(): Promise<ArchiveSummary>;

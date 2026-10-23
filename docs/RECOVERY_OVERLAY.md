@@ -54,8 +54,8 @@ The **Non-Destructive In-Page Recovery Overlay** allows users to view, copy, and
    - Modal caches and active summaries are immediately purged on URL changes.
    - Homepage and non-session routes (`/`, `/chat`, `/sign_in`) return null and remain completely inert.
 
-6. **Safe Rendering & Content Security:**
+6. **Safe Rendering, In-Memory Root Tracking & Content Security:**
    - Zero `innerHTML` and zero `eval`.
    - All text and reasoning chains are rendered via `document.createElement` and `textContent`.
    - Native `<details>` and `<summary>` elements provide collapsible reasoning inspection without external JavaScript dependencies.
-   - Root host ownership is tracked via `WeakSet`; foreign spoof elements are evicted. If closed Shadow DOM attachment fails, the overlay safely disables itself rather than falling back to light DOM.
+   - Root host ownership is tracked strictly in memory (`portalHostElement`), completely eliminating host-DOM querying (`document.querySelector`) and preventing element spoofing attacks. If closed Shadow DOM attachment fails, the overlay safely disables itself rather than falling back to light DOM.

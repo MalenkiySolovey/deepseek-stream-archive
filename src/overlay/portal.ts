@@ -33,6 +33,46 @@ export interface OverlayPortalOptions {
 // Track elements created by our extension isolated world to reject spoofed page elements
 const OWNED_PORTAL_HOSTS = new WeakSet<HTMLElement>();
 
+function getRecoveryLabel(msg: PageRecoveryMessageSummary): {
+  icon: string;
+  badgeLabel: string;
+  cardLabel: string;
+  trayPrefix: string;
+  className: string;
+} {
+  const isPreFilter =
+    msg.presentationKind === 'pre_filter_recovery' ||
+    (msg.recoveryKind === 'authoritative_recovery' && !msg.presentationKind);
+  if (isPreFilter) {
+    return {
+      icon: '🛡️ ',
+      badgeLabel: 'Recovered Pre-Filter Response',
+      cardLabel: '🛡️ Recovered Original (Pre-Filter Preserved)',
+      trayPrefix: '[Recovered Original] ',
+      className: 'filtered',
+    };
+  }
+
+  const isInterruption = msg.presentationKind === 'interruption_recovery';
+  if (isInterruption) {
+    return {
+      icon: '⚡ ',
+      badgeLabel: 'Captured Before Interruption',
+      cardLabel: '⚡ Captured Before Network Interruption',
+      trayPrefix: '[Interruption Capture] ',
+      className: 'interrupted',
+    };
+  }
+
+  return {
+    icon: '⚠️ ',
+    badgeLabel: 'Partial Captured Response',
+    cardLabel: '⚠️ Partial Captured Response',
+    trayPrefix: '[Partial Capture] ',
+    className: 'degraded',
+  };
+}
+
 export class StreamArchiveOverlayPortal {
   private rootHost: HTMLElement | null = null;
   private shadow: ShadowRoot | null = null;
@@ -47,6 +87,8 @@ export class StreamArchiveOverlayPortal {
   private pollInterval: ReturnType<typeof setInterval> | null = null;
   private repositionRaf: number | null = null;
   private domMutationObserver: MutationObserver | null = null;
+  private bootstrapObserver: MutationObserver | null = null;
+  private domContentLoadedHandler: (() => void) | null = null;
   private isDestroyed = false;
   private isMounted = false;
 
@@ -113,21 +155,10 @@ export class StreamArchiveOverlayPortal {
     const mountParent = customMount || document.documentElement;
     if (!mountParent) return;
 
-    // Verify existing host element ownership to prevent using untrusted page-created spoof roots
-    const candidateHost = mountParent.querySelector<HTMLElement>('div[data-streamarchive-overlay-root]');
-    if (candidateHost) {
-      if (OWNED_PORTAL_HOSTS.has(candidateHost)) {
-        this.rootHost = candidateHost;
-      } else {
-        // Untrusted/spoofed element: remove it from DOM
-        try {
-          candidateHost.remove();
-        } catch {
-          // ignore
-        }
-      }
-    }
-
+    // Invariant: Zero host-DOM mutation.
+    // If the page already contains an element with data-streamarchive-overlay-root,
+    // LEAVE IT COMPLETELY UNTOUCHED. Never remove(), replaceWith(), or mutate page DOM.
+    // The extension creates its own element reference and tracks ownership exclusively in isolated-world memory.
     if (!this.rootHost) {
       const host = document.createElement('div');
       host.setAttribute('data-streamarchive-overlay-root', 'true');
@@ -147,6 +178,7 @@ export class StreamArchiveOverlayPortal {
     // Security invariant: If closed Shadow DOM attachment fails, NEVER fall back to light DOM!
     if (!this.shadow) {
       logger.error('Failed to attach closed ShadowRoot for recovery overlay; disabling overlay.');
+      this.destroy();
       return;
     }
 
@@ -164,36 +196,119 @@ export class StreamArchiveOverlayPortal {
     this.currentUrl = typeof window !== 'undefined' ? window.location.href : '';
     this.refreshSummary();
 
-    // Listeners for repositioning anchored badges upon scroll or resize
+    // Listeners for repositioning anchored badges upon scroll or resize and immediate route detection
     if (typeof window !== 'undefined') {
       window.addEventListener('scroll', this.handleScrollOrResize, { passive: true });
       window.addEventListener('resize', this.handleScrollOrResize, { passive: true });
-
-      // Passive URL observer to detect client-side route changes
-      this.pollInterval = setInterval(() => {
-        if (this.isDestroyed) return;
-        const nowUrl = window.location.href;
-        if (nowUrl !== this.currentUrl) {
-          this.currentUrl = nowUrl;
-          this.refreshSummary();
-        }
-      }, 1000);
+      window.addEventListener('popstate', this.checkNavigationImmediately);
+      window.addEventListener('hashchange', this.checkNavigationImmediately);
+      if (typeof (window as any).navigation !== 'undefined' && (window as any).navigation.addEventListener) {
+        (window as any).navigation.addEventListener('navigate', this.checkNavigationImmediately);
+      }
+      this.pollInterval = setInterval(this.checkNavigationImmediately, 1000);
     }
 
-    // Bounded debounced observer for DeepSeek virtualization rerenders
-    if (typeof MutationObserver !== 'undefined' && document.body) {
-      this.domMutationObserver = new MutationObserver(() => {
-        this.handleScrollOrResize();
-      });
-      this.domMutationObserver.observe(document.body, {
-        childList: true,
-        subtree: true,
-      });
+    this.setupDomObserver();
+  }
+
+  private setupDomObserver(): void {
+    if (typeof MutationObserver === 'undefined') return;
+
+    if (typeof document !== 'undefined' && document.body) {
+      this.installBodyObserver(document.body);
+    } else if (typeof document !== 'undefined') {
+      // document_start bootstrap: documentElement exists but body is absent
+      this.domContentLoadedHandler = () => {
+        if (this.domContentLoadedHandler) {
+          document.removeEventListener('DOMContentLoaded', this.domContentLoadedHandler);
+          this.domContentLoadedHandler = null;
+        }
+        if (this.bootstrapObserver) {
+          this.bootstrapObserver.disconnect();
+          this.bootstrapObserver = null;
+        }
+        if (document.body && !this.domMutationObserver && !this.isDestroyed) {
+          this.installBodyObserver(document.body);
+        }
+      };
+      document.addEventListener('DOMContentLoaded', this.domContentLoadedHandler);
+
+      if (document.documentElement) {
+        this.bootstrapObserver = new MutationObserver(() => {
+          if (document.body) {
+            if (this.bootstrapObserver) {
+              this.bootstrapObserver.disconnect();
+              this.bootstrapObserver = null;
+            }
+            if (this.domContentLoadedHandler) {
+              document.removeEventListener('DOMContentLoaded', this.domContentLoadedHandler);
+              this.domContentLoadedHandler = null;
+            }
+            this.installBodyObserver(document.body);
+          }
+        });
+        this.bootstrapObserver.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+        });
+      }
     }
   }
 
+  private installBodyObserver(body: HTMLElement): void {
+    if (this.domMutationObserver || this.isDestroyed) return;
+    this.domMutationObserver = new MutationObserver(() => {
+      this.checkNavigationImmediately();
+      this.handleScrollOrResize();
+    });
+    this.domMutationObserver.observe(body, {
+      childList: true,
+      subtree: true,
+    });
+  }
+
+  private checkNavigationImmediately = (): void => {
+    if (this.isDestroyed || !this.isMounted || typeof window === 'undefined') return;
+    const nowUrl = window.location.href;
+    if (nowUrl !== this.currentUrl) {
+      const oldSession = this.currentSessionId;
+      const newSession = extractSessionIdFromUrl(nowUrl) || null;
+      this.currentUrl = nowUrl;
+      if (oldSession !== newSession) {
+        this.routeEpoch++;
+        this.currentSessionId = newSession;
+        this.activeSummary = null;
+        this.activeModalMessageId = null;
+        this.modalContentCache.clear();
+        this.dismissedMessageIds.clear();
+        this.render();
+      }
+      this.refreshSummary();
+    }
+  };
+
   getShadowRoot(): ShadowRoot | null {
     return this.shadow;
+  }
+
+  getDiagnostics(): {
+    isMounted: boolean;
+    isDestroyed: boolean;
+    currentSessionId: string | null;
+    activeSummarySessionId: string | null;
+    routeEpoch: number;
+    modalContentCacheSize: number;
+    dismissedCount: number;
+  } {
+    return {
+      isMounted: this.isMounted,
+      isDestroyed: this.isDestroyed,
+      currentSessionId: this.currentSessionId,
+      activeSummarySessionId: this.activeSummary?.conversationId ?? null,
+      routeEpoch: this.routeEpoch,
+      modalContentCacheSize: this.modalContentCache.size,
+      dismissedCount: this.dismissedMessageIds.size,
+    };
   }
 
   private handleScrollOrResize = (): void => {
@@ -293,16 +408,14 @@ export class StreamArchiveOverlayPortal {
     msg: PageRecoveryMessageSummary,
     rect: DOMRect
   ): void {
-    const isAuthoritative = msg.recoveryKind === 'authoritative_recovery';
+    const info = getRecoveryLabel(msg);
     const badge = document.createElement('div');
-    badge.className = `streamarchive-anchored-badge ${isAuthoritative ? 'filtered' : 'degraded'}`;
+    badge.className = `streamarchive-anchored-badge ${info.className}`;
     badge.style.top = `${Math.max(10, rect.top - 32)}px`;
     badge.style.left = `${Math.max(10, rect.left + 12)}px`;
 
-    const icon = document.createTextNode(isAuthoritative ? '🛡️ ' : '⚠️ ');
-    const text = document.createTextNode(
-      isAuthoritative ? 'Recovered Pre-Filter Response' : 'Partial Captured Response'
-    );
+    const icon = document.createTextNode(info.icon);
+    const text = document.createTextNode(info.badgeLabel);
     badge.appendChild(icon);
     badge.appendChild(text);
 
@@ -342,15 +455,14 @@ export class StreamArchiveOverlayPortal {
 
     // List unanchored items (zero snippet/body text preview)
     for (const msg of messages) {
-      const isAuthoritative = msg.recoveryKind === 'authoritative_recovery';
+      const info = getRecoveryLabel(msg);
       const item = document.createElement('div');
       item.className = 'streamarchive-tray-item';
 
       const desc = document.createElement('div');
       desc.className = 'streamarchive-item-desc';
-      const label = isAuthoritative ? '[Recovered Original] ' : '[Partial Capture] ';
       const timeStr = msg.capturedAt ? new Date(msg.capturedAt).toLocaleTimeString() : '';
-      desc.textContent = `${label}Captured ${timeStr ? `at ${timeStr}` : 'before filter'}`;
+      desc.textContent = `${info.trayPrefix}Captured ${timeStr ? `at ${timeStr}` : 'before filter'}`;
       item.appendChild(desc);
 
       item.addEventListener('click', () => {
@@ -390,7 +502,7 @@ export class StreamArchiveOverlayPortal {
   }
 
   private renderRecoveryModal(msg: PageRecoveryMessageSummary): void {
-    const isAuthoritative = msg.recoveryKind === 'authoritative_recovery';
+    const info = getRecoveryLabel(msg);
     const backdrop = document.createElement('div');
     backdrop.className = 'streamarchive-recovery-backdrop';
     backdrop.addEventListener('click', (e) => {
@@ -408,10 +520,8 @@ export class StreamArchiveOverlayPortal {
     header.className = 'streamarchive-card-header';
 
     const statusBadge = document.createElement('span');
-    statusBadge.className = `streamarchive-card-status-badge ${isAuthoritative ? 'filtered' : 'degraded'}`;
-    statusBadge.textContent = isAuthoritative
-      ? '🛡️ Recovered Original (Pre-Filter Preserved)'
-      : '⚠️ Partial Captured Response';
+    statusBadge.className = `streamarchive-card-status-badge ${info.className}`;
+    statusBadge.textContent = info.cardLabel;
     header.appendChild(statusBadge);
 
     const closeBtn = document.createElement('button');
@@ -511,6 +621,14 @@ export class StreamArchiveOverlayPortal {
       cancelAnimationFrame(this.repositionRaf);
       this.repositionRaf = null;
     }
+    if (this.bootstrapObserver) {
+      this.bootstrapObserver.disconnect();
+      this.bootstrapObserver = null;
+    }
+    if (this.domContentLoadedHandler && typeof document !== 'undefined') {
+      document.removeEventListener('DOMContentLoaded', this.domContentLoadedHandler);
+      this.domContentLoadedHandler = null;
+    }
     if (this.domMutationObserver) {
       this.domMutationObserver.disconnect();
       this.domMutationObserver = null;
@@ -518,10 +636,19 @@ export class StreamArchiveOverlayPortal {
     if (typeof window !== 'undefined') {
       window.removeEventListener('scroll', this.handleScrollOrResize);
       window.removeEventListener('resize', this.handleScrollOrResize);
+      window.removeEventListener('popstate', this.checkNavigationImmediately);
+      window.removeEventListener('hashchange', this.checkNavigationImmediately);
+      if (typeof (window as any).navigation !== 'undefined' && (window as any).navigation.removeEventListener) {
+        (window as any).navigation.removeEventListener('navigate', this.checkNavigationImmediately);
+      }
     }
-    if (this.rootHost) {
+    if (this.rootHost && OWNED_PORTAL_HOSTS.has(this.rootHost)) {
+      try {
+        this.rootHost.remove();
+      } catch {
+        // ignore
+      }
       OWNED_PORTAL_HOSTS.delete(this.rootHost);
-      this.rootHost.remove();
       this.rootHost = null;
     }
     this.shadow = null;

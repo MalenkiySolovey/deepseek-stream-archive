@@ -361,19 +361,141 @@ export default defineBackground(() => {
 
     // 5. Handle Status Query from Side Panel
     if (message.type === MESSAGE_GET_FOUNDATION_STATUS) {
-      storageRepo
-        .listConversations()
-        .then(async (conversations) => {
+      Promise.all([
+        storageRepo.listConversations(),
+        rawStreamRepo.getJournalMetadata().catch(() => ({
+          streamCount: 0,
+          activeStreamCount: 0,
+          totalBatchesCount: 0,
+          totalCharsCount: 0,
+          lastPersistedAt: undefined,
+        })),
+      ])
+        .then(async ([conversations, rawMeta]) => {
           let revCount = 0;
+          let reconciledCount = 0;
           for (const conv of conversations) {
             const msgs = await storageRepo.listMessagesByConversation(conv.id);
             for (const msg of msgs) {
+              if (msg.identityState === 'reconciled') reconciledCount++;
               const revs = await storageRepo.listRevisionsByMessage(msg.id);
               revCount += revs.length;
             }
           }
 
           const aggProtocol = aggregateProtocolDiagnostics();
+
+          const pipelineStages: import('../src/bridge/messages').PipelineDiagnosticStage[] = [
+            {
+              id: 'bg_reachable',
+              name: 'Background Service Worker Reachable',
+              status: 'healthy',
+              details: 'Active MV3 service worker',
+            },
+            {
+              id: 'isolated_content',
+              name: 'ISOLATED Content Script Loaded',
+              status:
+                bridgeState === 'observed' || seenFetchStreams.size > 0 || seenXhrStreams.size > 0
+                  ? 'observed'
+                  : 'not_observed',
+              lastObservedAt,
+            },
+            {
+              id: 'main_interceptor',
+              name: 'MAIN-World Interceptor Loaded',
+              status: bridgeState === 'observed' ? 'observed' : 'not_observed',
+              lastObservedAt,
+            },
+            {
+              id: 'bridge_handshake',
+              name: 'Bridge Handshake Observed',
+              status: bridgeState === 'observed' ? 'healthy' : 'not_observed',
+              lastObservedAt,
+            },
+            {
+              id: 'fetch_hook',
+              name: 'Fetch Hook Installed & Active',
+              status:
+                seenFetchStreams.size > 0
+                  ? 'healthy'
+                  : bridgeState === 'observed'
+                  ? 'observed'
+                  : 'not_observed',
+              details: `${seenFetchStreams.size} stream(s) observed`,
+            },
+            {
+              id: 'xhr_hook',
+              name: 'XHR Hook Installed & Active',
+              status:
+                seenXhrStreams.size > 0
+                  ? 'healthy'
+                  : bridgeState === 'observed'
+                  ? 'observed'
+                  : 'not_observed',
+              details: `${seenXhrStreams.size} stream(s) observed`,
+            },
+            {
+              id: 'generation_candidate',
+              name: 'Generation Candidate Observed',
+              status: seenFetchStreams.size + seenXhrStreams.size > 0 ? 'healthy' : 'not_observed',
+              details: `${seenFetchStreams.size + seenXhrStreams.size} candidate(s)`,
+            },
+            {
+              id: 'raw_chunk_observed',
+              name: 'Raw Journal Chunk Observed',
+              status: rawMeta.totalBatchesCount > 0 ? 'healthy' : 'not_observed',
+              details: `${rawMeta.totalBatchesCount} batch(es)`,
+            },
+            {
+              id: 'raw_journal_ack',
+              name: 'Raw Journal ACK Confirmed',
+              status: rawMeta.streamCount > 0 ? 'healthy' : 'not_observed',
+              details: `${rawMeta.streamCount} stream(s) recorded`,
+            },
+            {
+              id: 'protocol_frame_decoded',
+              name: 'Protocol Frame Decoded',
+              status: aggProtocol.parsedFramesCount > 0 ? 'healthy' : 'not_observed',
+              details: `${aggProtocol.parsedFramesCount} SSE frame(s)`,
+            },
+            {
+              id: 'canonical_checkpoint_ack',
+              name: 'Canonical Checkpoint ACK Confirmed',
+              status: revCount > 0 ? 'healthy' : 'not_observed',
+              details: `${revCount} revision(s) persisted`,
+            },
+            {
+              id: 'history_observation',
+              name: 'History Observation Seen',
+              status: historyObservationsCount > 0 ? 'observed' : 'not_observed',
+              details: `${historyObservationsCount} observation(s)`,
+            },
+            {
+              id: 'history_reconciliation',
+              name: 'History Reconciliation Succeeded',
+              status:
+                reconciledCount > 0
+                  ? 'healthy'
+                  : historyObservationsCount > 0
+                  ? 'observed'
+                  : 'not_observed',
+              details: `${reconciledCount} message(s) reconciled`,
+            },
+            {
+              id: 'compatibility_profile',
+              name: 'Compatibility Profile State',
+              status:
+                aggProtocol.protocolWarningsCount > 0
+                  ? 'degraded'
+                  : aggProtocol.compatibilityState === 'live_observed'
+                  ? 'healthy'
+                  : aggProtocol.parsedFramesCount > 0
+                  ? 'observed'
+                  : 'not_observed',
+              details: `Profile: ${DEFAULT_DEEPSEEK_PROFILE.id}`,
+            },
+          ];
 
           const status: FoundationStatusResponse = {
             bridgeState,
@@ -390,6 +512,7 @@ export default defineBackground(() => {
               lastObservedAt,
             },
             protocol: aggProtocol,
+            pipelineStages,
           };
           sendResponse(status);
         })
@@ -410,6 +533,20 @@ export default defineBackground(() => {
               lastObservedAt,
             },
             protocol: aggProtocol,
+            pipelineStages: [
+              {
+                id: 'bg_reachable',
+                name: 'Background Service Worker Reachable',
+                status: 'healthy',
+                details: 'Active MV3 service worker',
+              },
+              {
+                id: 'storage_operational',
+                name: 'IndexedDB Storage Operational',
+                status: 'failed',
+                details: err instanceof Error ? err.message : String(err),
+              },
+            ],
           });
         });
 
@@ -1095,63 +1232,7 @@ export default defineBackground(() => {
             return;
           }
 
-          const messages = await storageRepo.listMessagesByConversation(conv.id);
-          const recoverable: PageRecoveryMessageSummary[] = [];
-
-          for (const m of messages) {
-            // 1. Authoritative recovery check: message has a validated RecoveryEvent pointing to an isLastGood revision
-            const events = await storageRepo.listRecoveryEvents(m.id);
-            const authEvent = events.find((e) => e.recoveredRevisionId);
-
-            if (authEvent && authEvent.recoveredRevisionId) {
-              const rev = await storageRepo.getRevision(authEvent.recoveredRevisionId);
-              if (rev && rev.isLastGood) {
-                recoverable.push({
-                  messageId: m.id,
-                  remoteId: m.remoteId,
-                  role: m.role,
-                  status: m.status,
-                  hasLastGood: true,
-                  recoveryKind: 'authoritative_recovery',
-                  capturedAt: rev.capturedAt,
-                  recoveredRevisionId: rev.id,
-                  recoveryEventId: authEvent.id,
-                });
-                continue;
-              }
-            }
-
-            // 2. Partial network capture check: uncompleted/degraded messages with partial network revisions
-            const isInterrupted =
-              m.status === 'filtered' ||
-              m.status === 'degraded' ||
-              m.status === 'interrupted' ||
-              m.status === 'incomplete';
-
-            if (isInterrupted) {
-              const revs = await storageRepo.listRevisionsByMessage(m.id);
-              const latestNetwork = [...revs]
-                .reverse()
-                .find(
-                  (r) =>
-                    r.source === 'network' &&
-                    (r.text.length > 0 || (r.thinking && r.thinking.length > 0))
-                );
-
-              if (latestNetwork) {
-                recoverable.push({
-                  messageId: m.id,
-                  remoteId: m.remoteId,
-                  role: m.role,
-                  status: m.status,
-                  hasLastGood: Boolean(latestNetwork.isLastGood),
-                  recoveryKind: 'partial_capture',
-                  capturedAt: latestNetwork.capturedAt,
-                  recoveredRevisionId: latestNetwork.id,
-                });
-              }
-            }
-          }
+          const recoverable = await storageRepo.getRecoveryMetadataForConversation(conv.id);
 
           const summary: PageRecoverySummary = {
             conversationId: conv.id,

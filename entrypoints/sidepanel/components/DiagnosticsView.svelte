@@ -267,6 +267,28 @@
       </div>
     </div>
 
+    <!-- Pipeline Verification Chain -->
+    {#if status.pipelineStages && status.pipelineStages.length > 0}
+      <div class="section-card">
+        <h3 class="card-title">Pipeline Verification Chain</h3>
+        <div class="pipeline-list">
+          {#each status.pipelineStages as stage}
+            <div class="pipeline-item">
+              <span class="stage-name">{stage.name}</span>
+              <div class="stage-status-wrap">
+                {#if stage.details}
+                  <span class="stage-details">{stage.details}</span>
+                {/if}
+                <span class="stage-badge status-{stage.status}">
+                  {stage.status.replace('_', ' ').toUpperCase()}
+                </span>
+              </div>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
     <!-- Diagnostic Action -->
     <div class="action-card">
       <button class="diag-action-btn" type="button" onclick={triggerSyntheticDiagnostic}>
@@ -379,6 +401,83 @@
 
   .highlight-warn {
     color: #fbbf24;
+  }
+
+  .pipeline-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+  }
+
+  .pipeline-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #090d16;
+    border: 1px solid #1e293b;
+    border-radius: 0.375rem;
+    padding: 0.375rem 0.625rem;
+    font-size: 0.75rem;
+  }
+
+  .stage-name {
+    color: #e2e8f0;
+    font-weight: 500;
+  }
+
+  .stage-status-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .stage-details {
+    font-size: 0.6875rem;
+    color: #64748b;
+  }
+
+  .stage-badge {
+    font-size: 0.625rem;
+    font-weight: 600;
+    padding: 0.15rem 0.4rem;
+    border-radius: 0.25rem;
+    letter-spacing: 0.03em;
+  }
+
+  .status-healthy {
+    background: #064e3b;
+    color: #34d399;
+    border: 1px solid #059669;
+  }
+
+  .status-observed {
+    background: #1e3a5f;
+    color: #60a5fa;
+    border: 1px solid #2563eb;
+  }
+
+  .status-degraded {
+    background: #78350f;
+    color: #fbbf24;
+    border: 1px solid #d97706;
+  }
+
+  .status-failed {
+    background: #7f1d1d;
+    color: #f87171;
+    border: 1px solid #dc2626;
+  }
+
+  .status-not_observed {
+    background: #1e293b;
+    color: #64748b;
+    border: 1px solid #334155;
+  }
+
+  .status-not_applicable {
+    background: #0f172a;
+    color: #475569;
+    border: 1px solid #1e293b;
   }
 
   .action-card {
