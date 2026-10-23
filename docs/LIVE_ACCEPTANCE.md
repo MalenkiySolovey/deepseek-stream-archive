@@ -2,7 +2,7 @@
 
 > [!IMPORTANT]
 > **LIVE MANUAL VERIFICATION REQUIRED**  
-> Automated unit, fuzzing, and mock-environment integration tests (348 passing across 52 test suites) establish mathematical correctness of invariants and crash-durability. However, automated tests **cannot substitute for real user-authenticated sessions on `chat.deepseek.com`**.  
+> Automated unit, fuzzing, mock-environment integration tests (367 passing across 53 test suites), and Playwright Chromium MV3 compatibility harness (6 passing end-to-end browser specifications) establish mathematical correctness of invariants and crash-durability. However, automated tests **cannot substitute for real user-authenticated sessions on `chat.deepseek.com`**.  
 > This document specifies the exact protocol for conducting manual end-to-end acceptance testing against the live production DeepSeek web application.
 
 ---
@@ -45,10 +45,10 @@
    - Send prompt: `"Explain the difference between TCP and UDP in 3 bullet points."`
 2. **Observations during generation:**
    - Tokens render normally in DeepSeek's UI without stutter, delay, or flicker.
-   - DeepSeek tab DevTools shows `[StreamArchive] SSE chunk received` and `[StreamArchive] Canonical checkpoint persisted`.
+   - Side Panel **Diagnostics** tab shows pipeline stages advancing truthfully (Generation Candidate Observed: HEALTHY, Protocol Frame Decoded: HEALTHY, Canonical Checkpoint ACK Confirmed: HEALTHY).
    - No recovery badge appears in the page (generation is clean and unfiltered).
 3. **Verification:**
-   - Open Chrome Side Panel (`Ctrl + Shift + O` or toolbar icon) -> select **DeepSeek StreamArchive**.
+   - Open the Side Panel: click the DeepSeek StreamArchive action icon in the Chrome extensions toolbar (or choose DeepSeek StreamArchive from Chrome's Side Panel dropdown).
    - Conversation appears in Archive Browser with updated title and timestamp.
    - Click on the conversation: prompt and assistant response display correctly with full text.
    - Status badge shows `reconciled` or `streaming -> finished`.
@@ -57,24 +57,27 @@
 
 ### Scenario 2: Safety Filter Trigger Mid-Stream (Pre-Filter Recovery)
 
-**Objective:** Verify that when DeepSeek's server-side safety filter triggers mid-stream, the pre-filter partial answer and thinking tokens are durably preserved and accessible via the overlay.
+**Objective:** Verify that when DeepSeek's server-side safety filter triggers mid-stream during natural conversation, pre-filter partial answer and thinking tokens are durably preserved and accessible via the overlay.
+
+> [!NOTE]
+> Guaranteed content filter and replacement verification is handled deterministically by automated browser test fixtures (`pnpm run test:e2e`). For live acceptance testing, **do NOT deliberately submit hazardous, illegal, or policy-violating prompts**. If a filter is naturally encountered during ordinary research or engineering queries, record observations below; otherwise record **NOT OBSERVED LIVE** (which is not a failure).
 
 1. **Action:**
-   - Submit a prompt known to trigger safety heuristics mid-stream (e.g. theoretical chemistry, complex bypass paradox, or safety edge case).
+   - Observe natural query where server returns a filter mid-stream, or rely on automated E2E fixture verification.
 2. **Observations during filter trigger:**
-   - DeepSeek web UI streams several sentences or mathematical steps, then abruptly wipes the text and displays the canned safety message (e.g. *"I am unable to answer this question due to safety policies"*).
-   - Background console logs: `[StreamArchive] Filter event triggered: reason CONTENT_FILTER, preserving lastGood revision`.
+   - DeepSeek web UI streams several sentences or mathematical steps, then replaces the text with a canned template response.
+   - Background service worker preserves the last-good unredacted tokens prior to replacement.
 3. **Overlay Behavior:**
-   - The original assistant message in DeepSeek DOM is **not mutated or touched**.
+   - The original assistant message in DeepSeek DOM is **never mutated, altered, or replaced**.
    - An isolated **Anchored Badge** labeled `🛡️ Recovered Pre-Filter Response` appears floating above the message container.
    - If message is scrolled or unanchored, the **Floating Recovery Tray** in the bottom-right displays `[Recovered Original] Captured before filter`.
 4. **Content Inspection:**
    - Click the recovery badge or tray item.
    - A modal card opens inside closed Shadow DOM.
-   - Full pre-filter response text is rendered safely.
+   - Full pre-filter response text is rendered safely on-demand (zero snippet text leaked in page summary before click).
    - If thinking was generated before filter, click `Thought Process (Recovered)` to view collapsed chain-of-thought tokens.
    - Click **Copy Recovered Answer** -> verify clipboard contains full uncensored text.
-   - Click **Dismiss** -> modal closes and badge disappears.
+   - Click **Dismiss** -> modal closes and badge is dismissed for this conversation.
 
 ---
 
@@ -175,6 +178,8 @@
 ---
 
 ## Acceptance Criteria Matrix
+
+For logging real-world execution results, copy and fill out the [Live Acceptance Results Template](./LIVE_ACCEPTANCE_RESULTS_TEMPLATE.md).
 
 | Check ID | Requirement | Success Indicator | Pass/Fail |
 |---|---|---|---|

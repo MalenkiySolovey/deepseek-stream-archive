@@ -370,8 +370,6 @@ The automated regression corpus contains **318 tests across 48 test files (100% 
 
 ## 17. Tier 15: Trust Boundary, Durable Finalization & Live Readiness Gate (Milestone 2D.2.1)
 
-The automated regression corpus contains **348 tests across 52 test files (100% green)**:
-
 1. **Terminal Checkpoint Finalization & Retry Queue (`tests/canonical-checkpoint-integrity.test.ts`):**
    - Verifies terminal checkpoint retry backoff survives coordinator disposal until terminal outcome (`committed` or `failed`).
    - Verifies `awaitFinalPersistence()` resolves committed on ACK and failed on retry exhaustion.
@@ -398,5 +396,37 @@ The automated regression corpus contains **348 tests across 52 test files (100% 
 5. **Schema Version 7 Migration (`tests/database-migration.test.ts`):**
    - Verifies seamless multi-version migration preserving legacy data through v1..v6 and adding `STORE_HISTORY_STAGING_MANIFESTS` at `DB_VERSION = 7`.
 
+---
+
+## 18. Tier 16: Immutable Delivery & Browser Compatibility Gate (Milestone 2D.2.2)
+
+The regression corpus stands at **367 Vitest tests across 53 test files (100% green)** plus **6 Playwright Chromium MV3 end-to-end specifications**:
+
+1. **Immutable Checkpoint Delivery & Lost-ACK Finalization (`tests/canonical-stream-coordinator.test.ts`):**
+   - Proves sealed canonical checkpoints never mutate `isFinal`, revisions, or sequences in-place during retries.
+   - Handles lost ACKs with incoming terminal events by committing sequence $N$ first, then cleanly emitting sequence $N+1$ with `isFinal = true` without sequence gaps or conflicts.
+   - Validates Web Crypto SHA-256 fingerprint generation binding all canonical checkpoint attributes.
+
+2. **History Staging Remote ID Verification (`tests/history-bounded-ingest.test.ts`):**
+   - Guarantees `commitHistoryStagingPlan` validates session remote ID against manifest session remote ID.
+   - Binds session remote ID into duplicate batch fingerprinting calculations.
+
+3. **Zero Host-DOM Mutation & In-Memory Portal Lifecycle (`tests/recovery-overlay-portal.test.ts`):**
+   - Verifies portal container is tracked strictly in-memory without host DOM queries or spoofing vulnerabilities.
+   - Confirms immediate cleanup and route isolation without leaving orphaned DOM nodes.
+
+4. **Atomic Recovery Metadata Query Benchmark (`tests/recovery-metadata-benchmark.test.ts`):**
+   - Validates single-transaction retrieval of conversation recovery state (`getRecoveryMetadataForConversation`).
+   - Benchmark proves sub-millisecond execution for standard conversations and under 200ms for 5,000-message trees.
+
+5. **Browser Compatibility Harness (`tests/browser/*.spec.ts`):**
+   - Headless Chromium MV3 integration against synthetic offline fixtures (zero external network calls):
+     - `normal-generation.spec.ts`: Streaming SSE capture, monotonic checkpoints, side panel verification.
+     - `filter-replacement.spec.ts`: Pre-filter `lastGood` revision freezing, closed shadow root badge rendering, clipboard copy.
+     - `history-reconciliation.spec.ts`: Multi-batch staged ingest and atomic commit.
+     - `route-isolation.spec.ts`: Route epoch fencing and zero cross-session recovery leakage.
+     - `network-interruption.spec.ts`: Abort detection and durable partial checkpoint persistence.
+     - `degradation-profile.spec.ts`: High-throughput stress test with minimal CPU/memory overhead.
+
 > [!IMPORTANT]
-> For instructions on executing real-world manual acceptance testing against live `chat.deepseek.com`, see the [Live Acceptance Testing Guide](./LIVE_ACCEPTANCE.md).
+> Automated tests confirm structural and protocol compliance. For instructions on executing real-world manual acceptance testing against live `chat.deepseek.com`, see the [Live Acceptance Testing Guide](./LIVE_ACCEPTANCE.md) and [Live Acceptance Results Template](./LIVE_ACCEPTANCE_RESULTS_TEMPLATE.md).

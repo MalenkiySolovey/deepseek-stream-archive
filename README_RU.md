@@ -6,7 +6,9 @@
 
 ![Платформа](https://img.shields.io/badge/платформа-Chrome%20%7C%20Chromium%20MV3-4285F4?logo=googlechrome&logoColor=white)
 ![Фреймворк](https://img.shields.io/badge/фреймворк-WXT%20%2B%20Svelte%205-FF3E00?logo=svelte&logoColor=white)
-![Тесты](https://img.shields.io/badge/тесты-348%20пройдены-3DDC84)
+![Юнит-тесты](https://img.shields.io/badge/юнит--тесты-367%20пройдены-3DDC84)
+![E2E тесты](https://img.shields.io/badge/playwright%20e2e-6%20пройдены-brightgreen)
+![Статус](https://img.shields.io/badge/приёмочное%20тестирование-готов%20к%20тестам-orange)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
 ![Лицензия](https://img.shields.io/badge/лицензия-MIT-green)
 
@@ -186,28 +188,33 @@ IndexedDB: StreamArchiveDB (Версия 7)
 4. Перейдите на сайт [DeepSeek Chat](https://chat.deepseek.com/).
 5. Откройте **Боковую панель** (Side Panel) в Chrome и выберите **DeepSeek StreamArchive** в выпадающем списке.
 
-Инструкции по ручному тестированию на живом `chat.deepseek.com` см. в [Руководстве по приёмочному тестированию](./docs/LIVE_ACCEPTANCE.md).
+Инструкции по ручному тестированию на живом `chat.deepseek.com` и шаблоны протоколов см. в [Руководстве по приёмочному тестированию](./docs/LIVE_ACCEPTANCE.md) и [Шаблоне отчёта](./docs/LIVE_ACCEPTANCE_RESULTS_TEMPLATE.md).  
+*Текущий статус проекта: Автоматическая совместимость с браузером подтверждена; требуется ручное приёмочное тестирование на production chat.deepseek.com.*
 
 ---
 
 ## Разработка и тестирование
 
-Проект покрыт автоматическими тестами (фаззинг границ чанков, декодирование протокола, перехват цензуры, миграции базы данных и конкурентные сбросы):
+Проект покрыт многоуровневым набором автоматических тестов (фаззинг границ чанков, декодирование протокола, перехват цензуры, миграции базы данных и браузерный стенд в headless Chromium MV3):
 
 ```bash
-# Запуск полного набора тестов Vitest (52 файла, 348 тестов)
+# Запуск полного набора юнит- и интеграционных тестов Vitest (53 файла, 367 тестов)
 pnpm run test
 
 # Проверка типов TypeScript
 pnpm run typecheck
 
+# Сборка распакованного расширения Chrome MV3
+pnpm run build
+
+# Запуск браузерного стенда совместимости Playwright (6 сценариев, без внешних запросов)
+pnpm run test:e2e
+
 # Запуск dev-сервера WXT с горячей перезагрузкой
 pnpm run dev
 ```
 
-# Запуск сервера разработки с live-reload
-pnpm run dev
-```
+Подробную архитектуру стенда браузерной совместимости см. в [Документации стенда совместимости](./docs/COMPATIBILITY_HARNESS.md).
 
 ---
 

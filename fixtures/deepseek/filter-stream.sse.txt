@@ -1,0 +1,9 @@
+data: {"p":"response/message_id","o":"SET","v":"msg_filter_001"}
+
+data: {"p":"response/session_id","o":"SET","v":"sess-filter-001"}
+
+data: {"p":"response/fragments","o":"SET","v":[{"type":"THINK","content":"Reasoning step 1: analysis of the input prompt."},{"type":"RESPONSE","content":"Valuable pre-filter response content with important mathematical derivations."}]}
+
+data: {"p":"response","o":"BATCH","v":[{"p":"fragments","o":"SET","v":[{"type":"TEMPLATE_RESPONSE","content":"This response was filtered due to policy."}]},{"p":"status","o":"SET","v":"CONTENT_FILTER"}]}
+
+data: [DONE]

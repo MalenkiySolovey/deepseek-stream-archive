@@ -6,7 +6,9 @@
 
 ![Platform](https://img.shields.io/badge/platform-Chrome%20%7C%20Chromium%20MV3-4285F4?logo=googlechrome&logoColor=white)
 ![Framework](https://img.shields.io/badge/framework-WXT%20%2B%20Svelte%205-FF3E00?logo=svelte&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-348%20passing-3DDC84)
+![Tests](https://img.shields.io/badge/unit%20tests-367%20passing-3DDC84)
+![E2E Tests](https://img.shields.io/badge/playwright%20e2e-6%20passing-brightgreen)
+![Status](https://img.shields.io/badge/live%20acceptance-preflight%20ready-orange)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -186,24 +188,33 @@ IndexedDB: StreamArchiveDB (Version 7)
 4. Navigate to [DeepSeek Chat](https://chat.deepseek.com/).
 5. Open the **Side Panel** in Chrome and select **DeepSeek StreamArchive** from the dropdown.
 
-For manual live testing instructions on `chat.deepseek.com`, see the [Live Acceptance Testing Guide](./docs/LIVE_ACCEPTANCE.md).
+For manual live testing instructions and execution templates, see the [Live Acceptance Testing Guide](./docs/LIVE_ACCEPTANCE.md) and [Live Acceptance Results Template](./docs/LIVE_ACCEPTANCE_RESULTS_TEMPLATE.md).  
+*Current Project Status: Automated browser compatibility verified; live manual acceptance pending against production chat.deepseek.com.*
 
 ---
 
 ## Development & Testing
 
-StreamArchive maintains an exhaustive automated test suite covering chunk boundary fuzzing, protocol decoding, censorship interception, database migrations, and concurrency:
+StreamArchive maintains an exhaustive multi-tier automated test suite covering chunk boundary fuzzing, protocol decoding, censorship interception, database migrations, and a headless Chromium MV3 compatibility harness:
 
 ```bash
-# Run the full Vitest suite (52 test files, 348 tests)
+# Run unit and integration tests (53 test files, 367 tests)
 pnpm run test
 
 # Run TypeScript typecheck
 pnpm run typecheck
 
+# Build unpacked Chrome MV3 extension
+pnpm run build
+
+# Run Playwright Chromium MV3 browser compatibility harness (6 specs, zero external network)
+pnpm run test:e2e
+
 # Start WXT development server with live-reloading
 pnpm run dev
 ```
+
+For detailed architecture of the end-to-end browser test runner, see the [Browser Compatibility Harness Documentation](./docs/COMPATIBILITY_HARNESS.md).
 
 ---
 

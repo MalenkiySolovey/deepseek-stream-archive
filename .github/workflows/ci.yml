@@ -49,3 +49,9 @@ jobs:
           test -f .output/chrome-mv3/manifest.json
           test -f .output/chrome-mv3/sidepanel.html
           echo "Production extension bundle successfully verified."
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install chromium --with-deps
+
+      - name: Run browser compatibility harness
+        run: pnpm run test:e2e

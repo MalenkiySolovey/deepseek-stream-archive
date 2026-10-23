@@ -1,0 +1,6 @@
+data: {"p":"response/message_id","o":"SET","v":"msg_interrupted_001"}
+
+data: {"p":"response/session_id","o":"SET","v":"sess-interrupted-001"}
+
+data: {"p":"response/fragments","o":"SET","v":[{"type":"RESPONSE","content":"Partial captured text before connection dropped..."}]}
+

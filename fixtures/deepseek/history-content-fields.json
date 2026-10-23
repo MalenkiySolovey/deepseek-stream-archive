@@ -1,0 +1,25 @@
+{
+  "code": 0,
+  "data": {
+    "chat_session": {
+      "id": "sess-hist-content",
+      "title": "History Content Fields Session",
+      "updated_at": 1700000000000,
+      "pinned": false
+    },
+    "chat_messages": [
+      {
+        "message_id": "msg_u_002",
+        "role": "user",
+        "content": "What is entropy?",
+        "created_at": 1700000000000
+      },
+      {
+        "message_id": "msg_a_002",
+        "role": "assistant",
+        "content": "Entropy is a measure of molecular disorder or randomness...",
+        "created_at": 1700000005000
+      }
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+data: {"p":"response/message_id","o":"SET","v":"msg_norm_001"}
+
+data: {"p":"response/session_id","o":"SET","v":"sess-norm-001"}
+
+data: {"p":"response/fragments","o":"SET","v":[{"type":"RESPONSE","content":"Hello from synthetic DeepSeek stream."}]}
+
+data: {"p":"response/status","o":"SET","v":"FINISHED"}
+
+data: [DONE]

@@ -1,0 +1,27 @@
+{
+  "code": 0,
+  "data": {
+    "chat_session": {
+      "id": "sess-hist-frag",
+      "title": "History Fragments Session",
+      "updated_at": 1700000000000,
+      "pinned": false
+    },
+    "chat_messages": [
+      {
+        "message_id": "msg_u_001",
+        "role": "user",
+        "content": "Explain quantum decoherence",
+        "created_at": 1700000000000
+      },
+      {
+        "message_id": "msg_a_001",
+        "role": "assistant",
+        "fragments": [
+          { "type": "RESPONSE", "content": "Quantum decoherence is the loss of quantum coherence..." }
+        ],
+        "created_at": 1700000005000
+      }
+    ]
+  }
+}
