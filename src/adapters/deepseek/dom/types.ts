@@ -22,9 +22,14 @@ export interface DeepSeekDomProbeResult {
   observedSelectors: {
     containerSelector?: string;
     messageSelector?: string;
+    contentSelector?: string;
+    toolbarSelector?: string;
   };
   domCapabilityState: DomCapabilityState;
   identityAuthority: DomIdentityAuthority;
+  messageAnchorStrongIdentity: boolean;
+  inlineRecoveryInsertionPoint: boolean;
+  nativeToolbarSeparation: boolean;
 }
 
 export interface LocatedMessageAnchor {
@@ -32,6 +37,15 @@ export interface LocatedMessageAnchor {
   element: HTMLElement;
   rect: DOMRect;
   authority: DomIdentityAuthority;
+}
+
+export interface InlineInsertionTarget {
+  anchorElement: HTMLElement;
+  placeholderElement: HTMLElement | null;
+  containerElement: HTMLElement;
+  insertRefNode: Node | null;
+  toolbarElement: HTMLElement | null;
+  level: 'level_1_body' | 'level_2_adjacent';
 }
 
 export type PageRecoveryPresentationKind =

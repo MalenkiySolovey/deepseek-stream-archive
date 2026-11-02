@@ -58,4 +58,20 @@ The **Non-Destructive In-Page Recovery Overlay** allows users to view, copy, and
    - Zero `innerHTML` and zero `eval`.
    - All text and reasoning chains are rendered via `document.createElement` and `textContent`.
    - Native `<details>` and `<summary>` elements provide collapsible reasoning inspection without external JavaScript dependencies.
+
+---
+
+## 7. Dual Presentation Modes: Overlay vs. Inline (Milestone 2D.4)
+
+Starting in Milestone 2D.4, users can choose between two presentation modes in Side Panel Settings (`chrome.storage.local` key `streamarchive_recovery_presentation`):
+
+1. **Overlay Mode (Default):**
+   - Strictly conforms to the zero host-DOM mutation invariant above.
+   - Floats badges above the message and opens a modal recovery card upon user click.
+2. **Inline Mode:**
+   - Inserts exactly one closed Shadow DOM host (`<div data-streamarchive-inline-recovery-host="...">`) directly inside the assistant message node.
+   - Reversibly hides the canned refusal placeholder (`display: none`).
+   - Renders the preserved response using safe tokenized Markdown fragments.
+   - Preserves DeepSeek's native action toolbar (`Copy`, `Regenerate`, `Like`, `Dislike`, `Read aloud`, `Share`) in host DOM without modification.
+   - For complete details, see [Inline Recovery Presentation Architecture](./INLINE_RECOVERY.md) and [ADR 0026](./ADR/0026-inline-recovery-presentation.md).
    - Root host ownership is tracked strictly in memory (`portalHostElement`), completely eliminating host-DOM querying (`document.querySelector`) and preventing element spoofing attacks. If closed Shadow DOM attachment fails, the overlay safely disables itself rather than falling back to light DOM.

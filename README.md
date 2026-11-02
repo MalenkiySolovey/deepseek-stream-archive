@@ -6,8 +6,8 @@
 
 ![Platform](https://img.shields.io/badge/platform-Chrome%20%7C%20Chromium%20MV3-4285F4?logo=googlechrome&logoColor=white)
 ![Framework](https://img.shields.io/badge/framework-WXT%20%2B%20Svelte%205-FF3E00?logo=svelte&logoColor=white)
-![Tests](https://img.shields.io/badge/unit%20tests-473%20passing-3DDC84)
-![E2E Tests](https://img.shields.io/badge/playwright%20e2e-17%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/unit%20tests-495%20passing-3DDC84)
+![E2E Tests](https://img.shields.io/badge/playwright%20e2e-19%20passing-brightgreen)
 ![Status](https://img.shields.io/badge/live%20compatibility-baseline%20accepted-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -61,11 +61,12 @@ Other frequent loss vectors include:
 - **Chromium MV3 Origin Isolation:** All conversation data, raw batches, and canonical models are stored in an IndexedDB database hosted strictly inside the extension origin (`chrome-extension://<id>`).
 - **Zero Page-Origin Exposure:** The web page context (`chat.deepseek.com`) has zero access to extension storage, tokens, or saved history.
 
-### 4. Non-Destructive In-Page Recovery Overlay
-- **Zero DOM Mutation:** Does not mutate or append elements to DeepSeek's assistant message nodes, preserving React virtualization and page stability.
+### 4. In-Page Recovery Presentation (Overlay & Optional Inline Mode)
+- **Zero DOM Mutation (Overlay Mode):** By default, does not mutate or append elements to DeepSeek's assistant message nodes, preserving React virtualization and page stability.
 - **Closed Shadow DOM Portal:** Renders recovery badges and modal cards in an isolated closed `#shadow-root`, eliminating CSS leaks and preventing page scripts from inspecting recovery state.
-- **Privacy-First Lazy Fetch:** Initial page queries contain zero text snippets; full pre-filter answers and reasoning traces are loaded only upon explicit user click.
-- **Route-Race Isolation:** Monotonic route tokens guarantee that navigating between sessions never displays stale recovery badges from prior chats.
+- **Optional Inline Chat Recovery:** User-toggleable inline display mode (`overlay` vs `inline`) rendering recovered answers directly inside the message block via closed Shadow DOM, with reversible placeholder style suppression, collapsible DeepThink reasoning, and full preservation of DeepSeek's native action toolbar (`Copy`, `Regenerate`, `Like`, `Dislike`, `Read aloud`, `Share`).
+- **Privacy-First Lazy Fetch:** Initial page queries contain zero text snippets; full pre-filter answers and reasoning traces are loaded only upon explicit user click or inline view.
+- **Route-Race Isolation:** Monotonic route tokens guarantee that navigating between sessions immediately revokes inline recovery hosts and overlay badges from prior chats.
 
 ### 5. Svelte 5 Side Panel Archive Browser
 - **Native Side Panel UI:** Clean, responsive interface built with Svelte 5 runes (`$state`, `$derived`, `$props`) accessible right alongside your chats.
@@ -222,7 +223,7 @@ pnpm run typecheck
 # Build unpacked Chrome MV3 extension
 pnpm run build
 
-# Run Playwright Chromium MV3 browser compatibility harness (16 specs, 17 tests, fail-closed network isolation)
+# Run Playwright Chromium MV3 browser compatibility harness (17 specs, 19 tests, fail-closed network isolation)
 pnpm run test:e2e
 
 # Start WXT development server with live-reloading

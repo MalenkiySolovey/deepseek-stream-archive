@@ -1,8 +1,16 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import ArchiveBrowser from './components/ArchiveBrowser.svelte';
   import ConversationView from './components/ConversationView.svelte';
   import DiagnosticsView from './components/DiagnosticsView.svelte';
   import { translations, type SupportedLocale } from './components/i18n';
+  import {
+    type RecoveryPresentationSettings,
+    type RecoveryDisplayMode,
+    DEFAULT_RECOVERY_PRESENTATION_SETTINGS,
+    getRecoveryPresentationSettings,
+    saveRecoveryPresentationSettings,
+  } from '../../src/presentation/settings';
   import {
     MESSAGE_CREATE_PORTABLE_BACKUP_SNAPSHOT,
     MESSAGE_GET_STORAGE_USAGE_ESTIMATE,
@@ -99,11 +107,37 @@
   let clearArchiveLoading = $state<boolean>(false);
   let clearArchiveFeedback = $state<string | null>(null);
 
+  // Milestone 2D.4: Recovery Presentation State in Settings
+  let recoverySettings = $state<RecoveryPresentationSettings>({ ...DEFAULT_RECOVERY_PRESENTATION_SETTINGS });
+
+  onMount(() => {
+    loadRecoverySettings();
+  });
+
+  async function loadRecoverySettings() {
+    try {
+      recoverySettings = await getRecoveryPresentationSettings();
+    } catch {
+      // default
+    }
+  }
+
+  async function handleDisplayModeChange(mode: RecoveryDisplayMode) {
+    recoverySettings = { ...recoverySettings, displayMode: mode };
+    await saveRecoveryPresentationSettings(recoverySettings);
+  }
+
+  async function handleShowThinkingInlineChange(show: boolean) {
+    recoverySettings = { ...recoverySettings, showThinkingInline: show };
+    await saveRecoveryPresentationSettings(recoverySettings);
+  }
+
   function switchTab(tab: ActiveTab) {
     activeTab = tab;
     if (tab === 'settings') {
       loadStorageEstimate();
       loadMaintenanceStatus();
+      loadRecoverySettings();
     }
   }
 
@@ -553,6 +587,59 @@
               <option value="ru">Русский (ru)</option>
             </select>
           </label>
+        </div>
+
+        <!-- Milestone 2D.4: Recovery Presentation Settings -->
+        <div class="settings-card recovery-presentation-card">
+          <h3 class="card-subtitle">🛡️ {t.recoveryPresentationTitle}</h3>
+          <p class="about-desc">{t.recoveryPresentationDesc}</p>
+
+          <div class="setting-radio-group">
+            <span class="setting-label">{t.recoveryDisplayMode}</span>
+            <label class="setting-radio-item">
+              <input
+                type="radio"
+                name="recoveryDisplayMode"
+                value="overlay"
+                checked={recoverySettings.displayMode === 'overlay'}
+                onchange={() => handleDisplayModeChange('overlay')}
+              />
+              <div class="radio-content">
+                <strong>{t.recoveryDisplayOverlay}</strong>
+                <span class="setting-hint">{t.recoveryDisplayOverlayDesc}</span>
+              </div>
+            </label>
+
+            <label class="setting-radio-item">
+              <input
+                type="radio"
+                name="recoveryDisplayMode"
+                value="inline"
+                checked={recoverySettings.displayMode === 'inline'}
+                onchange={() => handleDisplayModeChange('inline')}
+              />
+              <div class="radio-content">
+                <strong>{t.recoveryDisplayInline}</strong>
+                <span class="setting-hint">{t.recoveryDisplayInlineDesc}</span>
+              </div>
+            </label>
+          </div>
+
+          {#if recoverySettings.displayMode === 'inline'}
+            <div class="setting-checkbox-item">
+              <label class="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={recoverySettings.showThinkingInline}
+                  onchange={(e) => handleShowThinkingInlineChange(e.currentTarget.checked)}
+                />
+                <span class="checkbox-text">
+                  <strong>{t.recoveryShowThinkingInline}</strong>
+                  <span class="setting-hint">{t.recoveryShowThinkingInlineDesc}</span>
+                </span>
+              </label>
+            </div>
+          {/if}
         </div>
 
         <!-- Milestone 2E.1: Data Export & Portable Backup -->
@@ -1413,6 +1500,88 @@
     border: 1px solid #1e293b;
     border-radius: 0.5rem;
     padding: 1rem;
+  }
+
+  .recovery-presentation-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .setting-radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .setting-radio-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.625rem;
+    padding: 0.5rem 0.625rem;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 0.375rem;
+    cursor: pointer;
+    transition: border-color 0.15s, background-color 0.15s;
+  }
+
+  .setting-radio-item:hover {
+    border-color: #475569;
+    background: #243248;
+  }
+
+  .setting-radio-item input[type='radio'] {
+    margin-top: 0.1875rem;
+    cursor: pointer;
+    accent-color: #38bdf8;
+  }
+
+  .radio-content {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+  }
+
+  .radio-content strong {
+    font-size: 0.8125rem;
+    color: #f1f5f9;
+  }
+
+  .setting-hint {
+    font-size: 0.71875rem;
+    color: #94a3b8;
+    line-height: 1.35;
+  }
+
+  .setting-checkbox-item {
+    margin-top: 0.25rem;
+    padding-top: 0.5rem;
+    border-top: 1px dashed #334155;
+  }
+
+  .checkbox-label {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.625rem;
+    cursor: pointer;
+  }
+
+  .checkbox-label input[type='checkbox'] {
+    margin-top: 0.1875rem;
+    cursor: pointer;
+    accent-color: #38bdf8;
+  }
+
+  .checkbox-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+  }
+
+  .checkbox-text strong {
+    font-size: 0.8125rem;
+    color: #f1f5f9;
   }
 
   .setting-item {

@@ -1,5 +1,5 @@
 import { OVERLAY_STYLES } from './styles';
-import { locateMessageAnchor } from '../adapters/deepseek/dom/message-locator';
+import { locateMessageAnchor, findInlineInsertionPoint } from '../adapters/deepseek/dom/message-locator';
 import type { PageRecoverySummary, PageRecoveryMessageSummary } from '../adapters/deepseek/dom/types';
 import {
   MESSAGE_GET_PAGE_RECOVERY_SUMMARY,
@@ -11,6 +11,16 @@ import {
 } from '../bridge/messages';
 import { extractSessionIdFromUrl } from '../adapters/deepseek/context/session-id';
 import { logger } from '../shared/logger';
+import {
+  type RecoveryPresentationSettings,
+  type RecoveryDisplayMode,
+  DEFAULT_RECOVERY_PRESENTATION_SETTINGS,
+  STORAGE_KEY_RECOVERY_PRESENTATION,
+  getRecoveryPresentationSettings,
+  validateRecoveryPresentationSettings,
+} from '../presentation/settings';
+import { mountInlineRecovery } from '../presentation/inline-recovery/dom';
+import { InlineRecoveryLedger } from '../presentation/inline-recovery/ledger';
 
 export interface OverlayContentResult {
   text: string;
@@ -28,6 +38,7 @@ export interface OverlayPortalOptions {
     messageId: string;
     recoveryEventId?: string;
   }) => Promise<OverlayContentResult | null>;
+  presentationSettings?: Partial<RecoveryPresentationSettings>;
 }
 
 // Track elements created by our extension isolated world to reject spoofed page elements
@@ -99,6 +110,11 @@ export class StreamArchiveOverlayPortal {
   private isDestroyed = false;
   private isMounted = false;
 
+  private presentationSettings: RecoveryPresentationSettings;
+  private inlineLedger = new InlineRecoveryLedger();
+  private inFlightFetches = new Set<string>();
+  private storageListener: ((changes: { [key: string]: chrome.storage.StorageChange }, areaName: string) => void) | null = null;
+
   private readonly fetchSummaryImpl: (currentRouteSessionId?: string) => Promise<PageRecoverySummary | null>;
   private readonly fetchContentImpl: (req: {
     currentRouteSessionId: string;
@@ -107,6 +123,10 @@ export class StreamArchiveOverlayPortal {
   }) => Promise<OverlayContentResult | null>;
 
   constructor(options?: OverlayPortalOptions) {
+    this.presentationSettings = options?.presentationSettings
+      ? validateRecoveryPresentationSettings(options.presentationSettings)
+      : { ...DEFAULT_RECOVERY_PRESENTATION_SETTINGS };
+
     this.fetchSummaryImpl =
       options?.fetchSummary ||
       (async (routeId) => {
@@ -142,6 +162,33 @@ export class StreamArchiveOverlayPortal {
           return null;
         }
       });
+
+    // If options did not override settings, load saved settings from chrome.storage.local
+    if (!options?.presentationSettings) {
+      getRecoveryPresentationSettings()
+        .then((settings) => {
+          if (!this.isDestroyed) {
+            this.presentationSettings = settings;
+            this.render();
+          }
+        })
+        .catch(() => {
+          // ignore
+        });
+    }
+
+    // React immediately to settings changes in chrome.storage.local
+    if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
+      this.storageListener = (changes, areaName) => {
+        if (areaName === 'local' && changes[STORAGE_KEY_RECOVERY_PRESENTATION]) {
+          const updated = validateRecoveryPresentationSettings(
+            changes[STORAGE_KEY_RECOVERY_PRESENTATION].newValue
+          );
+          this.setPresentationSettings(updated);
+        }
+      };
+      chrome.storage.onChanged.addListener(this.storageListener);
+    }
 
     this.initPortal(options?.mountTarget);
   }
@@ -296,6 +343,8 @@ export class StreamArchiveOverlayPortal {
     this.activeModalMessageId = null;
     this.modalContentCache.clear();
     this.dismissedMessageIds.clear();
+    this.inFlightFetches.clear();
+    this.inlineLedger.unmountAll();
     this.render();
   }
 
@@ -368,6 +417,8 @@ export class StreamArchiveOverlayPortal {
         this.activeModalMessageId = null;
         this.modalContentCache.clear();
         this.dismissedMessageIds.clear();
+        this.inFlightFetches.clear();
+        this.inlineLedger.unmountAll();
         this.render();
       }
       this.refreshSummary();
@@ -378,6 +429,38 @@ export class StreamArchiveOverlayPortal {
     return this.shadow;
   }
 
+  getPresentationSettings(): RecoveryPresentationSettings {
+    return { ...this.presentationSettings };
+  }
+
+  setPresentationSettings(settings: Partial<RecoveryPresentationSettings>): void {
+    const previous = this.presentationSettings;
+    const updated = validateRecoveryPresentationSettings({
+      ...this.presentationSettings,
+      ...settings,
+    });
+    this.presentationSettings = updated;
+
+    if (previous.displayMode === 'inline' && updated.displayMode === 'overlay') {
+      this.inlineLedger.unmountAll();
+    }
+    if (previous.displayMode === 'overlay' && updated.displayMode === 'inline') {
+      this.activeModalMessageId = null;
+    }
+    if (
+      previous.displayMode === 'inline' &&
+      updated.displayMode === 'inline' &&
+      previous.showThinkingInline !== updated.showThinkingInline
+    ) {
+      this.inlineLedger.unmountAll();
+    }
+    this.render();
+  }
+
+  getInlineLedger(): InlineRecoveryLedger {
+    return this.inlineLedger;
+  }
+
   getDiagnostics(): {
     isMounted: boolean;
     isDestroyed: boolean;
@@ -386,6 +469,8 @@ export class StreamArchiveOverlayPortal {
     routeEpoch: number;
     modalContentCacheSize: number;
     dismissedCount: number;
+    displayMode: RecoveryDisplayMode;
+    inlineMountedCount: number;
   } {
     return {
       isMounted: this.isMounted,
@@ -395,6 +480,8 @@ export class StreamArchiveOverlayPortal {
       routeEpoch: this.routeEpoch,
       modalContentCacheSize: this.modalContentCache.size,
       dismissedCount: this.dismissedMessageIds.size,
+      displayMode: this.presentationSettings.displayMode,
+      inlineMountedCount: this.inlineLedger.size,
     };
   }
 
@@ -421,6 +508,8 @@ export class StreamArchiveOverlayPortal {
     this.activeModalMessageId = null;
     this.modalContentCache.clear();
     this.activeSummary = null;
+    this.inFlightFetches.clear();
+    this.inlineLedger.unmountAll();
     this.render();
 
     // If on homepage or route without session ID, never fetch summary or show overlay
@@ -449,6 +538,7 @@ export class StreamArchiveOverlayPortal {
     }
 
     if (!this.activeSummary || this.activeSummary.messages.length === 0) {
+      this.inlineLedger.unmountAll();
       return;
     }
 
@@ -456,22 +546,116 @@ export class StreamArchiveOverlayPortal {
       (m) => !this.dismissedMessageIds.has(m.messageId)
     );
 
-    if (availableMessages.length === 0) return;
+    if (availableMessages.length === 0) {
+      this.inlineLedger.unmountAll();
+      return;
+    }
 
     const unanchoredMessages: PageRecoveryMessageSummary[] = [];
 
-    // 1. Attempt strong anchored mapping for each message
-    for (const msg of availableMessages) {
-      let isAnchored = false;
-      if (msg.remoteId) {
-        const anchor = locateMessageAnchor(msg.remoteId, document);
-        if (anchor && anchor.rect.top > -200 && anchor.rect.top < window.innerHeight + 200) {
-          isAnchored = true;
-          this.renderAnchoredBadge(msg, anchor.rect);
+    if (this.presentationSettings.displayMode === 'inline') {
+      const currentAvailableMessageIds = new Set(availableMessages.map((m) => m.messageId));
+
+      // Clean up inline hosts that are no longer available (e.g. dismissed)
+      for (const handle of this.inlineLedger.getAllHandles()) {
+        if (!currentAvailableMessageIds.has(handle.messageId)) {
+          this.inlineLedger.unmount(handle.messageId);
         }
       }
-      if (!isAnchored) {
-        unanchoredMessages.push(msg);
+
+      for (const msg of availableMessages) {
+        let isAnchored = false;
+        if (msg.remoteId) {
+          const anchor = locateMessageAnchor(msg.remoteId, document);
+          if (anchor && anchor.rect.top > -200 && anchor.rect.top < window.innerHeight + 200) {
+            const target = findInlineInsertionPoint(anchor);
+            if (target) {
+              isAnchored = true;
+              const cached = this.modalContentCache.get(msg.messageId);
+              if (cached) {
+                const existingHandle = this.inlineLedger.get(msg.messageId);
+                if (
+                  existingHandle &&
+                  existingHandle.hostElement.isConnected &&
+                  existingHandle.containerElement === target.containerElement
+                ) {
+                  // Already mounted properly in the DOM
+                } else {
+                  const handle = mountInlineRecovery(target, msg, cached, {
+                    showThinkingInline: this.presentationSettings.showThinkingInline,
+                  });
+                  if (handle) {
+                    this.inlineLedger.registerHandle(msg.messageId, handle);
+                  } else {
+                    // Fallback to anchored badge if closed shadow DOM or mount failed
+                    this.renderAnchoredBadge(msg, anchor.rect);
+                  }
+                }
+              } else {
+                // Content not yet cached; trigger lazy load and display temporary anchored badge
+                this.lazyLoadContent(msg);
+                this.renderAnchoredBadge(msg, anchor.rect);
+              }
+            } else {
+              // Anchor found in DOM, but no valid inline insertion target structure
+              // Fallback to anchored badge
+              isAnchored = true;
+              this.renderAnchoredBadge(msg, anchor.rect);
+            }
+          } else if (anchor) {
+            // Anchor exists in DOM but outside current viewport range
+            isAnchored = true;
+            const target = findInlineInsertionPoint(anchor);
+            if (target) {
+              const cached = this.modalContentCache.get(msg.messageId);
+              if (cached) {
+                const existingHandle = this.inlineLedger.get(msg.messageId);
+                if (
+                  !existingHandle ||
+                  !existingHandle.hostElement.isConnected ||
+                  existingHandle.containerElement !== target.containerElement
+                ) {
+                  const handle = mountInlineRecovery(target, msg, cached, {
+                    showThinkingInline: this.presentationSettings.showThinkingInline,
+                  });
+                  if (handle) {
+                    this.inlineLedger.registerHandle(msg.messageId, handle);
+                  }
+                }
+              } else {
+                this.lazyLoadContent(msg);
+              }
+            }
+          }
+        }
+
+        if (!isAnchored) {
+          if (this.inlineLedger.has(msg.messageId)) {
+            const handle = this.inlineLedger.get(msg.messageId);
+            if (!handle || !handle.hostElement.isConnected) {
+              this.inlineLedger.unmount(msg.messageId);
+            }
+          }
+          unanchoredMessages.push(msg);
+        }
+      }
+    } else {
+      // Overlay mode: ensure zero inline hosts remain in host DOM
+      this.inlineLedger.unmountAll();
+
+      // 1. Attempt strong anchored mapping for each message
+      for (const msg of availableMessages) {
+        let isAnchored = false;
+        if (msg.remoteId) {
+          const anchor = locateMessageAnchor(msg.remoteId, document);
+          if (anchor && anchor.rect.top > -200 && anchor.rect.top < window.innerHeight + 200) {
+            isAnchored = true;
+            this.renderAnchoredBadge(msg, anchor.rect);
+          }
+        }
+        if (!isAnchored) {
+          unanchoredMessages.push(msg);
+        }
       }
     }
 
@@ -534,6 +718,7 @@ export class StreamArchiveOverlayPortal {
     closeBtn.addEventListener('click', () => {
       for (const m of messages) {
         this.dismissedMessageIds.add(m.messageId);
+        this.inlineLedger.unmount(m.messageId);
       }
       this.render();
     });
@@ -562,30 +747,41 @@ export class StreamArchiveOverlayPortal {
     this.container?.appendChild(tray);
   }
 
-  private async openRecoveryModal(messageId: string): Promise<void> {
+  private async lazyLoadContent(msg: PageRecoveryMessageSummary): Promise<void> {
+    const messageId = msg.messageId;
+    if (this.modalContentCache.has(messageId) || this.inFlightFetches.has(messageId)) {
+      return;
+    }
     const currentEpoch = this.routeEpoch;
     const currentSession = this.currentSessionId;
-    this.activeModalMessageId = messageId;
-    this.render();
+    if (!currentSession) return;
 
-    // Lazy load content on demand via dedicated endpoint if not cached
-    if (!this.modalContentCache.has(messageId)) {
-      const msg = this.activeSummary?.messages.find((m) => m.messageId === messageId);
-      if (msg && currentSession) {
-        const content = await this.fetchContentImpl({
-          currentRouteSessionId: currentSession,
-          messageId: msg.messageId,
-          recoveryEventId: msg.recoveryEventId,
-        });
-        if (content && !this.isDestroyed) {
-          // Route-race invariant: Discard modal response if route navigated while fetching
-          if (this.routeEpoch === currentEpoch && this.currentSessionId === currentSession) {
-            this.modalContentCache.set(messageId, content);
-            this.render();
-          }
+    this.inFlightFetches.add(messageId);
+    try {
+      const content = await this.fetchContentImpl({
+        currentRouteSessionId: currentSession,
+        messageId: msg.messageId,
+        recoveryEventId: msg.recoveryEventId,
+      });
+      if (content && !this.isDestroyed) {
+        // Route-race invariant: Discard modal response if route navigated while fetching
+        if (this.routeEpoch === currentEpoch && this.currentSessionId === currentSession) {
+          this.modalContentCache.set(messageId, content);
+          this.render();
         }
       }
+    } finally {
+      this.inFlightFetches.delete(messageId);
     }
+  }
+
+  private async openRecoveryModal(messageId: string): Promise<void> {
+    this.activeModalMessageId = messageId;
+    const msg = this.activeSummary?.messages.find((m) => m.messageId === messageId);
+    if (msg) {
+      await this.lazyLoadContent(msg);
+    }
+    this.render();
   }
 
   private renderRecoveryModal(msg: PageRecoveryMessageSummary): void {
@@ -687,6 +883,7 @@ export class StreamArchiveOverlayPortal {
     dismissBtn.textContent = 'Dismiss';
     dismissBtn.addEventListener('click', () => {
       this.dismissedMessageIds.add(msg.messageId);
+      this.inlineLedger.unmount(msg.messageId);
       this.activeModalMessageId = null;
       this.render();
     });
@@ -700,6 +897,12 @@ export class StreamArchiveOverlayPortal {
 
   destroy(): void {
     this.isDestroyed = true;
+    if (this.storageListener && typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
+      chrome.storage.onChanged.removeListener(this.storageListener);
+      this.storageListener = null;
+    }
+    this.inlineLedger.unmountAll();
+    this.inFlightFetches.clear();
     if (this.earlyDomReadyHandler && typeof document !== 'undefined') {
       document.removeEventListener('DOMContentLoaded', this.earlyDomReadyHandler);
       this.earlyDomReadyHandler = null;

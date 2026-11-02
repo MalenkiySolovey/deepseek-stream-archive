@@ -79,6 +79,9 @@ The extension monitors 10 distinct capabilities:
 | `probe:identity-resolve`| Message ID Extraction | Stable `message_id` observed in chunk payload. |
 | `probe:history-api` | History Reconciliation | Successfully intercepted or queried `/history_messages`. |
 | `probe:dom-fallback` | DOM Selector Health | Verified that fallback selectors match current page DOM elements. |
+| `probe:dom-anchor-identity` | Message Anchor Authority | Verified strong `data-message-id` attribute presence on assistant message nodes. |
+| `probe:dom-inline-insertion` | Inline Insertion Point | Verified Level 1 content placeholder or Level 2 pre-toolbar structural insertion target. |
+| `probe:dom-toolbar-separation` | Native Toolbar Separation | Verified that native DeepSeek actions toolbar is identifiable and segregated from content. |
 | `probe:storage` | IndexedDB Storage | Write/read transaction verified on extension startup. |
 
 ### 2.2 Probe States

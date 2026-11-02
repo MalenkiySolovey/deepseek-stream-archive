@@ -586,5 +586,42 @@ The automated regression corpus stands at **452 Vitest tests across 66 test file
 7. **Browser E2E Clear Entire Archive (`tests/browser/clear-archive.spec.ts`):**
    - Chromium MV3 browser test: seeds all 9 IndexedDB stores with conversations, raw streams, checkpoints, and history staging data; navigates to Settings; tests required confirmation checkbox; executes Clear All Archive; and verifies all 9 stores are emptied while user settings in `chrome.storage.local` are preserved.
 
+---
+
+## 12. Inline Recovery Presentation Test Suite (Milestone 2D.4)
+
+1. **Safe Markdown Tokenizer & DOM Fragment Parser (`tests/safe-markdown-parser.test.ts`):**
+   - 6 unit tests verifying tokenization and pure DOM node rendering without `innerHTML`:
+     - Markdown paragraphs, headers, blockquotes, code blocks, lists, and inline links.
+     - Code copy button integration with clipboard interaction.
+     - Escape of raw script and HTML tags into harmless text nodes.
+
+2. **Inline Presentation Settings Validation (`tests/inline-recovery-settings.test.ts`):**
+   - 4 unit tests verifying persistence in `chrome.storage.local`:
+     - Default settings fallback (`overlay` mode, `showThinkingInline: true`).
+     - Safe clamping and validation of malformed inputs.
+     - Bidirectional get/save serialization.
+
+3. **DOM Capability Probes (`tests/deepseek-dom-capability-probe.test.ts`):**
+   - 4 unit tests verifying detection of message anchors, inline insertion targets, and native action toolbars.
+
+4. **Structural Insertion Point Locator (`tests/inline-recovery-placement.test.ts`):**
+   - 4 unit tests verifying Level 1 (body placeholder replacement), Level 2 (adjacent pre-toolbar insertion), and fallback null classification.
+
+5. **Inline Recovery DOM Lifecycle & Ledger (`tests/inline-recovery-lifecycle.test.ts`):**
+   - 3 unit tests verifying closed Shadow DOM host mounting, idempotent ledger registration, reversible placeholder suppression, and clean unmounting.
+
+6. **Inline Recovery Security & Trust Boundary (`tests/inline-recovery-security.test.ts`):**
+   - 2 unit tests verifying that sensitive response text is never leaked into host element attributes, and that malicious HTML strings cannot execute scripts or inject Light DOM nodes.
+
+7. **Overlay Portal Presentation Integration (`tests/recovery-overlay-portal.test.ts`):**
+   - 15 unit tests verifying dual presentation mode switching (`overlay` ↔ `inline`), lazy content loading, fallback to badges when DOM insertion points are missing, and immediate route cleanup during client-side SPA navigation.
+
+8. **Browser E2E Inline Recovery in Chromium MV3 (`tests/browser/inline-recovery.spec.ts`):**
+   - 2 end-to-end browser tests verifying:
+     - Synthetic censored response renders inline recovery inside DeepSeek message node with visible trust marker, preserved pre-filter text, collapsible DeepThink block, and fully clickable native DeepSeek toolbar (6 action buttons verified).
+     - Changing settings back to `overlay` unmounts inline hosts and restores placeholder visibility.
+     - Route navigation between chat sessions cleanly unmounts inline hosts without cross-chat state leakage.
+
 > [!IMPORTANT]
 > Automated tests confirm structural and protocol compliance. For instructions on executing real-world manual acceptance testing against live `chat.deepseek.com`, see the [Live Acceptance Testing Guide](./LIVE_ACCEPTANCE.md) and [Live Acceptance Results Template](./LIVE_ACCEPTANCE_RESULTS_TEMPLATE.md).

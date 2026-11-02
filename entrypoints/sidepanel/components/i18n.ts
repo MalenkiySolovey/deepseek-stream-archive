@@ -66,6 +66,17 @@ export const translations = {
     aboutDesc: 'Local-first, crash-durable forensic recorder and recovery extension for DeepSeek web streams.',
     storageNotice: 'All data is stored locally in your browser IndexedDB with zero external tracking.',
 
+    // Milestone 2D.4: Recovery Presentation
+    recoveryPresentationTitle: 'Recovery Presentation',
+    recoveryPresentationDesc: 'Choose where recovered DeepSeek responses appear when viewing chats.',
+    recoveryDisplayMode: 'Recovery Display Mode',
+    recoveryDisplayOverlay: 'Overlay badge & card (Default)',
+    recoveryDisplayOverlayDesc: 'Shows a non-intrusive badge above the filtered message. Clicking opens the full recovery card modal.',
+    recoveryDisplayInline: 'Inline in DeepSeek chat',
+    recoveryDisplayInlineDesc: 'Renders the recovered answer directly inside the assistant message block with Markdown and code blocks.',
+    recoveryShowThinkingInline: 'Show DeepThink reasoning inline',
+    recoveryShowThinkingInlineDesc: 'Displays the recovered reasoning chain in a collapsible box above the answer.',
+
     // Milestone 2E.1: Export & Backup
     exportConversation: 'Export Conversation',
     exportBtn: 'Export',
@@ -271,6 +282,17 @@ export const translations = {
     aboutTitle: 'О расширении StreamArchive',
     aboutDesc: 'Локальный, устойчивый к сбоям журнал и инструмент восстановления стримов DeepSeek.',
     storageNotice: 'Все данные хранятся исключительно локально в браузере (IndexedDB) без отправки на сторонние серверы.',
+
+    // Milestone 2D.4: Recovery Presentation
+    recoveryPresentationTitle: 'Отображение восстановленных ответов',
+    recoveryPresentationDesc: 'Выберите способ отображения спасённых ответов прямо в интерфейсе DeepSeek.',
+    recoveryDisplayMode: 'Режим отображения',
+    recoveryDisplayOverlay: 'Всплывающий бейдж и карточка (По умолчанию)',
+    recoveryDisplayOverlayDesc: 'Показывает ненавязчивый бейдж над отфильтрованным сообщением. Клик открывает полную карточку.',
+    recoveryDisplayInline: 'Прямо в сообщении чата (Inline)',
+    recoveryDisplayInlineDesc: 'Отображает спасённый ответ прямо внутри блока сообщения ассистента с форматированием Markdown и кодом.',
+    recoveryShowThinkingInline: 'Показывать рассуждения DeepThink',
+    recoveryShowThinkingInlineDesc: 'Отображает восстановленную цепочку мыслей в сворачиваемом блоке над ответом.',
 
     // Milestone 2E.1: Export & Backup
     exportConversation: 'Экспорт диалога',

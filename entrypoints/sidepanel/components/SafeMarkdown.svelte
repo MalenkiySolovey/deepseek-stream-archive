@@ -1,78 +1,14 @@
 <script lang="ts">
+  import { parseSafeMarkdown, type SafeMarkdownBlock } from '../../../src/presentation/safe-markdown';
+
   interface Props {
     content?: string;
   }
 
   let { content = '' } = $props<Props>();
 
-  interface Block {
-    type: 'code' | 'paragraph';
-    lang?: string;
-    text: string;
-  }
-
-  let blocks = $derived<Block[]>(parseMarkdown(content));
+  let blocks = $derived<SafeMarkdownBlock[]>(parseSafeMarkdown(content));
   let copiedBlockIndex = $state<number | null>(null);
-
-  function parseMarkdown(raw: string): Block[] {
-    if (!raw) return [];
-
-    const result: Block[] = [];
-    const lines = raw.split('\n');
-    let inCode = false;
-    let codeLang = '';
-    let codeBuffer: string[] = [];
-    let textBuffer: string[] = [];
-
-    const flushText = () => {
-      if (textBuffer.length > 0) {
-        const text = textBuffer.join('\n').trim();
-        if (text.length > 0) {
-          result.push({ type: 'paragraph', text });
-        }
-        textBuffer = [];
-      }
-    };
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i]!;
-      if (line.trim().startsWith('```')) {
-        if (inCode) {
-          // Closing code fence
-          result.push({
-            type: 'code',
-            lang: codeLang || undefined,
-            text: codeBuffer.join('\n'),
-          });
-          codeBuffer = [];
-          codeLang = '';
-          inCode = false;
-        } else {
-          // Opening code fence
-          flushText();
-          inCode = true;
-          codeLang = line.trim().slice(3).trim();
-        }
-      } else {
-        if (inCode) {
-          codeBuffer.push(line);
-        } else {
-          textBuffer.push(line);
-        }
-      }
-    }
-
-    if (inCode && codeBuffer.length > 0) {
-      result.push({
-        type: 'code',
-        lang: codeLang || undefined,
-        text: codeBuffer.join('\n'),
-      });
-    }
-
-    flushText();
-    return result;
-  }
 
   async function copyCode(index: number, code: string) {
     try {

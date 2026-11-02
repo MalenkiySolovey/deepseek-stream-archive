@@ -138,6 +138,25 @@ DeepSeek StreamArchive handles highly confidential user information: complete co
 | `sidePanel` | Hosting the persistent archive viewer, search panel, and revision inspector. |
 | `host_permissions: ["https://chat.deepseek.com/*"]` | Intercepting streaming responses on the DeepSeek web application and rendering non-destructive inline recovery badges. |
 
+---
+
+## 7. In-Page Presentation & Rendering Security (Milestone 2D.4)
+
+1. **Closed Shadow DOM Isolation:**
+   Both overlay portals and inline recovery hosts are mounted using `attachShadow({ mode: 'closed' })`. This prevents page scripts from querying, reading, or tampering with recovered response contents via `document.querySelector` or `.shadowRoot`.
+
+2. **Zero Sensitive Attributes in Host DOM:**
+   The host element `<div data-streamarchive-inline-recovery-host="<messageId>">` exposes only an internal message identifier. No recovered response text, tokens, or reasoning traces are ever written into host attributes.
+
+3. **Pure DOM Fragment Safe Markdown Parsing:**
+   To guarantee absolute protection against DOM-based XSS, StreamArchive strictly forbids `innerHTML`, `outerHTML`, and `insertAdjacentHTML`. All markdown parsing (`parseSafeMarkdown()`) generates a tokenized AST, and DOM elements (`<p>`, `<h1>`–`<h6>`, `<ul>`, `<ol>`, `<li>`, `<blockquote>`, `<pre>`, `<code>`) are constructed via `document.createElement()` and populated with `document.createTextNode()`. Raw HTML tags inside assistant responses are rendered purely as harmless escaped plain text.
+
+4. **Reversible Host Placeholder Suppression:**
+   In inline mode, the DeepSeek refusal placeholder (`.ds-markdown`) is suppressed using `style.display = 'none'`. This modification is tracked in isolated extension memory (`InlineRecoveryLedger`) and is restored to its exact original value upon mode change, message dismissal, or SPA navigation.
+
+5. **DeepSeek Native Action Toolbar Integrity:**
+   The host's native toolbar (`Copy`, `Regenerate`, `Like`, `Dislike`, `Read aloud`, `Share`) is never moved, modified, cloned, or covered. It remains fully interactive within DeepSeek's host DOM. Dedicated extension actions ("Copy recovered response") are strictly confined inside the closed Shadow DOM.
+
 StreamArchive requests **zero unnecessary permissions** (e.g. no `scripting`, no `<all_urls>`, no `webRequest`, no `webRequestBlocking`, no `cookies`, no `tabs`, no `history`). Declarative content scripts with `"world": "MAIN"` eliminate the need for `scripting` permission.
 
 ---

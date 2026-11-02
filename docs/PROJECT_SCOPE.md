@@ -87,10 +87,11 @@ To maintain architectural focus, StreamArchive explicitly rejects the following 
 4. **Canonical Revision Recorder:** Conversation tree, Message branching, immutable ResponseRevisions, RecoveryEvents.
 5. **Passive History Reconciliation:** Passively captured history integration without active polling or credential access.
 6. **Side Panel Archive Browser:** Responsive Svelte 5 browser with branch switching, collapsible reasoning, revision history, and safe Markdown rendering.
-7. **In-Page Recovery UX:** Non-destructive inline recovery cards and session-level recovery tray via isolated Shadow DOM.
+7. **In-Page Recovery UX (Overlay & Inline Modes):** Non-destructive floating badges and session-level recovery tray via isolated Shadow DOM; optional user-configurable inline recovery presentation directly inside DeepSeek message nodes with reversible placeholder suppression, collapsible DeepThink reasoning, and full preservation of native action toolbars.
 8. **Export & Portable Backup:** High-fidelity Markdown and JSON conversation exports; compressed, versioned full-archive backups (`.streamarchive.jsonl.gz`).
 9. **Atomic Restore & Safe Merge:** Validated streaming restore with decompression bomb protection, relational DAG pre-flight, and atomic multi-store replacement or merge.
 10. **Storage Observability, Retention & Safe Deletion:** Browser storage observability (`navigator.storage.estimate()`), persistence protection (`navigator.storage.persist()`), configurable raw evidence retention (`forever`, 30, 90, 180 days) with Protected Evidence Shield, safe single-conversation cascade deletion with active stream guard, and multi-store maintenance actions.
+11. **Browser Compatibility Harness:** Playwright automated Chromium MV3 test suite with fail-closed network isolation asserting real-time streaming, recovery presentation, reconciliation, backup/restore, and retention invariants against synthetic offline fixtures.
 
 ### Planned Enhancements:
 - **Multi-Browser Support (Milestone 2F):** Firefox Add-on port following WebExtension standards.

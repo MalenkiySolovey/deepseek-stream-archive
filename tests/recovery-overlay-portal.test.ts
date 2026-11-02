@@ -641,5 +641,202 @@ describe('StreamArchive In-Page Recovery Overlay Portal (Shadow DOM)', () => {
 
       portal.destroy();
     });
+
+    it('mounts inline recovery inside message container when displayMode is inline', async () => {
+      window.history.pushState({}, '', '/a/chat/s/sess-inline-1');
+
+      // Create synthetic DeepSeek assistant message with placeholder and native toolbar
+      const domMsg = document.createElement('div');
+      domMsg.setAttribute('data-message-id', 'remote-msg-inline');
+      const placeholder = document.createElement('div');
+      placeholder.className = 'ds-markdown';
+      placeholder.textContent = "I'm sorry, I cannot continue this conversation.";
+      const toolbar = document.createElement('div');
+      toolbar.className = 'ds-actions-toolbar';
+      const nativeCopyBtn = document.createElement('button');
+      nativeCopyBtn.textContent = 'Copy';
+      let nativeCopyClicked = false;
+      nativeCopyBtn.addEventListener('click', () => {
+        nativeCopyClicked = true;
+      });
+      toolbar.appendChild(nativeCopyBtn);
+
+      domMsg.appendChild(placeholder);
+      domMsg.appendChild(toolbar);
+      deepseekContainer.appendChild(domMsg);
+
+      const mockSummary: PageRecoverySummary = {
+        conversationId: 'conv-inline-1',
+        recoverableCount: 1,
+        messages: [
+          {
+            messageId: 'm-inline',
+            remoteId: 'remote-msg-inline',
+            role: 'assistant',
+            status: 'filtered',
+            hasLastGood: true,
+            recoveryKind: 'authoritative_recovery',
+            capturedAt: 2000,
+            recoveredRevisionId: 'rev-inline',
+            recoveryEventId: 'ev-inline',
+          },
+        ],
+      };
+
+      const fetchSummary = vi.fn().mockResolvedValue(mockSummary);
+      const fetchContent = vi.fn().mockResolvedValue({
+        text: 'This is the **full** recovered answer with [markdown](https://example.com).',
+        thinking: 'Detailed thinking process.',
+      });
+
+      const portal = new StreamArchiveOverlayPortal({
+        mountTarget: mountContainer,
+        fetchSummary,
+        fetchContent,
+        presentationSettings: {
+          displayMode: 'inline',
+          showThinkingInline: true,
+        },
+      });
+
+      await portal.refreshSummary();
+
+      // Content was lazily requested
+      await vi.waitFor(() => {
+        expect(fetchContent).toHaveBeenCalledWith({
+          currentRouteSessionId: 'sess-inline-1',
+          messageId: 'm-inline',
+          recoveryEventId: 'ev-inline',
+        });
+      });
+
+      // Verify inline recovery host is mounted inside domMsg
+      const inlineHost = domMsg.querySelector('div[data-streamarchive-inline-recovery-host="m-inline"]') as HTMLElement;
+      expect(inlineHost).not.toBeNull();
+
+      // Placeholder is hidden
+      expect(placeholder.style.display).toBe('none');
+
+      // Native toolbar is untouched and clickable
+      expect(toolbar.parentNode).toBe(domMsg);
+      nativeCopyBtn.click();
+      expect(nativeCopyClicked).toBe(true);
+
+      // Shadow overlay should NOT contain an anchored badge for this message
+      const shadow = portal.getShadowRoot()!;
+      expect(shadow.querySelector('.streamarchive-anchored-badge')).toBeNull();
+
+      // Diagnostics check
+      expect(portal.getDiagnostics().displayMode).toBe('inline');
+      expect(portal.getDiagnostics().inlineMountedCount).toBe(1);
+
+      // Test dynamic mode switch to overlay
+      portal.setPresentationSettings({ displayMode: 'overlay' });
+      expect(domMsg.querySelector('div[data-streamarchive-inline-recovery-host]')).toBeNull();
+      expect(placeholder.style.display).toBe('');
+      expect(shadow.querySelector('.streamarchive-anchored-badge')).not.toBeNull();
+      expect(portal.getDiagnostics().inlineMountedCount).toBe(0);
+
+      // Switch back to inline
+      portal.setPresentationSettings({ displayMode: 'inline' });
+      expect(domMsg.querySelector('div[data-streamarchive-inline-recovery-host]')).not.toBeNull();
+      expect(placeholder.style.display).toBe('none');
+
+      portal.destroy();
+      expect(domMsg.querySelector('div[data-streamarchive-inline-recovery-host]')).toBeNull();
+      expect(placeholder.style.display).toBe('');
+    });
+
+    it('falls back to anchored badge in inline mode if DOM insertion point is absent', async () => {
+      window.history.pushState({}, '', '/a/chat/s/sess-inline-fallback');
+
+      // Empty DOM message without recognized children
+      const domMsg = document.createElement('div');
+      domMsg.setAttribute('data-message-id', 'remote-unstructured');
+      deepseekContainer.appendChild(domMsg);
+
+      const mockSummary: PageRecoverySummary = {
+        conversationId: 'conv-inline-fallback',
+        recoverableCount: 1,
+        messages: [
+          {
+            messageId: 'm-unstructured',
+            remoteId: 'remote-unstructured',
+            role: 'assistant',
+            status: 'filtered',
+            hasLastGood: true,
+            recoveryKind: 'authoritative_recovery',
+            capturedAt: 3000,
+            recoveredRevisionId: 'rev-unstructured',
+          },
+        ],
+      };
+
+      const portal = new StreamArchiveOverlayPortal({
+        mountTarget: mountContainer,
+        fetchSummary: vi.fn().mockResolvedValue(mockSummary),
+        fetchContent: vi.fn().mockResolvedValue({ text: 'Some text' }),
+        presentationSettings: { displayMode: 'inline' },
+      });
+
+      await portal.refreshSummary();
+
+      // Fallback: should render anchored badge instead of inline host
+      const shadow = portal.getShadowRoot()!;
+      const badge = shadow.querySelector('.streamarchive-anchored-badge');
+      expect(badge).not.toBeNull();
+      expect(domMsg.querySelector('div[data-streamarchive-inline-recovery-host]')).toBeNull();
+
+      portal.destroy();
+    });
+
+    it('unmounts inline recovery immediately on route navigation', async () => {
+      window.history.pushState({}, '', '/a/chat/s/sess-inline-route-a');
+
+      const domMsgA = document.createElement('div');
+      domMsgA.setAttribute('data-message-id', 'remote-msg-a');
+      const placeholderA = document.createElement('div');
+      placeholderA.className = 'ds-markdown';
+      domMsgA.appendChild(placeholderA);
+      deepseekContainer.appendChild(domMsgA);
+
+      const summaryA: PageRecoverySummary = {
+        conversationId: 'sess-inline-route-a',
+        recoverableCount: 1,
+        messages: [
+          {
+            messageId: 'm-a',
+            remoteId: 'remote-msg-a',
+            role: 'assistant',
+            status: 'filtered',
+            hasLastGood: true,
+            recoveryKind: 'authoritative_recovery',
+            capturedAt: 1000,
+            recoveredRevisionId: 'rev-a',
+          },
+        ],
+      };
+
+      const portal = new StreamArchiveOverlayPortal({
+        mountTarget: mountContainer,
+        fetchSummary: vi.fn().mockResolvedValue(summaryA),
+        fetchContent: vi.fn().mockResolvedValue({ text: 'Answer for Route A' }),
+        presentationSettings: { displayMode: 'inline' },
+      });
+
+      await portal.refreshSummary();
+      await vi.waitFor(() => {
+        expect(domMsgA.querySelector('div[data-streamarchive-inline-recovery-host]')).not.toBeNull();
+      });
+
+      // Navigate to route B
+      window.history.pushState({}, '', '/a/chat/s/sess-inline-route-b');
+
+      // Pre-navigation revocation must have unmounted the inline host immediately
+      expect(domMsgA.querySelector('div[data-streamarchive-inline-recovery-host]')).toBeNull();
+      expect(portal.getDiagnostics().inlineMountedCount).toBe(0);
+
+      portal.destroy();
+    });
   });
 });
