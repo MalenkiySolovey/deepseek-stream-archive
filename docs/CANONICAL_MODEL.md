@@ -247,4 +247,4 @@ The canonical data model provides deterministic, read-only projections for exter
   6. `raw_stream_batches`
 - Records within each store are sorted deterministically by primary key `id` ascending.
 - Enforces memory ceiling (`MAX_IN_MEMORY_PORTABLE_BACKUP_SOURCE_BYTES = 100 MiB`) to prevent service worker OOM in large archives.
-- Serialized into compressed newline-delimited JSON (`.streamarchive.jsonl.gz`) with strict SHA-256 header manifest and record count footer.
+- Serialized into compressed newline-delimited JSON (`.streamarchive.jsonl.gz`) with strict format manifest and record count footer.

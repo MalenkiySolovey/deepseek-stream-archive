@@ -41,6 +41,16 @@ import {
   type PortableBackupSnapshot,
   type CreateSnapshotOptions,
 } from '../../backup/snapshot';
+import {
+  validateAndPreflightRestore as validateAndPreflightInternal,
+  executeRestore as executeRestoreInternal,
+  getCurrentStoreCounts as getCurrentStoreCountsInternal,
+  type RestoreMode,
+  type RestorePreflight,
+  type RestoreResult,
+} from '../../restore';
+import type { MaterializedPortableBackup } from '../../backup/reader';
+import type { PortableBackupStoreCounts } from '../../backup/format';
 
 export class IndexedDbStorageRepository implements StorageRepository {
   constructor(private readonly idbFactory?: IDBFactory) {}
@@ -1691,6 +1701,31 @@ export class IndexedDbStorageRepository implements StorageRepository {
   async createPortableBackupSnapshot(options?: CreateSnapshotOptions): Promise<PortableBackupSnapshot> {
     const db = await this.getDb();
     return createSnapshotInternal(db, options);
+  }
+
+  // ── Milestone 2E.2: Restore & Safe Merge Methods ──
+
+  async validateAndPreflightRestore(
+    input: ArrayBuffer | Uint8Array | Blob | ReadableStream<Uint8Array>,
+    activeStreamsCount: number,
+    mode?: RestoreMode
+  ): Promise<{ preflight: RestorePreflight; backup?: MaterializedPortableBackup }> {
+    const db = await this.getDb();
+    return validateAndPreflightInternal(db, input, activeStreamsCount, mode);
+  }
+
+  async executeRestore(
+    backup: MaterializedPortableBackup,
+    mode: RestoreMode,
+    activeStreamsCount: number
+  ): Promise<RestoreResult> {
+    const db = await this.getDb();
+    return executeRestoreInternal(db, backup, mode, activeStreamsCount);
+  }
+
+  async getCurrentStoreCounts(): Promise<PortableBackupStoreCounts> {
+    const db = await this.getDb();
+    return getCurrentStoreCountsInternal(db);
   }
 }
 

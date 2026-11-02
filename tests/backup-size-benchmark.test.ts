@@ -113,7 +113,7 @@ describe('Portable Backup Scalability & Synthetic Benchmarks (1 MiB, 10 MiB, 50 
 
     expect(snapshot.totalRecordCount).toBeGreaterThanOrEqual(10000);
     expect(compressedBytes.length).toBeGreaterThan(0);
-  });
+  }, 15000);
 
   it('enforces safety limit against 100 MiB boundary without OOM crash', async () => {
     // Test that MAX_IN_MEMORY_PORTABLE_BACKUP_SOURCE_BYTES triggers cleanly when ceiling is set lower

@@ -161,17 +161,21 @@ The final line of the file must be a JSON object with `"kind": "footer"`.
 
 ---
 
-## 8. Validation Rules for Importers (Preview for 2E.2)
+## 8. Conforming Import & Validation Specification (Milestone 2E.2)
 
-A conforming reader/validator MUST:
-1. Decompress the gzip container and reject any stream errors (`corrupt_gzip_stream`).
+A conforming reader/validator (implemented in `src/backup/reader.ts` and `src/restore/integrity.ts`) MUST:
+1. Enforce streaming decompression bounds (`MAX_IMPORT_COMPRESSED_BYTES = 50 MiB`, `MAX_IMPORT_DECOMPRESSED_BYTES = 250 MiB`, `MAX_IMPORT_RECORDS = 500,000`, `MAX_IMPORT_LINE_CHARS = 10 MiB`) to prevent memory exhaustion and gzip bombs.
 2. Verify line 0 is a valid JSON manifest with `format: "deepseek-streamarchive-backup"` and `formatVersion: 1`.
 3. Reject `formatVersion > 1` with `unsupported_backup_version`.
-4. Validate that each record belongs to the 6 whitelisted stores in monotonic store sequence.
-5. Validate primary key sorting within each store block.
-6. Verify the terminal footer record exists with `complete: true`.
-7. Verify footer counts match actual records exactly.
-8. Reject any extra lines following the footer.
+4. Validate that each record belongs to the 6 whitelisted stores in monotonic store sequence: `conversations` → `messages` → `revisions` → `recovery_events` → `raw_streams` → `raw_stream_batches`.
+5. Validate primary key sorting within each store block and reject duplicate keys within the same store.
+6. Enforce strict field-level schema validation across all 6 models (`src/backup/record-validation.ts`).
+7. Enforce referential integrity and message DAG acyclicity (`src/restore/integrity.ts`).
+8. Verify the terminal footer record exists with `complete: true`.
+9. Verify footer counts match actual parsed records exactly.
+10. Reject any extra lines following the footer.
+
+For full restoration semantics and execution details, see [docs/IMPORT_AND_RESTORE.md](file:///c:/Users/Malenkiy_Solovey/Desktop/Codex/DeepSeek%20StreamArchive/workbench/docs/IMPORT_AND_RESTORE.md).
 
 ---
 

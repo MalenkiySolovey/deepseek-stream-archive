@@ -478,7 +478,7 @@ The automated regression corpus stands at **405 Vitest tests across 59 test file
    - Verifies multi-store readonly snapshotting across 6 stores (`conversations`, `messages`, `revisions`, `recovery_events`, `raw_streams`, `raw_stream_batches`).
    - Validates strict ascending primary-key order (`id`) within every store block.
    - Verifies streaming JSONL piping directly through Web Streams `CompressionStream('gzip')`.
-   - Pure validator (`validatePortableBackup`) confirms manifest integrity line 0, SHA-256 store sequence, primary key monotonicity, footer completion, and exact record count parity.
+   - Pure validator (`validatePortableBackup`) confirms manifest integrity line 0, canonical store sequence, primary key monotonicity, footer completion, and exact record count parity.
    - Proves robust error rejection on truncated archives, corrupted gzip headers, missing manifests, and mismatched record counts.
 
 4. **Backup Size & Scalability Benchmark (`tests/backup-size-benchmark.test.ts`):**
@@ -495,6 +495,53 @@ The automated regression corpus stands at **405 Vitest tests across 59 test file
    - Asserts accurate display of storage quota usage estimate badge.
    - Triggers full archive backup, asserts progress state transition, and captures generated `.streamarchive.jsonl.gz` download.
    - Decompresses downloaded artifact in-memory and validates manifest, store sequence, and footer completion.
+
+---
+
+## 21. Tier 19: Import, Validation & Atomic Restore Verification (Milestone 2E.2)
+
+The automated regression corpus stands at **452 Vitest tests across 66 test files (100% green)** plus **13 Playwright Chromium MV3 end-to-end specifications (14 tests)** under strict fail-closed network isolation:
+
+1. **Streaming Backup Reader & Decompression Bomb Protection (`tests/backup-reader.test.ts`):**
+   - 13 unit tests verifying streaming gzip reader, manifest and footer contracts, monotonic store sequence, primary key sorting, and duplicate key rejection.
+   - Verifies deterministic preflight abort on compressed input exceeding 50 MiB (`compressed_backup_too_large`).
+   - Verifies instantaneous decompression bomb protection abort when decompressed stream exceeds boundary (`decompression_bomb_detected`).
+
+2. **Field-Level Record Schema Validation & Deep Semantic Equality (`tests/backup-record-validation.test.ts`):**
+   - 13 unit tests verifying field validation for all 6 durable models: `Conversation`, `Message`, `ResponseRevision`, `RecoveryEvent`, `RawStreamRecord`, and `RawStreamBatch`.
+   - Verifies `isRecordSemanticallyIdentical()` deep equality across all stores, handling optional fields, falsy values, and array comparisons.
+
+3. **Referential Integrity & Relational DAG Validator (`tests/restore-integrity.test.ts`):**
+   - 10 unit tests verifying complete in-memory relational graph validation prior to database writes.
+   - Verifies orphan message, revision, recovery event, and raw stream batch rejection.
+   - Verifies detection and rejection of message tree cycles (self-parent and multi-hop cycles).
+   - Verifies message conversation boundary scoping (parent and child must belong to same conversation).
+   - Verifies parent isolation for technical attempts (`attempt_only`) and partial captures (`unmatched_capture`).
+   - Verifies recovery events reference valid revisions belonging to the same message with `isLastGood === true`.
+
+4. **Atomic Archive Replacement Engine (`tests/restore-replace.test.ts`):**
+   - Verifies atomic clearing of all 9 stores (6 durable + 3 ephemeral) and insertion of backup records in a single readwrite transaction.
+   - Verifies guaranteed rollback leaving pre-restore database 100% intact upon write or constraint failure.
+
+5. **Conservative Safe Archive Merge Engine (`tests/restore-merge.test.ts`):**
+   - Verifies primary-key union across 6 durable stores, inserting new records while skipping identical duplicates idempotently.
+   - Verifies transaction abort upon payload conflicts.
+   - Verifies collision blocking when incoming conversations share a DeepSeek `remoteId` with a different local conversation ID.
+
+6. **End-to-End Portable Backup & Restore Round-Trip Fidelity (`tests/restore-roundtrip.test.ts`):**
+   - Comprehensive round-trip integration test: seeds complex multi-branch conversation tree, pre-filter recovery event, and 3-attempt retry isolation.
+   - Exports snapshot, compresses into `.streamarchive.jsonl.gz`, clears database, validates and preflights restore, executes Replace restore, and asserts 100% structural fidelity.
+
+7. **Restore Performance & Scalability Benchmarks (`tests/restore-benchmark.test.ts`):**
+   - Evaluates decompression, line-by-line validation, plan generation, and commit performance for 1 MiB (~2,100 records) and 10 MiB (~21,000 records) archives.
+   - Measures sub-second validation and single-pass transaction throughput in under 4 seconds.
+
+8. **Browser E2E Atomic Restore Replace Mode (`tests/browser/restore-replace.spec.ts`):**
+   - Chromium MV3 browser test: generates Conversation Alpha, exports backup, mutates database with Conversation Beta, uploads Backup Alpha via file input, checks Replace confirmation, executes restore, and confirms Conversation Alpha is restored while Conversation Beta is removed.
+
+9. **Browser E2E Conservative Safe Merge Mode (`tests/browser/restore-merge.spec.ts`):**
+   - Chromium MV3 browser test: generates Conversation Beta, exports backup, resets to Conversation Alpha, uploads Backup Beta, selects Merge mode, executes restore, and confirms both Conversation Alpha and Conversation Beta are present.
+   - Performs a second merge upload of the exact same backup file, verifying complete idempotency and zero conflict errors.
 
 > [!IMPORTANT]
 > Automated tests confirm structural and protocol compliance. For instructions on executing real-world manual acceptance testing against live `chat.deepseek.com`, see the [Live Acceptance Testing Guide](./LIVE_ACCEPTANCE.md) and [Live Acceptance Results Template](./LIVE_ACCEPTANCE_RESULTS_TEMPLATE.md).

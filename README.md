@@ -6,8 +6,8 @@
 
 ![Platform](https://img.shields.io/badge/platform-Chrome%20%7C%20Chromium%20MV3-4285F4?logo=googlechrome&logoColor=white)
 ![Framework](https://img.shields.io/badge/framework-WXT%20%2B%20Svelte%205-FF3E00?logo=svelte&logoColor=white)
-![Tests](https://img.shields.io/badge/unit%20tests-379%20passing-3DDC84)
-![E2E Tests](https://img.shields.io/badge/playwright%20e2e-10%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/unit%20tests-452%20passing-3DDC84)
+![E2E Tests](https://img.shields.io/badge/playwright%20e2e-14%20passing-brightgreen)
 ![Status](https://img.shields.io/badge/live%20compatibility-baseline%20accepted-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -90,6 +90,12 @@ Other frequent loss vectors include:
 ### 8. 100% Local & Private
 - **Zero External Calls:** No analytics, no telemetry, no cloud accounts, and no third-party servers. All data stays strictly on your local machine.
 - **Minimal Manifest Permissions:** Operates under strict Chromium Manifest V3 permissions: only `storage` and `sidePanel`.
+
+### 9. Export, Portable Backup & Atomic Restore (Milestones 2E.1 & 2E.2)
+- **Human Conversation Export:** Exports individual threads to clean Markdown (`.md`) or structured canonical JSON (`.json`) with branch selection, reasoning inclusion, and pre-filter recovery provenance.
+- **Portable Full Backup:** Creates compressed, versioned full-archive backups (`.streamarchive.jsonl.gz`) via native `CompressionStream('gzip')` without external libraries or `chrome.downloads` permission.
+- **Safe Atomic Restore:** Fully validates imported backup archives with streaming decompression bomb protection (250 MiB ceiling), field schema validation, and pre-commit referential integrity checks (acyclic message trees, conversation scoping).
+- **Two Restore Modes:** Supports **Replace Archive** (atomic single-transaction replacement across all 9 stores with 100% rollback guarantee) and **Safe Merge Archive** (strict primary-key union with conflict and identity collision prevention).
 
 ---
 
@@ -198,7 +204,7 @@ For manual live testing records and protocol details, see the [Live Acceptance T
 StreamArchive maintains an exhaustive multi-tier automated test suite covering chunk boundary fuzzing, protocol decoding, censorship interception, database migrations, and a headless Chromium MV3 compatibility harness:
 
 ```bash
-# Run unit and integration tests (55 test files, 379 tests)
+# Run unit and integration tests (66 test files, 452 tests)
 pnpm run test
 
 # Run TypeScript typecheck
@@ -207,7 +213,7 @@ pnpm run typecheck
 # Build unpacked Chrome MV3 extension
 pnpm run build
 
-# Run Playwright Chromium MV3 browser compatibility harness (9 specs, 10 tests, fail-closed network isolation)
+# Run Playwright Chromium MV3 browser compatibility harness (13 specs, 14 tests, fail-closed network isolation)
 pnpm run test:e2e
 
 # Start WXT development server with live-reloading

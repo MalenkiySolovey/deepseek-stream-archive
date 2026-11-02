@@ -973,6 +973,59 @@ export function validateCreatePortableBackupSnapshotRequest(
   };
 }
 
+export function validateRestorePreviewRequest(
+  raw: unknown
+): import('./messages').RestorePreviewRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_RESTORE_PREVIEW') return null;
+  if (!raw.data) return null;
+
+  let binaryData: Uint8Array | ArrayBuffer | null = null;
+  if (raw.data instanceof Uint8Array || raw.data instanceof ArrayBuffer) {
+    binaryData = raw.data;
+  } else if (ArrayBuffer.isView(raw.data)) {
+    binaryData = new Uint8Array((raw.data as ArrayBufferView).buffer, (raw.data as ArrayBufferView).byteOffset, (raw.data as ArrayBufferView).byteLength);
+  } else if (Array.isArray(raw.data)) {
+    binaryData = new Uint8Array(raw.data);
+  } else if (typeof raw.data === 'object' && raw.data !== null) {
+    // Chrome MV3 messaging serialization of TypedArrays into object maps { "0": x, "1": y }
+    const vals = Object.values(raw.data) as number[];
+    if (vals.length > 0 && typeof vals[0] === 'number') {
+      binaryData = new Uint8Array(vals);
+    }
+  }
+
+  if (!binaryData) return null;
+
+  const mode = raw.mode === 'merge' ? 'merge' : 'replace';
+
+  return {
+    type: 'STREAMARCHIVE_RESTORE_PREVIEW',
+    data: binaryData,
+    mode,
+  };
+}
+
+export function validateExecuteRestoreRequest(
+  raw: unknown
+): import('./messages').ExecuteRestoreRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_EXECUTE_RESTORE') return null;
+  const mode = raw.mode === 'merge' ? 'merge' : 'replace';
+
+  if (typeof raw.preflightId !== 'string' && !isRecord(raw.backup)) {
+    return null;
+  }
+
+  return {
+    type: 'STREAMARCHIVE_EXECUTE_RESTORE',
+    preflightId: typeof raw.preflightId === 'string' ? raw.preflightId : undefined,
+    mode,
+    backup: isRecord(raw.backup) ? (raw.backup as any) : undefined,
+  };
+}
+
+
 
 
 

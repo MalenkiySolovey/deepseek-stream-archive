@@ -6,14 +6,19 @@
   import {
     MESSAGE_CREATE_PORTABLE_BACKUP_SNAPSHOT,
     MESSAGE_GET_STORAGE_USAGE_ESTIMATE,
+    MESSAGE_RESTORE_PREVIEW,
+    MESSAGE_EXECUTE_RESTORE,
     type CreatePortableBackupSnapshotResponse,
     type GetStorageUsageEstimateResponse,
+    type RestorePreviewResponse,
+    type ExecuteRestoreResponse,
   } from '../../src/bridge/messages';
   import {
     buildCompressedBackup,
     PORTABLE_BACKUP_EXTENSION,
     PORTABLE_BACKUP_MIME_TYPE,
   } from '../../src/backup';
+  import type { RestoreMode, RestorePreflight, RestoreResult } from '../../src/restore';
   import { formatDateUtc } from '../../src/export';
   import { saveLocalFile } from '../../src/backup/save-file';
 
@@ -38,6 +43,18 @@
     rawBatches: number;
     compressedBytes: number;
   } | null>(null);
+
+  // Milestone 2E.2: Restore State in Settings
+  type RestoreProgressState = 'idle' | 'reading' | 'validating' | 'ready' | 'restoring' | 'verifying' | 'complete' | 'error';
+  let restoreState = $state<RestoreProgressState>('idle');
+  let restoreMode = $state<RestoreMode>('replace');
+  let restoreError = $state<string | null>(null);
+  let restorePreflightId = $state<string | null>(null);
+  let restorePreflight = $state<RestorePreflight | null>(null);
+  let replaceConfirmed = $state<boolean>(false);
+  let restoreResult = $state<RestoreResult | null>(null);
+  let selectedBackupFileName = $state<string | null>(null);
+  let cachedBackupBytes = $state<Uint8Array | null>(null);
 
   function switchTab(tab: ActiveTab) {
     activeTab = tab;
@@ -127,6 +144,150 @@
       backupState = 'error';
       backupError = (err as Error).message;
     }
+  }
+
+  // Milestone 2E.2: Restore Functions
+
+  async function handleFileSelected(e: Event) {
+    const target = e.target as HTMLInputElement;
+    const file = target?.files?.[0];
+    if (!file) return;
+
+    selectedBackupFileName = file.name;
+    restoreState = 'reading';
+    restoreError = null;
+    restorePreflight = null;
+    restorePreflightId = null;
+    replaceConfirmed = false;
+    restoreResult = null;
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      cachedBackupBytes = bytes;
+
+      restoreState = 'validating';
+
+      const arrayData = Array.from(bytes);
+      const res = await new Promise<RestorePreviewResponse>((resolve) => {
+        if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+          chrome.runtime.sendMessage(
+            {
+              type: MESSAGE_RESTORE_PREVIEW,
+              data: arrayData,
+              mode: restoreMode,
+            },
+            (r) => resolve(r || { success: false, error: 'No response from background worker' })
+          );
+        } else {
+          resolve({ success: false, error: 'Extension runtime unavailable' });
+        }
+      });
+
+      if (!res.success || !res.preflight) {
+        restoreState = 'error';
+        const firstErr = res.preflight?.validationErrors?.[0]?.message;
+        restoreError = res.error || firstErr || 'Failed to validate backup archive';
+        return;
+      }
+
+      restorePreflight = res.preflight;
+      restorePreflightId = res.preflightId || null;
+      restoreState = 'ready';
+    } catch (err) {
+      restoreState = 'error';
+      restoreError = (err as Error).message;
+    }
+  }
+
+  async function handleModeChange(newMode: RestoreMode) {
+    restoreMode = newMode;
+    replaceConfirmed = false;
+    if (cachedBackupBytes && restoreState === 'ready') {
+      restoreState = 'validating';
+      try {
+        const arrayData = Array.from(cachedBackupBytes);
+        const res = await new Promise<RestorePreviewResponse>((resolve) => {
+          if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+            chrome.runtime.sendMessage(
+              {
+                type: MESSAGE_RESTORE_PREVIEW,
+                data: arrayData,
+                mode: newMode,
+              },
+              (r) => resolve(r || { success: false, error: 'No response from background worker' })
+            );
+          } else {
+            resolve({ success: false, error: 'Extension runtime unavailable' });
+          }
+        });
+        if (res.success && res.preflight) {
+          restorePreflight = res.preflight;
+          restorePreflightId = res.preflightId || null;
+          restoreState = 'ready';
+        }
+      } catch (err) {
+        restoreState = 'error';
+        restoreError = (err as Error).message;
+      }
+    }
+  }
+
+  async function handleExecuteRestore() {
+    if (restoreMode === 'replace' && !replaceConfirmed) {
+      return;
+    }
+
+    restoreState = 'restoring';
+    restoreError = null;
+
+    try {
+      const res = await new Promise<ExecuteRestoreResponse>((resolve) => {
+        if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+          chrome.runtime.sendMessage(
+            {
+              type: MESSAGE_EXECUTE_RESTORE,
+              preflightId: restorePreflightId,
+              mode: restoreMode,
+            },
+            (r) => resolve(r || { success: false, error: 'No response from background worker' })
+          );
+        } else {
+          resolve({ success: false, error: 'Extension runtime unavailable' });
+        }
+      });
+
+      if (!res.success || !res.result) {
+        restoreState = 'error';
+        restoreError = res.error || 'Restore failed';
+        return;
+      }
+
+      restoreResult = res.result;
+      restoreState = 'complete';
+
+      // Refresh data
+      loadStorageEstimate();
+      selectedConversationId = null;
+    } catch (err) {
+      restoreState = 'error';
+      restoreError = (err as Error).message;
+    }
+  }
+
+  function handleResetRestore() {
+    restoreState = 'idle';
+    restoreError = null;
+    restorePreflight = null;
+    restorePreflightId = null;
+    replaceConfirmed = false;
+    restoreResult = null;
+    selectedBackupFileName = null;
+    cachedBackupBytes = null;
+  }
+
+  function handleCreateSafetyBackupFirst() {
+    handleCreateBackup();
   }
 </script>
 
@@ -279,6 +440,230 @@
                   <span class="summary-val">{formatBytes(backupSummary.compressedBytes)}</span>
                   <span class="summary-lbl">{t.backupSummarySize}</span>
                 </div>
+              </div>
+            </div>
+          {/if}
+        </div>
+
+        <!-- Milestone 2E.2: Restore Archive Card -->
+        <div class="settings-card" id="restore-settings-card">
+          <h3 class="card-subtitle">{t.restoreCardTitle}</h3>
+          <p class="about-desc">{t.restoreCardDesc}</p>
+
+          {#if restoreState === 'idle'}
+            <div class="restore-picker-row">
+              <label class="file-picker-label" for="backup-file-input">
+                📂 {t.restoreChooseFile}
+              </label>
+              <input
+                id="backup-file-input"
+                class="hidden-file-input"
+                type="file"
+                accept=".streamarchive.jsonl.gz,application/gzip"
+                onchange={handleFileSelected}
+              />
+            </div>
+          {:else if restoreState === 'reading' || restoreState === 'validating'}
+            <div class="restore-progress-banner" id="restore-progress-banner">
+              ⏳ {restoreState === 'reading' ? t.restoreReading : t.restoreValidating}
+            </div>
+          {:else if restoreState === 'ready' && restorePreflight}
+            <div class="restore-preview-box" id="restore-preview-box">
+              <div class="preview-header">
+                <span class="preview-icon">📦</span>
+                <div>
+                  <strong>{t.restoreValidTitle}</strong>
+                  <div class="preview-filename">{selectedBackupFileName}</div>
+                </div>
+              </div>
+
+              <div class="preview-meta-row">
+                <span>{t.restoreCreated}: {new Date(restorePreflight.manifest.createdAt).toLocaleDateString()}</span>
+                <span>{t.restoreAppVersion}: {restorePreflight.manifest.appVersion}</span>
+                <span>{t.restoreDbVersion}: v{restorePreflight.manifest.sourceDatabaseVersion}</span>
+              </div>
+
+              <!-- Store Counts Comparison Table -->
+              <div class="restore-counts-table">
+                <div class="counts-row header-row">
+                  <span>Store</span>
+                  <span>{t.restoreSummaryCurrent}</span>
+                  <span>{t.restoreSummaryBackup}</span>
+                </div>
+                <div class="counts-row">
+                  <span>{t.backupSummaryConvs}</span>
+                  <span>{restorePreflight.currentCounts.conversations}</span>
+                  <span class="backup-val">{restorePreflight.backupCounts.conversations}</span>
+                </div>
+                <div class="counts-row">
+                  <span>{t.backupSummaryMsgs}</span>
+                  <span>{restorePreflight.currentCounts.messages}</span>
+                  <span class="backup-val">{restorePreflight.backupCounts.messages}</span>
+                </div>
+                <div class="counts-row">
+                  <span>{t.backupSummaryRevs}</span>
+                  <span>{restorePreflight.currentCounts.revisions}</span>
+                  <span class="backup-val">{restorePreflight.backupCounts.revisions}</span>
+                </div>
+                <div class="counts-row">
+                  <span>{t.backupSummaryStreams}</span>
+                  <span>{restorePreflight.currentCounts.raw_streams}</span>
+                  <span class="backup-val">{restorePreflight.backupCounts.raw_streams}</span>
+                </div>
+                <div class="counts-row">
+                  <span>{t.backupSummaryBatches}</span>
+                  <span>{restorePreflight.currentCounts.raw_stream_batches}</span>
+                  <span class="backup-val">{restorePreflight.backupCounts.raw_stream_batches}</span>
+                </div>
+              </div>
+
+              <!-- Mode selector -->
+              <div class="restore-mode-selector">
+                <span class="mode-title">{t.restoreModeTitle}:</span>
+                <label class="mode-option" class:selected={restoreMode === 'replace'}>
+                  <input
+                    type="radio"
+                    name="restoreMode"
+                    value="replace"
+                    checked={restoreMode === 'replace'}
+                    onchange={() => handleModeChange('replace')}
+                  />
+                  <div>
+                    <strong>{t.restoreModeReplace}</strong>
+                    <p class="mode-desc">{t.restoreModeReplaceDesc}</p>
+                  </div>
+                </label>
+                <label class="mode-option" class:selected={restoreMode === 'merge'}>
+                  <input
+                    type="radio"
+                    name="restoreMode"
+                    value="merge"
+                    checked={restoreMode === 'merge'}
+                    onchange={() => handleModeChange('merge')}
+                  />
+                  <div>
+                    <strong>{t.restoreModeMerge}</strong>
+                    <p class="mode-desc">{t.restoreModeMergeDesc}</p>
+                  </div>
+                </label>
+              </div>
+
+              <!-- Replace Warning Box & Safety Backup -->
+              {#if restoreMode === 'replace'}
+                <div class="replace-warning-box">
+                  <div class="warning-text">
+                    <p>⚠️ {t.restoreReplaceWarning}</p>
+                  </div>
+                  <div class="safety-backup-action">
+                    <button
+                      class="backup-btn secondary"
+                      type="button"
+                      onclick={handleCreateSafetyBackupFirst}
+                    >
+                      💾 {t.restoreCreateSafetyBackup}
+                    </button>
+                  </div>
+                  <label class="confirm-checkbox-label">
+                    <input
+                      type="checkbox"
+                      id="confirm-replace-checkbox"
+                      bind:checked={replaceConfirmed}
+                    />
+                    <span>{t.restoreReplaceConfirmCheck}</span>
+                  </label>
+                </div>
+              {/if}
+
+              <!-- Active streams warning -->
+              {#if restorePreflight.activeStreamsCount > 0}
+                <div class="restore-error-banner">
+                  ⚠️ {t.restoreCloseActiveGeneration}
+                </div>
+              {/if}
+
+              <!-- Preflight conflicts (in merge) -->
+              {#if restorePreflight.plan && !restorePreflight.plan.valid}
+                <div class="restore-error-banner">
+                  {#each restorePreflight.plan.conflicts as c}
+                    <div>⚠️ [{c.store}] {c.message}</div>
+                  {/each}
+                </div>
+              {/if}
+
+              <!-- Action buttons -->
+              <div class="restore-actions-row">
+                <button
+                  class="backup-btn primary"
+                  id="execute-restore-btn"
+                  type="button"
+                  disabled={!restorePreflight.canRestore || (restoreMode === 'replace' && !replaceConfirmed)}
+                  onclick={handleExecuteRestore}
+                >
+                  🚀 {t.restoreBtn}
+                </button>
+                <button
+                  class="backup-btn secondary"
+                  type="button"
+                  onclick={handleResetRestore}
+                >
+                  {t.restoreCancel}
+                </button>
+              </div>
+            </div>
+          {:else if restoreState === 'restoring' || restoreState === 'verifying'}
+            <div class="restore-progress-banner" id="restore-progress-banner">
+              ⏳ {restoreState === 'restoring' ? t.restoreRestoring : t.restoreVerifying}
+            </div>
+          {:else if restoreState === 'complete' && restoreResult}
+            <div class="restore-summary-box" id="restore-summary-box">
+              <div class="summary-header">
+                <span class="summary-icon">✅</span>
+                <strong>{t.restoreComplete}</strong>
+              </div>
+              <p class="reload-notice">{t.restoreReloadTabsNotice}</p>
+              <div class="summary-grid">
+                <div class="summary-item">
+                  <span class="summary-val">{restoreResult.insertedCounts.conversations}</span>
+                  <span class="summary-lbl">{t.backupSummaryConvs} (+{restoreResult.insertedCounts.conversations})</span>
+                </div>
+                <div class="summary-item">
+                  <span class="summary-val">{restoreResult.insertedCounts.messages}</span>
+                  <span class="summary-lbl">{t.backupSummaryMsgs} (+{restoreResult.insertedCounts.messages})</span>
+                </div>
+                <div class="summary-item">
+                  <span class="summary-val">{restoreResult.insertedCounts.revisions}</span>
+                  <span class="summary-lbl">{t.backupSummaryRevs} (+{restoreResult.insertedCounts.revisions})</span>
+                </div>
+                {#if restoreMode === 'merge'}
+                  <div class="summary-item">
+                    <span class="summary-val">{restoreResult.skippedCounts.conversations}</span>
+                    <span class="summary-lbl">{t.restoreSummarySkipped} ({t.backupSummaryConvs})</span>
+                  </div>
+                  <div class="summary-item">
+                    <span class="summary-val">{restoreResult.skippedCounts.messages}</span>
+                    <span class="summary-lbl">{t.restoreSummarySkipped} ({t.backupSummaryMsgs})</span>
+                  </div>
+                  <div class="summary-item">
+                    <span class="summary-val">{restoreResult.skippedCounts.revisions}</span>
+                    <span class="summary-lbl">{t.restoreSummarySkipped} ({t.backupSummaryRevs})</span>
+                  </div>
+                {/if}
+              </div>
+              <div class="restore-actions-row" style="margin-top: 0.75rem;">
+                <button class="backup-btn secondary" type="button" onclick={handleResetRestore}>
+                  {t.refresh}
+                </button>
+              </div>
+            </div>
+          {/if}
+
+          {#if restoreError}
+            <div class="restore-error-banner" id="restore-error-banner">
+              ⚠️ {restoreError}
+              <div class="restore-actions-row" style="margin-top: 0.5rem;">
+                <button class="backup-btn secondary" type="button" onclick={handleResetRestore}>
+                  {t.restoreCancel}
+                </button>
               </div>
             </div>
           {/if}
@@ -608,5 +993,229 @@
   .summary-lbl {
     font-size: 0.6875rem;
     color: #6ee7b7;
+  }
+
+  /* Milestone 2E.2: Restore Styles */
+  .backup-btn.secondary {
+    background: #334155;
+    color: #f8fafc;
+    border: 1px solid #475569;
+  }
+
+  .backup-btn.secondary:hover:not(:disabled) {
+    background: #475569;
+  }
+
+  .restore-picker-row {
+    margin-top: 0.5rem;
+  }
+
+  .file-picker-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.45rem 0.9rem;
+    border-radius: 4px;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    cursor: pointer;
+    background: #1e293b;
+    border: 1px solid #3b82f6;
+    color: #93c5fd;
+    transition: background 0.15s;
+  }
+
+  .file-picker-label:hover {
+    background: #2563eb;
+    color: white;
+  }
+
+  .hidden-file-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    border: 0;
+  }
+
+  .restore-progress-banner {
+    margin-top: 0.75rem;
+    padding: 0.6rem 0.75rem;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    font-size: 0.8125rem;
+    color: #93c5fd;
+  }
+
+  .restore-preview-box {
+    margin-top: 0.75rem;
+    background: #131d31;
+    border: 1px solid #1e3a5f;
+    border-radius: 6px;
+    padding: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .preview-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #e2e8f0;
+  }
+
+  .preview-icon {
+    font-size: 1.25rem;
+  }
+
+  .preview-filename {
+    font-size: 0.6875rem;
+    color: #94a3b8;
+    font-family: monospace;
+  }
+
+  .preview-meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    font-size: 0.6875rem;
+    color: #64748b;
+    border-bottom: 1px solid #1e293b;
+    padding-bottom: 0.5rem;
+  }
+
+  .restore-counts-table {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid #1e293b;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    overflow: hidden;
+  }
+
+  .counts-row {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr;
+    padding: 0.35rem 0.6rem;
+    border-bottom: 1px solid #1e293b;
+    color: #cbd5e1;
+  }
+
+  .counts-row:last-child {
+    border-bottom: none;
+  }
+
+  .counts-row.header-row {
+    background: #0f172a;
+    font-weight: 600;
+    color: #94a3b8;
+  }
+
+  .backup-val {
+    color: #38bdf8;
+    font-weight: 500;
+  }
+
+  .restore-mode-selector {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .mode-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #e2e8f0;
+  }
+
+  .mode-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    background: #0f172a;
+    border: 1px solid #1e293b;
+    border-radius: 6px;
+    padding: 0.5rem 0.6rem;
+    cursor: pointer;
+    font-size: 0.75rem;
+  }
+
+  .mode-option.selected {
+    border-color: #38bdf8;
+    background: #0b1f38;
+  }
+
+  .mode-desc {
+    margin: 0.2rem 0 0 0;
+    font-size: 0.6875rem;
+    color: #94a3b8;
+    line-height: 1.35;
+  }
+
+  .replace-warning-box {
+    background: #451a03;
+    border: 1px solid #b45309;
+    border-radius: 6px;
+    padding: 0.65rem 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .replace-warning-box p {
+    margin: 0;
+    font-size: 0.75rem;
+    color: #fed7aa;
+    line-height: 1.35;
+  }
+
+  .safety-backup-action {
+    display: flex;
+  }
+
+  .confirm-checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.75rem;
+    color: #fef08a;
+    cursor: pointer;
+    margin-top: 0.25rem;
+  }
+
+  .restore-actions-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .restore-error-banner {
+    margin-top: 0.75rem;
+    padding: 0.6rem 0.75rem;
+    background: #450a0a;
+    border: 1px solid #991b1b;
+    border-radius: 6px;
+    color: #fca5a5;
+    font-size: 0.75rem;
+    line-height: 1.4;
+  }
+
+  .restore-summary-box {
+    margin-top: 0.75rem;
+    background: #064e3b;
+    border: 1px solid #059669;
+    border-radius: 6px;
+    padding: 0.75rem;
+  }
+
+  .reload-notice {
+    font-size: 0.75rem;
+    color: #a7f3d0;
+    margin: 0 0 0.5rem 0;
   }
 </style>

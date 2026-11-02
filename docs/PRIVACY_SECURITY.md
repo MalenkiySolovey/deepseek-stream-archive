@@ -200,3 +200,24 @@ StreamArchive requests **zero unnecessary permissions** (e.g. no `scripting`, no
 5. **In-Memory Resource Ceilings:**
    - Backup snapshots enforce a conservative 100 MiB raw text size limit (`MAX_IN_MEMORY_PORTABLE_BACKUP_SOURCE_BYTES`) evaluated inside the snapshot transaction to protect against out-of-memory errors in browser processes.
 
+---
+
+## 10. Import & Restore Security Model (Milestone 2E.2)
+
+1. **Decompression Bomb Protection:**
+   - Gzip stream reading enforces deterministic safety bounds: `MAX_IMPORT_COMPRESSED_BYTES = 50 MiB`, `MAX_IMPORT_DECOMPRESSED_BYTES = 250 MiB`, `MAX_IMPORT_RECORDS = 500,000`, `MAX_IMPORT_LINE_CHARS = 10 MiB`.
+   - Streaming reader cancels decompression immediately (`reader.cancel()`) upon encountering an oversized payload.
+
+2. **Pre-Commit Referential Integrity Barrier:**
+   - No data is written to the database until the materialized relational graph is verified in memory for DAG acyclicity, message conversation scoping, `attempt_only` parent isolation, and valid `isLastGood` pointers for recovery events.
+
+3. **Atomic Single-Transaction Guarantee:**
+   - In Replace Mode, all 9 stores are cleared and populated within a single transaction. Any operational failure triggers `tx.abort()`, leaving the previous database 100% intact.
+   - In Merge Mode, primary key collisions with conflicting payloads abort the transaction completely.
+
+4. **Active Stream Concurrency Protection:**
+   - Restore execution is strictly blocked while active DeepSeek generation streams are running (`activeTransportStreams.size > 0`).
+
+5. **Zero New Permissions:**
+   - Restore operates entirely through standard file input (`<input type="file">`) and local IndexedDB operations without external network requests or supplementary permissions.
+

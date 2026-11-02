@@ -39,6 +39,9 @@ export const MESSAGE_GET_CONVERSATION_EXPORT = 'STREAMARCHIVE_GET_CONVERSATION_E
 export const MESSAGE_CREATE_PORTABLE_BACKUP_SNAPSHOT = 'STREAMARCHIVE_CREATE_PORTABLE_BACKUP_SNAPSHOT' as const;
 export const MESSAGE_GET_STORAGE_USAGE_ESTIMATE = 'STREAMARCHIVE_GET_STORAGE_USAGE_ESTIMATE' as const;
 
+export const MESSAGE_RESTORE_PREVIEW = 'STREAMARCHIVE_RESTORE_PREVIEW' as const;
+export const MESSAGE_EXECUTE_RESTORE = 'STREAMARCHIVE_EXECUTE_RESTORE' as const;
+
 
 export type ObservationState = 'not_observed' | 'observed' | 'failed' | 'unsupported';
 
@@ -436,6 +439,32 @@ export interface GetStorageUsageEstimateResponse {
   error?: string;
 }
 
+export interface RestorePreviewRequest {
+  type: typeof MESSAGE_RESTORE_PREVIEW;
+  data: Uint8Array | ArrayBuffer;
+  mode: import('../restore/types').RestoreMode;
+}
+
+export interface RestorePreviewResponse {
+  success: boolean;
+  preflightId?: string;
+  preflight?: import('../restore/types').RestorePreflight;
+  error?: string;
+}
+
+export interface ExecuteRestoreRequest {
+  type: typeof MESSAGE_EXECUTE_RESTORE;
+  preflightId?: string;
+  mode: import('../restore/types').RestoreMode;
+  backup?: import('../backup/reader').MaterializedPortableBackup;
+}
+
+export interface ExecuteRestoreResponse {
+  success: boolean;
+  result?: import('../restore/types').RestoreResult;
+  error?: string;
+}
+
 export type ExtensionInternalMessage =
   | SaveSyntheticBatchRequest
   | GetFoundationStatusRequest
@@ -463,6 +492,8 @@ export type ExtensionInternalMessage =
   | GetPageRecoveryContentRequest
   | GetConversationExportRequest
   | CreatePortableBackupSnapshotRequest
-  | GetStorageUsageEstimateRequest;
+  | GetStorageUsageEstimateRequest
+  | RestorePreviewRequest
+  | ExecuteRestoreRequest;
 
 

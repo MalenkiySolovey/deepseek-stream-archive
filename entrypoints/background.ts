@@ -29,6 +29,8 @@ import {
   MESSAGE_GET_CONVERSATION_EXPORT,
   MESSAGE_CREATE_PORTABLE_BACKUP_SNAPSHOT,
   MESSAGE_GET_STORAGE_USAGE_ESTIMATE,
+  MESSAGE_RESTORE_PREVIEW,
+  MESSAGE_EXECUTE_RESTORE,
   type SaveSyntheticBatchRequest,
   type SaveSyntheticBatchResponse,
   type FoundationStatusResponse,
@@ -75,7 +77,10 @@ import {
   validateGetPageRecoveryContentRequest,
   validateGetConversationExportRequest,
   validateCreatePortableBackupSnapshotRequest,
+  validateRestorePreviewRequest,
+  validateExecuteRestoreRequest,
 } from '../src/bridge/validation';
+import type { MaterializedPortableBackup } from '../src/backup/reader';
 import type { DeepSeekProtocolDiagnosticsData } from '../src/adapters/deepseek/protocol/types';
 import { DEFAULT_DEEPSEEK_PROFILE } from '../src/adapters/deepseek/compatibility/profiles';
 import { HistoryReconciler } from '../src/core/reconciliation/history-reconciler';
@@ -110,6 +115,8 @@ export default defineBackground(() => {
   // Transient in-memory runtime diagnostics (reset on Service Worker restart)
   const runtimeEpochId = `epoch_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const runtimeStartedAt = Date.now();
+
+  const pendingRestoreBackups = new Map<string, { backup: MaterializedPortableBackup; expiresAt: number }>();
 
   let runtimeRawBatchesCount = 0;
   let runtimeRawStreamsCount = 0;
@@ -1435,6 +1442,90 @@ export default defineBackground(() => {
       } else {
         sendResponse({ success: false, error: 'Storage estimate API unavailable' });
       }
+      return true;
+    }
+
+    // 24. Handle Restore Preview & Preflight (Milestone 2E.2)
+    if (message.type === MESSAGE_RESTORE_PREVIEW) {
+      const validated = validateRestorePreviewRequest(message);
+      if (!validated) {
+        sendResponse({ success: false, error: 'Invalid restore preview request payload' });
+        return false;
+      }
+
+      // Cleanup expired preflights
+      const now = Date.now();
+      for (const [key, item] of pendingRestoreBackups.entries()) {
+        if (item.expiresAt < now) pendingRestoreBackups.delete(key);
+      }
+
+      const activeStreamsCount = activeTransportStreams.size;
+      storageRepo
+        .validateAndPreflightRestore(validated.data, activeStreamsCount, validated.mode)
+        .then(({ preflight, backup }) => {
+          if (backup) {
+            const preflightId = `pfl_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+            pendingRestoreBackups.set(preflightId, {
+              backup,
+              expiresAt: Date.now() + 15 * 60 * 1000, // 15 mins TTL
+            });
+            sendResponse({ success: true, preflightId, preflight });
+          } else {
+            sendResponse({ success: false, preflight });
+          }
+        })
+        .catch((err) => {
+          logger.error('Failed to preflight restore', err);
+          sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) });
+        });
+      return true;
+    }
+
+    // 25. Handle Execute Restore (Milestone 2E.2)
+    if (message.type === MESSAGE_EXECUTE_RESTORE) {
+      const validated = validateExecuteRestoreRequest(message);
+      if (!validated) {
+        sendResponse({ success: false, error: 'Invalid execute restore request payload' });
+        return false;
+      }
+
+      const activeStreamsCount = activeTransportStreams.size;
+      if (activeStreamsCount > 0) {
+        sendResponse({
+          success: false,
+          error: 'Cannot restore archive while active DeepSeek generation streams are running. Please wait for completion.',
+        });
+        return false;
+      }
+
+      let backup = validated.backup;
+      if (!backup && validated.preflightId) {
+        const cached = pendingRestoreBackups.get(validated.preflightId);
+        if (cached) {
+          backup = cached.backup;
+        }
+      }
+
+      if (!backup) {
+        sendResponse({
+          success: false,
+          error: 'Restore preflight expired or not found. Please re-validate the backup file before restoring.',
+        });
+        return false;
+      }
+
+      storageRepo
+        .executeRestore(backup, validated.mode, activeStreamsCount)
+        .then((result) => {
+          if (validated.preflightId) {
+            pendingRestoreBackups.delete(validated.preflightId);
+          }
+          sendResponse({ success: result.success, result, error: result.error });
+        })
+        .catch((err) => {
+          logger.error('Failed to execute restore', err);
+          sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) });
+        });
       return true;
     }
 

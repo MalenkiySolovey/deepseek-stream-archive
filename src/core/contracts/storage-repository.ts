@@ -154,5 +154,18 @@ export interface StorageRepository {
   // Export & Portable Backup operations (Milestone 2E.1)
   getConversationExportModel(conversationId: string): Promise<import('../../export/types').ConversationExportModel | null>;
   createPortableBackupSnapshot(options?: import('../../backup/snapshot').CreateSnapshotOptions): Promise<import('../../backup/snapshot').PortableBackupSnapshot>;
+
+  // Restore & Safe Merge operations (Milestone 2E.2)
+  validateAndPreflightRestore(
+    input: ArrayBuffer | Uint8Array | Blob | ReadableStream<Uint8Array>,
+    activeStreamsCount: number,
+    mode?: import('../../restore/types').RestoreMode
+  ): Promise<{ preflight: import('../../restore/types').RestorePreflight; backup?: import('../../backup/reader').MaterializedPortableBackup }>;
+  executeRestore(
+    backup: import('../../backup/reader').MaterializedPortableBackup,
+    mode: import('../../restore/types').RestoreMode,
+    activeStreamsCount: number
+  ): Promise<import('../../restore/types').RestoreResult>;
+  getCurrentStoreCounts(): Promise<import('../../backup/format').PortableBackupStoreCounts>;
 }
 
