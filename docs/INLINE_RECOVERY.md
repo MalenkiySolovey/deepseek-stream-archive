@@ -94,3 +94,11 @@ Level 4: Floating Recovery Tray (Universal Fallback)
   All markdown headers, paragraphs, lists, and code blocks are tokenized into an AST and instantiated via `document.createElement()` and `document.createTextNode()`.
 - **Identity Gating:**
   Inline recovery is strictly gated on strong `data-message-id` attributes matching verified `RecoveryEvent` records in IndexedDB. Generic refusal text on the page is never used as an authority for injection.
+
+---
+
+## 6. Live Compatibility Verification
+
+The inline recovery architecture was verified against live production DeepSeek chat during the Milestone 2D.4-LA acceptance gate:
+- Real-browser live acceptance report: [`docs/LIVE_INLINE_RECOVERY_RESULTS_2026-11-03.md`](./LIVE_INLINE_RECOVERY_RESULTS_2026-11-03.md).
+- Status: **`PASS`** across Level 1 DOM insertion, React virtualization scrolling, client-side SPA route isolation, native toolbar non-tampering, and native `Regenerate` branching.

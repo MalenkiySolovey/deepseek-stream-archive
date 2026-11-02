@@ -164,4 +164,7 @@ To eliminate anti-recall races and premature closures:
 ### 6.4 Degraded State Invariant
 If a sequence gap or integrity-threatening warning (`malformed_json`, `unknown_operation`, `batch_too_deep`, `array_index_too_large`, etc.) occurs, the stream transitions permanently to `degraded`. Degraded sessions cannot transition back to `live_observed`.
 
+### 6.5 Live Inline Compatibility Certification (2026-11-03)
+During the live acceptance gate recorded in [`docs/LIVE_INLINE_RECOVERY_RESULTS_2026-11-03.md`](./LIVE_INLINE_RECOVERY_RESULTS_2026-11-03.md), the DOM capability probes (`probe:dom-anchor-identity`, `probe:dom-inline-insertion`, and `probe:dom-toolbar-separation`) confirmed that production DeepSeek maintains stable `data-message-id` attributes and independent `.ds-actions-toolbar` elements. Level 1 inline insertion operates without host DOM corruption, and native toolbar operations (`Regenerate`, `Copy`, `Like`, `Dislike`) retain full native listener integrity.
+
 

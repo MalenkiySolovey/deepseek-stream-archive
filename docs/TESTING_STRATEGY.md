@@ -624,4 +624,4 @@ The automated regression corpus stands at **452 Vitest tests across 66 test file
      - Route navigation between chat sessions cleanly unmounts inline hosts without cross-chat state leakage.
 
 > [!IMPORTANT]
-> Automated tests confirm structural and protocol compliance. For instructions on executing real-world manual acceptance testing against live `chat.deepseek.com`, see the [Live Acceptance Testing Guide](./LIVE_ACCEPTANCE.md) and [Live Acceptance Results Template](./LIVE_ACCEPTANCE_RESULTS_TEMPLATE.md).
+> Automated tests confirm structural and protocol compliance. For instructions on executing real-world manual acceptance testing against live `chat.deepseek.com`, see the [Live Acceptance Testing Guide](./LIVE_ACCEPTANCE.md), [Live Acceptance Results Template](./LIVE_ACCEPTANCE_RESULTS_TEMPLATE.md), and [Inline Recovery Live Acceptance Results (2026-11-03)](./LIVE_INLINE_RECOVERY_RESULTS_2026-11-03.md).
