@@ -10,12 +10,15 @@ The **Browser Compatibility Harness** executes end-to-end regression suites in a
 
 ---
 
-## 2. Zero External Network Guarantee
+## 2. Fail-Closed Network Isolation Guarantee
 
 > [!IMPORTANT]
-> **Strictly Local Synthetic Fixtures — Zero External Network Access**  
-> The compatibility harness executes against an internal HTTP server that serves synthetic DeepSeek HTML and protocol streams (`fixtures/index.html`, `fixtures/api-stream.js`).  
-> At no point does the harness connect to `https://chat.deepseek.com`, send telemetry, or contact third-party servers. All tests are completely deterministic, air-gap safe, and safe for continuous integration (CI) runners.
+> **Strict Fail-Closed Policy: Zero External Network Egress**  
+> All HTTP and HTTPS traffic in browser tests is intercepted by `FailClosedFixtureRouter`.  
+> - **Default Policy:** `DENY BY DEFAULT`. Any request to an external server or unregistered endpoint is immediately aborted with `blockedbyclient` and recorded in `NetworkAuditManager`.
+> - **Zero Credentials:** Tests never send cookies, authentication tokens, API keys, or session identifiers to any external server.
+> - **Zero Synthetic Pass-Through:** `route.continue()` is forbidden for HTTP/HTTPS requests. Only internal browser protocols (`chrome-extension://`, `data:`, `blob:`) are permitted.
+> - **Post-Test Audit:** Every test asserts `router.audit.assertClean()`, failing immediately if any unhandled external request occurred.
 
 ---
 
@@ -25,66 +28,84 @@ The **Browser Compatibility Harness** executes end-to-end regression suites in a
 flowchart TD
     subgraph Playwright["Playwright Test Runner"]
         Config["playwright.config.ts"]
-        Runner["Persistent Browser Context"]
+        Runner["Isolated Persistent Chromium Context"]
+        Audit["NetworkAuditManager (Fail-Closed Gate)"]
     end
 
     subgraph Browser["Chromium Instance (MV3)"]
         SW["Background Service Worker (chrome-extension://)"]
-        Tab["Synthetic Web Tab (http://localhost:PORT)"]
+        Tab["Intercepted Web Tab (https://chat.deepseek.com)"]
         Shadow["Closed Shadow DOM (#shadow-root)"]
     end
 
-    subgraph FixtureServer["Local Synthetic Fixture Server"]
-        HTML["Synthetic DeepSeek DOM (fixtures/index.html)"]
-        SSE["Mock SSE Streamer (fixtures/mock-stream.js)"]
-        Hist["Mock History API (/api/v0/chat/history_messages)"]
+    subgraph FixtureRouter["FailClosedFixtureRouter"]
+        Registry["FixtureRegistry"]
+        Doc["Synthetic HTML Document"]
+        SSE["Synthetic SSE Endpoints"]
+        JSON["Synthetic History Endpoints"]
+        Abort["Deny-by-Default (blockedbyclient)"]
     end
 
-    Runner -->|Launch with Extension| Browser
-    Tab -->|HTTP Fetch / SSE| FixtureServer
-    Tab -->|Inject Main & Isolated World| SW
+    Runner -->|Launch Extension with Fresh Temp Profile| Browser
+    Tab -->|Network Interception| FixtureRouter
+    FixtureRouter -->|Matched Endpoint| Registry
+    FixtureRouter -->|Unmatched HTTP/HTTPS| Abort
+    Abort -->|Log Violation| Audit
+    Tab -->|Inject MAIN World Interceptor & ISOLATED Content Script| SW
     SW -->|IndexedDB Storage| DB[(StreamArchiveDB)]
-    Tab -->|Anchor Recovery Badge| Shadow
+    Tab -->|Anchor Non-Destructive Badge| Shadow
 ```
 
 ### Key Mechanisms:
-1. **Unpacked Extension Loading:**  
-   Playwright launches a persistent Chromium context with:
-   ```ts
-   args: [
-     `--disable-extensions-except=${pathToExtension}`,
-     `--load-extension=${pathToExtension}`,
-     '--headless=new',
-   ],
-   ignoreDefaultArgs: ['--disable-extensions']
-   ```
+1. **Profile Isolation:**  
+   Every test execution creates a unique, isolated temporary user data directory (`fs.mkdtempSync`), ensuring zero cross-test IndexedDB or cache pollution.
 2. **Deterministic Protocol Fixtures:**  
-   The synthetic server reproduces DeepSeek's exact Server-Sent Events (SSE) format, including:
+   The synthetic router fulfills DeepSeek's exact Server-Sent Events (SSE) format, including:
    - Chunk fragmentation across UTF-8 multi-byte code points.
    - DeepSeek protocol envelopes (`v0`, `biz_data`, `session_id`, `message_id`).
    - Content filter replacement events (`status: "CONTENT_FILTER"`, `type: "TEMPLATE_RESPONSE"`).
-   - Server history payloads with multi-batch pagination.
+   - Server history payloads in both `fragments[]` and `content + thinking_content` flat fields shapes.
 3. **Background Worker Inspection:**  
-   Tests query extension storage and internal state by evaluating directly inside the extension's background service worker (`context.serviceWorkers()`), avoiding cross-origin permission restrictions.
+   Tests query extension storage and internal state by evaluating directly inside the extension's background service worker (`chrome-extension://` origin) or sidepanel context, inspecting IndexedDB (`StreamArchiveDB`) directly.
 
 ---
 
-## 4. Test Specifications
+## 4. What Browser E2E Proves vs. Unit Tests
 
-The harness currently comprises 6 automated test specifications in `tests/browser/`:
+| Testing Dimension | Unit & Integration Tests (Vitest) | Browser Compatibility Harness (Playwright) |
+|---|---|---|
+| **Execution Environment** | Node.js + Happy-DOM / FakeIndexedDB | Real Headless Chromium MV3 Instance |
+| **World Isolation** | Simulated in memory | Real Chrome `MAIN` vs `ISOLATED` world boundaries |
+| **Network Hooks** | Monkey-patched globals in JSDOM | Native `window.fetch` and `XMLHttpRequest` interception |
+| **Shadow DOM Encapsulation** | Mock element tree | Closed ShadowRoot attachment and light-DOM immunity |
+| **SPA Navigation** | Synthetic popstate event dispatch | Real browser `window.history.pushState` and `navigation` API |
+| **MV3 Service Worker Lifecycle** | Direct class instantiation | Service worker registration, message port dispatch, runtime epochs |
+| **Payload Coverage** | Edge cases, parser fuzzing, schema benchmarks | End-to-end delivery from DOM hook to IndexedDB |
+
+### Synthetic Fixture Limitations:
+- The compatibility harness uses synthetic DOM layouts and mock API responses. While the schema and stream structure match verified DeepSeek behavior, UI layout styling, React Fiber internals, and server-side timing variations are not simulated.
+- **Manual live verification on `https://chat.deepseek.com` remains mandatory** before production release to validate live authentication, anti-bot protections, and real-time frontend framework updates.
+
+---
+
+## 5. Test Specifications
+
+The harness currently comprises 8 automated test specifications in `tests/browser/` (9 test cases):
 
 | Specification File | Focus Area | Verification Invariants |
 |---|---|---|
-| `normal-generation.spec.ts` | Standard Generation | Monotonic checkpoints, non-invasive capture, correct title and message indexing in IndexedDB. |
-| `filter-replacement.spec.ts` | Content Censorship Recovery | Pre-filter `lastGood` revision frozen, zero host DOM mutation, recovery badge rendered in closed shadow root, clipboard copy. |
-| `history-reconciliation.spec.ts` | Passive History Ingest | Staged multi-batch ingest, manifest validation, atomic commit, provisional ID to server UUID resolution, preservation of live revisions. |
-| `route-isolation.spec.ts` | SPA Navigation & Route Race | Route epoch invalidation, instant cleanup of prior chat badges, zero cross-session recovery leakage. |
-| `network-interruption.spec.ts` | Abort & Disconnect Handling | Graceful abort detection, crash-durable persistence of partial streaming tokens with `network_error`. |
-| `degradation-profile.spec.ts` | Performance Under Load | High-frequency chunk throughput (100+ tokens/sec), memory stability, low main-thread blocking overhead. |
+| `normal-generation.spec.ts` | Standard Fetch Generation | Monotonic checkpoints, non-invasive capture, correct title and message indexing in IndexedDB, concrete pipeline verification chain assertion (`bg_reachable`, `main_interceptor`, `bridge_handshake`, `fetch_hook`, `generation_candidate`, `raw_chunk_observed`, `raw_journal_ack`, `canonical_checkpoint_ack`). |
+| `xhr-generation.spec.ts` | XMLHttpRequest Generation | Captures streaming responses initiated via `XMLHttpRequest`, commits raw journal batches, records canonical revisions, asserts active `xhr_hook`. |
+| `filter-replacement.spec.ts` | Content Censorship Recovery | Preserves pre-filter `lastGood` revision, creates authoritative `RecoveryEvent`, ensures host DOM container remains intact. |
+| `history-reconciliation.spec.ts` | History API Ingest (Dual Shape) | Ingests and reconciles history messages in both `fragments[]` shape and `content + thinking_content` flat fields shape. |
+| `mv3-service-worker-lifecycle.spec.ts` | MV3 Lifecycle & Runtime Epochs | Validates that durable archive evidence survives across service worker epochs while current runtime diagnostics isolate to the active epoch. |
+| `network-interruption.spec.ts` | Client Abort & Stream Interruption | Handles mid-stream consumer abort gracefully, retaining partial stream revisions as `partial_capture` without claiming `pre_filter_recovery`. |
+| `degradation-profile.spec.ts` | Unknown Protocol Shapes | Preserves raw stream journal when encountering unknown SSE protocol shapes without crashing or disrupting the page. |
+| `route-isolation.spec.ts` | SPA Navigation & Route Isolation | Immediate pre-revocation of session state upon client-side `pushState` navigation without artificial popstate events, preventing cross-conversation leakage. |
 
 ---
 
-## 5. Running the Harness
+## 6. Running the Harness
 
 ### Prerequisites
 Build the production extension bundle before executing the harness:
@@ -103,23 +124,15 @@ pnpm exec playwright install chromium --with-deps
 pnpm run test:e2e
 ```
 
-### Running a Specific Test with DevTools / UI
+### Running a Specific Test
 ```bash
-pnpm exec playwright test tests/browser/filter-replacement.spec.ts --headed
+pnpm exec playwright test tests/browser/normal-generation.spec.ts
 ```
 
 ---
 
-## 6. Continuous Integration (CI)
+## 7. Continuous Integration (CI)
 
 The browser compatibility harness runs automatically in GitHub Actions on every pull request and push to `main` (`.github/workflows/ci.yml`).
 
-The CI workflow:
-1. Installs Node.js and pnpm dependencies.
-2. Runs Vitest unit and mock integration tests (`pnpm run test`).
-3. Runs TypeScript typecheck (`pnpm run typecheck`).
-4. Builds the unpacked extension bundle (`pnpm run build`).
-5. Installs Playwright Chromium browser binaries.
-6. Executes `pnpm run test:e2e` in headless mode.
-
-All 6 browser specifications must pass for the build to succeed.
+All browser specifications must pass with zero network violations for the build to succeed.

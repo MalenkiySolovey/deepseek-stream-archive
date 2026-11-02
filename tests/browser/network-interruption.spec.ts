@@ -6,22 +6,17 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-test.describe('E2E Browser Compatibility: Network Interruption', () => {
-  test('retains partial stream revisions as partial_capture and does not claim pre_filter_recovery', async ({
+test.describe('E2E Browser Compatibility: Client Abort & Stream Interruption', () => {
+  test('retains partial stream revisions as partial_capture upon client abort and does not claim pre_filter_recovery', async ({
     page,
+    router,
     readIndexedDb,
   }) => {
     const fixturePath = path.resolve(__dirname, '../../fixtures/deepseek/interrupted-stream.sse.txt');
     const sseBody = fs.readFileSync(fixturePath, 'utf8');
 
-    // Return partial stream then drop connection
-    await page.route('https://chat.deepseek.com/api/v0/chat/completion', async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'text/event-stream; charset=utf-8',
-        body: sseBody,
-      });
-    });
+    // Register partial SSE stream in central fail-closed registry
+    router.registry.registerSseEndpoint('https://chat.deepseek.com/api/v0/chat/completion', sseBody);
 
     await page.goto('https://chat.deepseek.com/a/chat/s/sess-interrupted-001');
 
@@ -37,10 +32,10 @@ test.describe('E2E Browser Compatibility: Network Interruption', () => {
         const reader = res.body?.getReader();
         if (reader) {
           await reader.read(); // Read partial chunk
-          controller.abort(); // Interrupt connection mid-stream
+          controller.abort(); // Client consumer aborts mid-stream
         }
       } catch {
-        // network interrupted
+        // network interrupted by consumer
       }
     });
 

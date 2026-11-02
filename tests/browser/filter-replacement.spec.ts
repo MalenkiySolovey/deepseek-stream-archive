@@ -7,21 +7,16 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 test.describe('E2E Browser Compatibility: Content Filter Replacement & In-Page Recovery', () => {
-  test('preserves pre-filter lastGood revision, creates RecoveryEvent, and provides lazy overlay modal', async ({
+  test('preserves pre-filter lastGood revision and authoritative RecoveryEvent', async ({
     page,
+    router,
     readIndexedDb,
   }) => {
     const fixturePath = path.resolve(__dirname, '../../fixtures/deepseek/filter-stream.sse.txt');
     const sseBody = fs.readFileSync(fixturePath, 'utf8');
 
-    // Intercept completion with censored stream
-    await page.route('https://chat.deepseek.com/api/v0/chat/completion', async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'text/event-stream; charset=utf-8',
-        body: sseBody,
-      });
-    });
+    // Register SSE completion endpoint in central fail-closed registry
+    router.registry.registerSseEndpoint('https://chat.deepseek.com/api/v0/chat/completion', sseBody);
 
     await page.goto('https://chat.deepseek.com/a/chat/s/sess-filter-001');
 

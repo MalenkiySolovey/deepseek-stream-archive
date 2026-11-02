@@ -1,18 +1,63 @@
-import { test as base, expect, type BrowserContext, type Page } from '@playwright/test';
+import { test as base, expect, type BrowserContext, type Page, type Worker } from '@playwright/test';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { fileURLToPath } from 'url';
+import { FailClosedFixtureRouter } from './network/fixture-router';
+import type { SanitizedRequestInfo } from './network/network-audit';
+import type { Conversation, Message, ResponseRevision, RecoveryEvent } from '../../src/core/models';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+export interface TypedIndexedDbReader {
+  <T = any>(storeName: string): Promise<T[]>;
+  conversations(): Promise<Conversation[]>;
+  messages(): Promise<Message[]>;
+  revisions(): Promise<ResponseRevision[]>;
+  recoveryEvents(): Promise<RecoveryEvent[]>;
+  rawStreams(): Promise<any[]>;
+  rawBatches(): Promise<any[]>;
+  canonicalCheckpoints(): Promise<any[]>;
+}
+
 export interface ExtensionTestFixtures {
   context: BrowserContext;
   extensionId: string;
+  serviceWorker: Worker;
   page: Page;
+  router: FailClosedFixtureRouter;
   deepseekPageHtml: string;
   loadSidepanel: () => Promise<Page>;
-  readIndexedDb: (storeName: string) => Promise<any[]>;
+  readIndexedDb: TypedIndexedDbReader;
+  unexpectedNetworkRequests: readonly SanitizedRequestInfo[];
+}
+
+export async function findExtensionServiceWorker(
+  context: BrowserContext,
+  timeoutMs = 15000
+): Promise<Worker> {
+  // First check active workers
+  const existing = context.serviceWorkers().find((sw) => sw.url().startsWith('chrome-extension://'));
+  if (existing) return existing;
+
+  // Wait for extension worker registration event
+  const startTime = Date.now();
+  while (Date.now() - startTime < timeoutMs) {
+    const sw = await context.waitForEvent('serviceworker', {
+      timeout: Math.max(1000, timeoutMs - (Date.now() - startTime)),
+      predicate: (worker) => worker.url().startsWith('chrome-extension://'),
+    }).catch(() => null);
+
+    if (sw && sw.url().startsWith('chrome-extension://')) {
+      return sw;
+    }
+
+    const current = context.serviceWorkers().find((w) => w.url().startsWith('chrome-extension://'));
+    if (current) return current;
+  }
+
+  throw new Error(`[StreamArchive Test] Extension service worker (chrome-extension://) not found within ${timeoutMs}ms`);
 }
 
 export const test = base.extend<ExtensionTestFixtures>({
@@ -23,8 +68,12 @@ export const test = base.extend<ExtensionTestFixtures>({
     }
 
     const targetPath = pathToExtension.replace(/\\/g, '/');
+    const tempUserDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'streamarchive-e2e-'));
 
-    const launchOptions: any = {
+    // Official Playwright pattern for testing Chrome Extensions in Chromium:
+    // 1. ignoreDefaultArgs: ['--disable-extensions'] is required because Playwright disables extensions by default.
+    // 2. '--headless=new' provides headless Chromium MV3 execution with extension support.
+    const launchOptions = {
       headless: false,
       ignoreDefaultArgs: ['--disable-extensions'],
       args: [
@@ -36,21 +85,28 @@ export const test = base.extend<ExtensionTestFixtures>({
       ],
     };
 
-    // Dynamic import to use chromium from playwright
     const { chromium } = await import('@playwright/test');
-    const context = await chromium.launchPersistentContext('', launchOptions);
+    const context = await chromium.launchPersistentContext(tempUserDataDir, launchOptions);
 
-    await use(context);
-    await context.close();
+    try {
+      await use(context);
+    } finally {
+      await context.close().catch(() => {});
+      try {
+        fs.rmSync(tempUserDataDir, { recursive: true, force: true });
+      } catch {
+        // temp dir clean up best-effort
+      }
+    }
   },
 
-  extensionId: async ({ context }, use) => {
-    // Wait for extension background service worker to register
-    let [background] = context.serviceWorkers();
-    if (!background) {
-      background = await context.waitForEvent('serviceworker', { timeout: 10000 });
-    }
-    const extensionId = background.url().split('/')[2] || '';
+  serviceWorker: async ({ context }, use) => {
+    const sw = await findExtensionServiceWorker(context);
+    await use(sw);
+  },
+
+  extensionId: async ({ serviceWorker }, use) => {
+    const extensionId = serviceWorker.url().split('/')[2] || '';
     await use(extensionId);
   },
 
@@ -74,34 +130,28 @@ export const test = base.extend<ExtensionTestFixtures>({
     await use(html);
   },
 
-  page: async ({ context, deepseekPageHtml }, use) => {
+  router: async ({}, use) => {
+    const router = new FailClosedFixtureRouter();
+    await use(router);
+  },
+
+  page: async ({ context, router, deepseekPageHtml }, use) => {
     const page = await context.newPage();
 
-    // Guard: Zero unexpected external network access
-    await page.route('**/*', async (route) => {
-      const url = route.request().url();
-      if (!url.startsWith('https://chat.deepseek.com') && !url.startsWith('chrome-extension://')) {
-        console.warn(`[Blocked External Request] ${url}`);
-        return route.abort('blockedbyclient');
-      }
+    // Default registration: All DeepSeek document routes serve the synthetic HTML fixture
+    router.registry.registerDocument(/^https:\/\/chat\.deepseek\.com(\/.*)?$/, deepseekPageHtml);
 
-      // Default fulfill for main page document
-      if (
-        route.request().resourceType() === 'document' &&
-        url.startsWith('https://chat.deepseek.com/a/chat/s/')
-      ) {
-        return route.fulfill({
-          status: 200,
-          contentType: 'text/html',
-          body: deepseekPageHtml,
-        });
-      }
-
-      // Default fallback for unhandled requests: pass through to route continuation or empty json
-      return route.continue();
-    });
+    // Attach the fail-closed network router
+    await router.attachToPage(page);
 
     await use(page);
+
+    // Enforce Fail-Closed Network Guarantee: Assert zero unhandled external requests
+    router.audit.assertClean();
+  },
+
+  unexpectedNetworkRequests: async ({ router }, use) => {
+    await use(router.audit.getViolations());
   },
 
   loadSidepanel: async ({ context, extensionId }, use) => {
@@ -114,11 +164,8 @@ export const test = base.extend<ExtensionTestFixtures>({
   },
 
   readIndexedDb: async ({ context }, use) => {
-    const reader = async (storeName: string) => {
-      let [sw] = context.serviceWorkers();
-      if (!sw) {
-        sw = await context.waitForEvent('serviceworker', { timeout: 5000 });
-      }
+    const readerFn = (async (storeName: string) => {
+      const sw = await findExtensionServiceWorker(context);
       return await sw.evaluate(async (store) => {
         return new Promise<any[]>((resolve, reject) => {
           const req = indexedDB.open('StreamArchiveDB');
@@ -137,8 +184,17 @@ export const test = base.extend<ExtensionTestFixtures>({
           };
         });
       }, storeName);
-    };
-    await use(reader);
+    }) as TypedIndexedDbReader;
+
+    readerFn.conversations = async () => (await readerFn('conversations')) as Conversation[];
+    readerFn.messages = async () => (await readerFn('messages')) as Message[];
+    readerFn.revisions = async () => (await readerFn('revisions')) as ResponseRevision[];
+    readerFn.recoveryEvents = async () => (await readerFn('recovery_events')) as RecoveryEvent[];
+    readerFn.rawStreams = async () => (await readerFn('raw_streams')) as any[];
+    readerFn.rawBatches = async () => (await readerFn('raw_batches')) as any[];
+    readerFn.canonicalCheckpoints = async () => (await readerFn('canonical_checkpoints')) as any[];
+
+    await use(readerFn);
   },
 });
 

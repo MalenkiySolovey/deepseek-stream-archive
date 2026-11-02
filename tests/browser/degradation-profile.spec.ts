@@ -1,8 +1,9 @@
 import { test, expect } from './extension-fixture';
 
-test.describe('E2E Browser Compatibility: Graceful Degradation on Unknown SSE Shapes', () => {
-  test('handles unknown SSE payload structure gracefully without page breakage or crashing background worker', async ({
+test.describe('E2E Browser Compatibility: Graceful Degradation on Unknown Protocol Shapes', () => {
+  test('retains raw stream journal when encountering unknown SSE protocol shapes without page disruption', async ({
     page,
+    router,
     readIndexedDb,
     loadSidepanel,
   }) => {
@@ -14,13 +15,8 @@ data: {"p":"response/status","o":"SET","v":"FINISHED"}
 data: [DONE]
 `;
 
-    await page.route('https://chat.deepseek.com/api/v0/chat/completion', async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'text/event-stream; charset=utf-8',
-        body: strangeSse,
-      });
-    });
+    // Register SSE completion endpoint in central fail-closed registry
+    router.registry.registerSseEndpoint('https://chat.deepseek.com/api/v0/chat/completion', strangeSse);
 
     await page.goto('https://chat.deepseek.com/a/chat/s/sess-degraded-test');
 
