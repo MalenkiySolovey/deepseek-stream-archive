@@ -20,10 +20,10 @@ Checks that a human tester can safely and deterministically reproduce during ord
 - **Scenario 1:** Normal Unfiltered Response Generation
 - **Scenario 4:** Fast Navigation & Mid-Stream Route Switch
 - **Scenario 5A:** Passive History Reconciliation (Normal Captured Chat)
-- **Scenario 6:** Network Interruption & Stream Abort
+- **Scenario 6:** Network Interruption, Stream Abort & Transport Retry Stabilization
 - **Scenario 7:** Multi-Tab Concurrency
 - **Scenario 8:** Side Panel Read-Only Archive Inspection
-- **AC-01, AC-03, AC-05, AC-06, AC-07, AC-08:** Architectural and privacy invariants.
+- **AC-01, AC-03, AC-05, AC-06, AC-07, AC-08, AC-09:** Architectural, privacy, and retry stabilization invariants.
 
 All mandatory checks must be evaluated and must achieve a **`PASS`** verdict.
 
@@ -227,19 +227,28 @@ When logging DevTools output, console traces, or screenshots into acceptance rep
 
 ---
 
-### Scenario 6: Network Interruption & Stream Abort (Mandatory)
+### Scenario 6: Network Interruption, Stream Abort & Transport Retry Stabilization (Mandatory)
 
-**Objective:** Verify crash durability when network drops or tab is abruptly closed.
+**Objective:** Verify crash durability when network drops or tab is abruptly closed, and ensure automatic client-side transport retries do not spawn fake conversation branches or phantom messages.
 
 1. **Action:**
    - Start generating a response to a long prompt (e.g. `"Write a comprehensive 500-word essay on the history of cryptography"`).
    - In DevTools -> **Network** tab -> toggle **Offline** mid-generation.
+   - Observe DeepSeek client behavior (DeepSeek web UI may perform 1 to 3 automatic reconnection attempts via XHR/fetch before displaying a retry button or error).
+   - Toggle Network back to **Online** and allow DeepSeek to finish or retry, or reload the page to trigger passive history reconciliation.
 2. **Observations:**
-   - DeepSeek UI displays network error.
-   - Content script records network interruption terminal checkpoint.
+   - DeepSeek UI handles network error or completes upon reconnection.
+   - Content script and interceptor capture each transport attempt as an independent raw stream in `raw_streams` / `raw_stream_batches`.
    - Revisions captured prior to disconnect are durably flushed to IndexedDB.
-   - Toggle Network back to **Online** -> open Side Panel -> verify partial answer is preserved with finish reason `network_error` without falsely claiming `content_filter`.
-3. **Verdict:** `PASS` / `FAIL` (Mandatory)
+   - Empty interrupted transport attempts are classified as `projectionState: 'attempt_only'` with `parentId: undefined` (never linked into the canonical conversation tree).
+   - Any meaningful partial text captured during interrupted attempts is preserved as `projectionState: 'unmatched_capture'` and rendered cleanly in the dedicated "Unmatched Stream Captures" container in the Side Panel, without polluting the linear chat tree.
+   - Open Side Panel -> verify the conversation contains exactly the expected logical messages (e.g. 1 user prompt and 1 assistant response).
+   - **Crucial Invariant:** Verify that **zero phantom branch selectors** (e.g. `Branch 1 of 3`) appear. Sibling branching appears *only* when genuine user edits or regenerations occur.
+3. **Verification after page reload (Passive History Reconciliation):**
+   - Reload the page (`Ctrl + F5`) -> server history reconciles the logical assistant message.
+   - Confirm message count remains exact (e.g. 2 messages total, not 4 or 5).
+   - Verify all raw transport attempts remain preserved in raw storage for forensic replay.
+4. **Verdict:** `PASS` / `FAIL` (Mandatory)
 
 ---
 
@@ -291,6 +300,7 @@ For logging real-world execution results, copy and fill out the [Live Acceptance
 | **AC-06** | History Atomicity | Incomplete history stages never corrupt canonical database | `PASS / FAIL` (Mandatory) |
 | **AC-07** | Strict Permissions | Manifest restricted to `storage`, `sidePanel`, and `chat.deepseek.com` | `PASS / FAIL` (Mandatory) |
 | **AC-08** | Truth Convergence | Reconciled history retains live revisions without data loss | `PASS / FAIL` (Mandatory) |
+| **AC-09** | Transport Retry Stabilization | Client-side transport retries never spawn phantom canonical branches or messages | `PASS / FAIL` (Mandatory) |
 
 ---
 

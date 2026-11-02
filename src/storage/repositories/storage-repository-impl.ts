@@ -15,6 +15,7 @@ import {
   selectPreferredRevision,
   isRevisionPayloadIdentical,
   isRecoveryEventIdentical,
+  isLogicalMessage,
 } from '../../core/models';
 import type { Conversation, Message, ResponseRevision, RecoveryEvent } from '../../core/models';
 import {
@@ -1139,7 +1140,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
               id: conv.id,
               remoteId: conv.remoteId,
               title: conv.title,
-              messageCount: msgs.length,
+              messageCount: msgs.filter((m) => isLogicalMessage(m)).length,
               recoveredCount,
               hasDegraded,
               createdAt: conv.createdAt,
@@ -1239,6 +1240,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
                 remoteParentId: msg.remoteParentId,
                 sourceRawStreamKey: msg.sourceRawStreamKey,
                 identityState: msg.identityState,
+                projectionState: msg.projectionState,
                 role: msg.role,
                 status: msg.status,
                 content: msg.content,
@@ -1453,6 +1455,21 @@ export class IndexedDbStorageRepository implements StorageRepository {
         }
       };
 
+      let unmatchedCapturesCount = 0;
+      let attemptOnlyCount = 0;
+
+      if (msgStore.indexNames.contains('projectionState')) {
+        const projIndex = msgStore.index('projectionState');
+        const unmatchReq = projIndex.count('unmatched_capture');
+        unmatchReq.onsuccess = () => {
+          unmatchedCapturesCount = unmatchReq.result || 0;
+        };
+        const attemptReq = projIndex.count('attempt_only');
+        attemptReq.onsuccess = () => {
+          attemptOnlyCount = attemptReq.result || 0;
+        };
+      }
+
       tx.oncomplete = () => {
         const totalMessages = msgCountReq.result || 0;
         const provisionalCount = Math.max(0, totalMessages - reconciledCount);
@@ -1465,10 +1482,149 @@ export class IndexedDbStorageRepository implements StorageRepository {
           revisionsCount: revCountReq.result || 0,
           lastGoodRevisionsCount: lastGoodCount,
           recoveryEventsCount: recCountReq.result || 0,
+          unmatchedCapturesCount,
+          attemptOnlyCount,
         });
       };
 
       tx.onerror = () => reject(tx.error || new Error('Failed to get archive summary'));
+    });
+  }
+
+  /**
+   * Idempotently repairs legacy message projections across the database.
+   * Strips phantom tree branch links from empty failed transport attempts and
+   * classifies meaningful partial captures without modifying raw journal evidence.
+   */
+  async repairCanonicalProjection(): Promise<{
+    scannedCount: number;
+    repairedCount: number;
+    attemptOnlyCount: number;
+    unmatchedCapturesCount: number;
+  }> {
+    const db = await this.getDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(
+        [STORE_MESSAGES, STORE_REVISIONS, STORE_RECOVERY_EVENTS],
+        'readwrite'
+      );
+      const msgStore = tx.objectStore(STORE_MESSAGES);
+      const revStore = tx.objectStore(STORE_REVISIONS);
+      const recStore = tx.objectStore(STORE_RECOVERY_EVENTS);
+      const revIndex = revStore.index('messageId');
+      const recIndex = recStore.index('messageId');
+
+      const allMessagesReq = msgStore.getAll();
+      allMessagesReq.onerror = () => reject(allMessagesReq.error || new Error('Failed to load messages for repair'));
+
+      allMessagesReq.onsuccess = () => {
+        const messages = (allMessagesReq.result as Message[]) || [];
+        if (messages.length === 0) {
+          resolve({ scannedCount: 0, repairedCount: 0, attemptOnlyCount: 0, unmatchedCapturesCount: 0 });
+          return;
+        }
+
+        let scannedCount = 0;
+        let repairedCount = 0;
+        let attemptOnlyCount = 0;
+        let unmatchedCapturesCount = 0;
+        let pending = messages.length;
+
+        const checkDone = () => {
+          pending--;
+          if (pending === 0) {
+            resolve({
+              scannedCount,
+              repairedCount,
+              attemptOnlyCount,
+              unmatchedCapturesCount,
+            });
+          }
+        };
+
+        for (const msg of messages) {
+          scannedCount++;
+
+          if (msg.identityState === 'reconciled') {
+            if (msg.projectionState !== 'logical') {
+              msg.projectionState = 'logical';
+              msgStore.put(msg);
+              repairedCount++;
+            }
+            checkDone();
+            continue;
+          }
+
+          if (msg.role === 'user' || msg.role === 'system') {
+            if (msg.projectionState !== 'logical') {
+              msg.projectionState = 'logical';
+              msgStore.put(msg);
+              repairedCount++;
+            }
+            checkDone();
+            continue;
+          }
+
+          // For assistant messages:
+          const revReq = revIndex.getAll(msg.id);
+          const recReq = recIndex.getAll(msg.id);
+
+          let revsLoaded: ResponseRevision[] | null = null;
+          let recsLoaded: RecoveryEvent[] | null = null;
+
+          const evaluateAssistant = () => {
+            if (revsLoaded !== null && recsLoaded !== null) {
+              const hasContent =
+                (msg.content && msg.content.trim().length > 0) ||
+                revsLoaded.some((r) => r.text.length > 0 || (r.thinking && r.thinking.length > 0)) ||
+                recsLoaded.length > 0;
+
+              let targetState: import('../../core/models').MessageProjectionState;
+              if (hasContent) {
+                targetState = msg.remoteId ? 'provisional_logical' : 'unmatched_capture';
+              } else {
+                targetState = 'attempt_only';
+              }
+
+              let modified = false;
+              if (msg.projectionState !== targetState) {
+                msg.projectionState = targetState;
+                modified = true;
+              }
+
+              // Invariant: Non-logical assistant attempts must NEVER branch under parent
+              if ((targetState === 'attempt_only' || targetState === 'unmatched_capture') && msg.parentId !== undefined) {
+                msg.parentId = undefined;
+                modified = true;
+              }
+
+              if (targetState === 'attempt_only') attemptOnlyCount++;
+              if (targetState === 'unmatched_capture') unmatchedCapturesCount++;
+
+              if (modified) {
+                msgStore.put(msg);
+                repairedCount++;
+              }
+
+              checkDone();
+            }
+          };
+
+          revReq.onsuccess = () => {
+            revsLoaded = (revReq.result as ResponseRevision[]) || [];
+            evaluateAssistant();
+          };
+          revReq.onerror = () => reject(revReq.error || new Error('Failed to query revisions during repair'));
+
+          recReq.onsuccess = () => {
+            recsLoaded = (recReq.result as RecoveryEvent[]) || [];
+            evaluateAssistant();
+          };
+          recReq.onerror = () => reject(recReq.error || new Error('Failed to query recovery events during repair'));
+        }
+      };
+
+      tx.onerror = () => reject(tx.error || new Error('Transaction failed during repairCanonicalProjection'));
     });
   }
 

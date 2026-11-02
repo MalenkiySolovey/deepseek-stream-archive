@@ -273,7 +273,7 @@ export interface RecoveryEvent {
 
 ### Dual Storage Strategy
 1. **`chrome.storage.local`:** User settings, active compatibility profile, UI state, retention limits.
-2. **`IndexedDB` (`StreamArchiveDB`, Version 5):**
+2. **`IndexedDB` (`StreamArchiveDB`, Version 8):**
    - **V1 Stores:** `conversations`, `messages`, `revisions`, `recovery_events`.
    - **V2 Raw Journal Stores:**
      - `raw_streams`: Tracks stream sessions (`id`, `transport`, `url`, `provisionalSessionId`, `state`, `openedAt`, `updatedAt`, `totalChunks`, `totalChars`, `totalBatches`).
@@ -285,6 +285,13 @@ export interface RecoveryEvent {
      - Immutable revision and recovery event payload conflict rejection (`revision_conflict`, `recovery_event_conflict`).
      - Single atomic transaction for raw journal replay promotion via `applyReplayPromotionPlan`.
      - Metadata-first query architecture (`listArchiveConversations`, `getArchiveConversation`, `listArchiveMessages`, `getRevisionContent`) enabling fast, scalable rendering in the Side Panel.
+   - **V6 & V7 History Staging & Manifests:**
+     - `history_staging` & `history_staging_manifests`: Enforces complete multi-batch history staging with atomic commit barrier and session verification.
+   - **V8 Transport Retry Identity & Sibling Branch Stabilization:**
+     - Dedicated `projectionState` index on `messages`.
+     - Strict separation between raw transport attempts and canonical logical messages (`isLogicalMessage()`).
+     - Empty failed retry attempts categorized as `'attempt_only'` without tree parent links; partial captures preserved as `'unmatched_capture'` in dedicated section.
+     - Offline idempotent repair via `repairCanonicalProjection()`.
    - Hosted strictly within extension origin (`chrome-extension://<id>`).
    - Multi-factory database connection management with `WeakMap` cache and `onversionchange` handlers.
 

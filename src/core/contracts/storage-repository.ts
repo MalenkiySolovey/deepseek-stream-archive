@@ -9,6 +9,8 @@ export interface ArchiveSummary {
   revisionsCount: number;
   lastGoodRevisionsCount: number;
   recoveryEventsCount: number;
+  unmatchedCapturesCount?: number;
+  attemptOnlyCount?: number;
 }
 
 export interface CanonicalCheckpointData {
@@ -69,6 +71,7 @@ export interface ArchiveMessageSummary {
   remoteParentId?: string;
   sourceRawStreamKey?: string;
   identityState: import('../models').MessageIdentityState;
+  projectionState?: import('../models').MessageProjectionState;
   role: import('../models').MessageRole;
   status: import('../models').MessageStatus;
   content?: string;
@@ -141,5 +144,11 @@ export interface StorageRepository {
 
   // Diagnostic & Metrics operations
   getArchiveSummary(): Promise<ArchiveSummary>;
+  repairCanonicalProjection(): Promise<{
+    scannedCount: number;
+    repairedCount: number;
+    attemptOnlyCount: number;
+    unmatchedCapturesCount: number;
+  }>;
 }
 

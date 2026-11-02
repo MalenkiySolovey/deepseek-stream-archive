@@ -393,8 +393,8 @@ The automated regression corpus contains **318 tests across 48 test files (100% 
 4. **DOM Identity Hardening (`tests/deepseek-dom-capability-probe.test.ts`):**
    - Verifies direct attribute comparison on verified `data-message-id` attributes without CSS string interpolation, eliminating selector injection vectors and generic selector false positives.
 
-5. **Schema Version 7 Migration (`tests/database-migration.test.ts`):**
-   - Verifies seamless multi-version migration preserving legacy data through v1..v6 and adding `STORE_HISTORY_STAGING_MANIFESTS` at `DB_VERSION = 7`.
+5. **Schema Version 7 & 8 Migration (`tests/database-migration.test.ts`):**
+   - Verifies seamless multi-version migration preserving legacy data through v1..v7 and adding `STORE_HISTORY_STAGING_MANIFESTS` at `DB_VERSION = 7`, and `projectionState` index at `DB_VERSION = 8`.
 
 ---
 
@@ -431,6 +431,28 @@ The regression corpus stands at **373 Vitest tests across 54 test files (100% gr
      - `route-isolation.spec.ts`: Immediate pre-revocation on SPA `pushState` without artificial `popstate` events.
      - `network-interruption.spec.ts`: Consumer abort detection and partial capture retention.
      - `degradation-profile.spec.ts`: Unknown SSE protocol shape degradation with zero page disruption.
+     - `network-retry-identity.spec.ts`: Dynamic multi-attempt network failure with successful recovery, asserting single logical assistant message and zero fake branch selectors.
+
+---
+
+## 19. Tier 17: Live Retry Identity Stabilization & Sibling Branch Integrity (Milestone 2D.3)
+
+The automated regression corpus stands at **379 Vitest tests across 55 test files (100% green)** plus **9 Playwright Chromium MV3 end-to-end specifications (10 tests)** under strict fail-closed network isolation:
+
+1. **Live Retry Identity Stabilization (`tests/retry-identity-stabilization.test.ts`):**
+   - Reproduces real live failure: 3 transport attempts (1 user prompt, 2 empty failed retries, 1 successful response).
+   - Verifies empty failed attempts do not create 0-char revisions, have `projectionState = 'attempt_only'`, and have `parentId` cleared during history reconciliation.
+   - Verifies conversation message count reflects logical turns (2 messages, not 4).
+   - Verifies meaningful partial captures are classified as `unmatched_capture` and isolated from conversation branching while retaining raw provenance.
+   - Verifies real regenerate turns strictly preserve full multi-branch sibling navigation (`Branch 1 of 2`, `Branch 2 of 2`).
+   - Verifies `repairCanonicalProjection()` idempotently repairs legacy databases without raw journal data loss.
+
+2. **Schema Version 8 Migration (`tests/database-migration.test.ts`):**
+   - Verifies schema upgrade from v7 to v8, adding index `'projectionState'` to `STORE_MESSAGES`.
+
+3. **Browser E2E Retry Identity & Branch Stabilization (`tests/browser/network-retry-identity.spec.ts`):**
+   - End-to-end Chromium MV3 test with dynamic network simulator: 2 interrupted/reset attempts followed by 1 successful response and history sync.
+   - Asserts raw streams $\ge 3$, logical assistant messages $= 1$, sidepanel displays honest 2 messages with zero fake branch navigation buttons.
 
 > [!IMPORTANT]
 > Automated tests confirm structural and protocol compliance. For instructions on executing real-world manual acceptance testing against live `chat.deepseek.com`, see the [Live Acceptance Testing Guide](./LIVE_ACCEPTANCE.md) and [Live Acceptance Results Template](./LIVE_ACCEPTANCE_RESULTS_TEMPLATE.md).

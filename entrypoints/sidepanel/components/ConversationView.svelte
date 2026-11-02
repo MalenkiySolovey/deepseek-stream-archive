@@ -13,7 +13,11 @@
     ArchiveMessageSummary,
     ArchiveRevisionMetadata,
   } from '../../../src/core/contracts';
-  import type { ResponseRevision } from '../../../src/core/models';
+  import {
+    isLogicalMessage,
+    isUnmatchedCapture,
+    type ResponseRevision,
+  } from '../../../src/core/models';
   import SafeMarkdown from './SafeMarkdown.svelte';
   import { translations, type SupportedLocale } from './i18n';
 
@@ -76,14 +80,24 @@
     messages: ArchiveMessageSummary[];
   }
 
-  let visibleMessages = $derived<ArchiveMessageSummary[]>(() => {
+  let logicalMessages = $derived<ArchiveMessageSummary[]>(() => {
     if (!detail) return [];
-    const all = detail.messages;
+    return detail.messages.filter((m) => isLogicalMessage(m));
+  });
+
+  let unmatchedCaptures = $derived<ArchiveMessageSummary[]>(() => {
+    if (!detail) return [];
+    return detail.messages.filter((m) => isUnmatchedCapture(m));
+  });
+
+  let visibleMessages = $derived<ArchiveMessageSummary[]>(() => {
+    const msgs = logicalMessages();
+    if (msgs.length === 0) return [];
 
     // Group siblings by parentId (or root)
     const groups = new Map<string, ArchiveMessageSummary[]>();
-    for (const msg of all) {
-      const parentKey = msg.parentId || msg.remoteParentId || '__root__';
+    for (const msg of msgs) {
+      const parentKey = msg.parentId || '__root__';
       if (!groups.has(parentKey)) {
         groups.set(parentKey, []);
       }
@@ -92,8 +106,8 @@
 
     // Filter to selected branch per group
     const result: ArchiveMessageSummary[] = [];
-    for (const msg of all) {
-      const parentKey = msg.parentId || msg.remoteParentId || '__root__';
+    for (const msg of msgs) {
+      const parentKey = msg.parentId || '__root__';
       const siblings = groups.get(parentKey)!;
       if (siblings.length > 1) {
         const activeIdx = branchSelections[parentKey] ?? 0;
@@ -110,9 +124,10 @@
 
   function getSiblingInfo(msg: ArchiveMessageSummary) {
     if (!detail) return { count: 1, current: 1, key: '' };
-    const parentKey = msg.parentId || msg.remoteParentId || '__root__';
-    const siblings = detail.messages.filter(
-      (m) => (m.parentId || m.remoteParentId || '__root__') === parentKey
+    const msgs = logicalMessages();
+    const parentKey = msg.parentId || '__root__';
+    const siblings = msgs.filter(
+      (m) => (m.parentId || '__root__') === parentKey
     );
     const activeIdx = branchSelections[parentKey] ?? 0;
     return {
@@ -205,7 +220,7 @@
         {#if detail?.conversation.remoteId}
           <span class="meta-item remote">Remote: {detail.conversation.remoteId}</span>
         {/if}
-        <span class="meta-item">{detail?.messages.length || 0} {t.messagesCount}</span>
+        <span class="meta-item">{logicalMessages().length} {t.messagesCount}</span>
       </div>
     </div>
   </div>
@@ -382,6 +397,51 @@
           {/if}
         </div>
       {/each}
+      {#if unmatchedCaptures().length > 0}
+        <div class="unmatched-captures-section">
+          <div class="unmatched-captures-header">
+            <span class="unmatched-icon">📡</span>
+            <div class="unmatched-header-text">
+              <span class="unmatched-title">{t.unmatchedCapturesTitle} ({unmatchedCaptures().length})</span>
+              <span class="unmatched-desc">{t.unmatchedCapturesDesc}</span>
+            </div>
+          </div>
+          <div class="unmatched-captures-list">
+            {#each unmatchedCaptures() as um (um.id)}
+              {@const umData = getActiveContent(um)}
+              <div class="unmatched-capture-card">
+                <div class="unmatched-card-meta">
+                  <span class="unmatched-pill">{um.status}</span>
+                  {#if um.sourceRawStreamKey}
+                    <span class="unmatched-key">Stream: {um.sourceRawStreamKey}</span>
+                  {/if}
+                  <span class="unmatched-time">{formatDate(um.createdAt)}</span>
+                  <button
+                    class="copy-btn mini"
+                    type="button"
+                    onclick={() => copyToClipboard(umData.text, um.id)}
+                  >
+                    {copiedId === um.id ? t.copiedText : t.copyText}
+                  </button>
+                </div>
+                {#if umData.thinking}
+                  <details class="thinking-details mini">
+                    <summary class="thinking-summary">
+                      💭 {t.thinkingTitle} ({umData.thinking.length} {t.thinkingChars})
+                    </summary>
+                    <div class="thinking-content">
+                      <SafeMarkdown content={umData.thinking} />
+                    </div>
+                  </details>
+                {/if}
+                <div class="unmatched-content">
+                  <SafeMarkdown content={umData.text} />
+                </div>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
     </div>
   {/if}
 </div>
@@ -848,5 +908,87 @@
   .view-rev-btn:hover {
     background: #334155;
     color: #f8fafc;
+  }
+
+  .unmatched-captures-section {
+    margin-top: 1rem;
+    padding: 0.875rem 1rem;
+    background: #0f172a;
+    border: 1px dashed #334155;
+    border-radius: 0.5rem;
+  }
+
+  .unmatched-captures-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .unmatched-icon {
+    font-size: 1.125rem;
+  }
+
+  .unmatched-header-text {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .unmatched-title {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: #cbd5e1;
+  }
+
+  .unmatched-desc {
+    font-size: 0.6875rem;
+    color: #64748b;
+  }
+
+  .unmatched-captures-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .unmatched-capture-card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 0.375rem;
+    padding: 0.625rem 0.75rem;
+  }
+
+  .unmatched-card-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    font-size: 0.6875rem;
+    color: #94a3b8;
+    margin-bottom: 0.5rem;
+  }
+
+  .unmatched-pill {
+    padding: 0.1rem 0.35rem;
+    border-radius: 0.2rem;
+    background: #475569;
+    color: #f1f5f9;
+    font-size: 0.625rem;
+  }
+
+  .unmatched-key {
+    color: #a78bfa;
+    font-family: monospace;
+    font-size: 0.625rem;
+  }
+
+  .copy-btn.mini {
+    padding: 0.1rem 0.4rem;
+    font-size: 0.625rem;
+    margin-left: auto;
+  }
+
+  .thinking-details.mini {
+    margin-bottom: 0.5rem;
   }
 </style>

@@ -30,8 +30,8 @@ entrypoints/sidepanel/
 - **Recovery Badges:** Highlights conversations containing pre-filter preserved responses (`🛡️ Shield badge`).
 
 ### 2.2 Thread & Branch Awareness
-- **Topological Message Ordering:** Messages are displayed in chronological parent-child order.
-- **Branch Switcher:** When sibling messages share the same parent, a branch switcher (`Branch X of Y` with `‹` and `›` controls) enables switching between divergent response variations.
+- **Topological Message Ordering:** Logical conversation turns (`isLogicalMessage()`) are displayed in chronological parent-child order.
+- **Branch Switcher:** When genuine logical sibling messages share the same parent (e.g. true regenerate turns), a branch switcher (`Branch X of Y` with `‹` and `›` controls) enables switching between divergent response variations. Empty retry attempts never pollute the branch selector.
 - **Unresolved Link Indicators:** Displays warnings if a message references a server remote parent ID that has not yet been resolved locally.
 
 ### 2.3 Assistant Message Inspection
@@ -46,11 +46,15 @@ entrypoints/sidepanel/
   - Character length of the recovered answer.
   - Dedicated "Copy Uncensored Answer" button.
 
+### 2.5 Unmatched Stream Captures View
+- Partial streams captured during network interruptions that were superseded by subsequent retry attempts are classified as `unmatched_capture`.
+- These are cleanly isolated from the main conversation thread and rendered in a dedicated collapsible "Unmatched Stream Captures" container with stream provenance, captured character count, and copy button. Empty failed attempts (`attempt_only`) are omitted from view.
+
 ---
 
 ## 3. Security & Safety Invariants
 
 1. **Zero DOM Injection:** The Archive Browser renders entirely within the extension's side panel. It does not inject HTML, styles, or scripts into `https://chat.deepseek.com/*`.
 2. **Zero `innerHTML` / Zero `eval`:** Text and code formatting use safe text interpolation in Svelte 5. Code fences and paragraphs are parsed into structured tokens and bound through text nodes.
-3. **Local-First Storage:** All queries run against local IndexedDB (`StreamArchiveDB` v5). No external network requests are made.
+3. **Local-First Storage:** All queries run against local IndexedDB (`StreamArchiveDB` v8). No external network requests are made.
 4. **Strict MV3 Permissions:** Operates strictly within `"storage"` and `"sidePanel"` permissions.

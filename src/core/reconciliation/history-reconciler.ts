@@ -15,7 +15,7 @@ export interface HistoryReconciliationResult {
   treeLinksResolved: number;
 }
 
-import { computeContentFingerprint } from '../models';
+import { computeContentFingerprint, isLogicalMessage } from '../models';
 export { computeContentFingerprint };
 
 export class HistoryReconciler {
@@ -87,9 +87,13 @@ export class HistoryReconciler {
         const updatedMsg: Message = { ...existing };
         let modified = false;
 
-        // Upgrade identity state to reconciled
+        // Upgrade identity state to reconciled and projectionState to logical
         if (updatedMsg.identityState !== 'reconciled') {
           updatedMsg.identityState = 'reconciled';
+          modified = true;
+        }
+        if (updatedMsg.projectionState !== 'logical') {
+          updatedMsg.projectionState = 'logical';
           modified = true;
         }
 
@@ -172,6 +176,7 @@ export class HistoryReconciler {
           conversationId: conversation.id,
           remoteParentId: hm.parentId || undefined,
           identityState: 'reconciled',
+          projectionState: 'logical',
           role: hm.role,
           status: hm.status,
           content: hm.role === 'user' ? hm.text : undefined,
@@ -204,6 +209,48 @@ export class HistoryReconciler {
       }
     }
 
+    // ── Phase 2b: Unmatched Provisional Messages Classification ──
+    const matchedRemoteIds = new Set(messages.map((m) => m.messageId));
+    for (const em of existingMessages) {
+      if (em.remoteId && matchedRemoteIds.has(em.remoteId)) {
+        continue;
+      }
+      if (em.identityState === 'reconciled') {
+        continue;
+      }
+      if (em.role !== 'assistant') {
+        continue;
+      }
+
+      // Check whether this unmatched provisional assistant message has any captured revisions or recovery events
+      const currentRevs = await this.storage.listRevisionsByMessage(em.id);
+      const currentRecs = await this.storage.listRecoveryEvents(em.id);
+      const hasContent =
+        (em.content && em.content.trim().length > 0) ||
+        currentRevs.some((r) => r.text.length > 0 || (r.thinking && r.thinking.length > 0)) ||
+        currentRecs.length > 0;
+
+      const targetProjection: import('../models').MessageProjectionState = hasContent
+        ? 'unmatched_capture'
+        : 'attempt_only';
+
+      if (em.projectionState !== targetProjection || em.parentId !== undefined) {
+        const updatedMsg: Message = {
+          ...em,
+          projectionState: targetProjection,
+          parentId: undefined, // Invariant: Unmatched captures and attempts NEVER branch under the user prompt
+          updatedAt: now,
+        };
+        const existingIdx = messagesToPut.findIndex((p) => p.id === em.id);
+        if (existingIdx >= 0) {
+          messagesToPut[existingIdx] = updatedMsg;
+        } else {
+          messagesToPut.push(updatedMsg);
+          messagesUpdated++;
+        }
+      }
+    }
+
     // ── Phase 3: Two-Pass Parent Link Resolution with Cycle Detection ──
     const combinedMessages = new Map<string, Message>();
     for (const em of existingMessages) {
@@ -223,6 +270,18 @@ export class HistoryReconciler {
     let treeLinksResolved = 0;
 
     for (const m of combinedMessages.values()) {
+      // INVARIANT: Only logical messages are linked as children in the conversation tree.
+      // attempt_only and unmatched_capture records must NEVER have parentId assigned.
+      if (!isLogicalMessage(m)) {
+        if (m.parentId !== undefined) {
+          m.parentId = undefined;
+          if (!messagesToPut.some((p) => p.id === m.id)) {
+            messagesToPut.push(m);
+          }
+        }
+        continue;
+      }
+
       if (m.remoteParentId) {
         const expectedParentId = remoteToLocalMap.get(m.remoteParentId);
         if (expectedParentId && expectedParentId !== m.id) {

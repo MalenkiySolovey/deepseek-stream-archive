@@ -134,15 +134,19 @@
 
 ---
 
-### Scenario 6: Network Interruption & Stream Abort (Mandatory)
-- **Action:** DevTools Network Offline toggled during active response generation.
+### Scenario 6: Network Interruption, Stream Abort & Transport Retry Stabilization (Mandatory)
+- **Action:** DevTools Network Offline toggled during active response generation; reconnection allowed to trigger transport retries or page reloaded.
 - **Terminal Event Dispatched:** `[ ] Network error detected, abort checkpoint created`
 - **Crash Durability:** `[ ] Partial response persisted to IndexedDB before disconnect`
 - **Side Panel Status:** `[ ] Displays preserved tokens with finishReason 'network_error' without falsely reporting content_filter`
+- **Raw Journal Completeness:** `[ ] All transport attempts (e.g. multiple XHR retries) preserved in raw_streams / raw_stream_batches`
+- **Canonical Tree Cleanliness:** `[ ] Exactly 1 logical assistant message in conversation view, zero phantom sibling branches (Branch 1 of N)`
+- **Unmatched Captures Isolation:** `[ ] Meaningful partial captures isolated in dedicated container, 0-char attempts tagged attempt_only with parentId: undefined`
+- **Post-Reconciliation Identity:** `[ ] After page reload, message count remains exact (e.g. 2 messages total, 1 logical assistant)`
 - **Result:** `[ ] PASS / [ ] FAIL / [ ] PENDING`
 - **Notes / Observations:**
   ```text
-  (Enter network interruption recovery notes here)
+  (Enter network interruption recovery and retry stabilization notes here)
   ```
 
 ---
@@ -186,6 +190,7 @@
 | **AC-06** | History Atomicity | Incomplete history stages never corrupt canonical database | `[ ] PASS / [ ] FAIL` |
 | **AC-07** | Strict Permissions | Manifest restricted to `storage`, `sidePanel`, and `chat.deepseek.com` | `[ ] PASS / [ ] FAIL` |
 | **AC-08** | Truth Convergence | Reconciled history retains live revisions without data loss | `[ ] PASS / [ ] FAIL` |
+| **AC-09** | Transport Retry Stabilization | Client-side transport retries never spawn phantom canonical branches or messages | `[ ] PASS / [ ] FAIL` |
 
 ---
 

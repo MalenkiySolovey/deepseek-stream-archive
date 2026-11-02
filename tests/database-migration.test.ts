@@ -73,11 +73,11 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       openReq.onerror = () => reject(openReq.error);
     });
 
-    // 2. Open via openExtensionDatabase at DB_VERSION = 7
-    expect(DB_VERSION).toBe(7);
+    // 2. Open via openExtensionDatabase at DB_VERSION = 8
+    expect(DB_VERSION).toBe(8);
     const upgradedDb = await openExtensionDatabase(fakeFactory);
 
-    expect(upgradedDb.version).toBe(7);
+    expect(upgradedDb.version).toBe(8);
 
     // Verify v1 stores still exist
     expect(upgradedDb.objectStoreNames.contains(STORE_CONVERSATIONS)).toBe(true);
@@ -191,9 +191,9 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       openReq.onerror = () => reject(openReq.error);
     });
 
-    // 2. Open via openExtensionDatabase at DB_VERSION = 7
+    // 2. Open via openExtensionDatabase at DB_VERSION = 8
     const upgradedDb = await openExtensionDatabase(fakeFactory);
-    expect(upgradedDb.version).toBe(7);
+    expect(upgradedDb.version).toBe(8);
 
     const tx = upgradedDb.transaction([STORE_MESSAGES, STORE_RAW_STREAMS], 'readonly');
     const msgStore = tx.objectStore(STORE_MESSAGES);
@@ -259,9 +259,9 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       openReq.onerror = () => reject(openReq.error);
     });
 
-    // 2. Open via openExtensionDatabase at DB_VERSION = 7
+    // 2. Open via openExtensionDatabase at DB_VERSION = 8
     const upgradedDb = await openExtensionDatabase(fakeFactory);
-    expect(upgradedDb.version).toBe(7);
+    expect(upgradedDb.version).toBe(8);
 
     const tx = upgradedDb.transaction(
       [STORE_MESSAGES, STORE_CANONICAL_CHECKPOINTS, STORE_HISTORY_STAGING],
@@ -317,9 +317,9 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       openReq.onerror = () => reject(openReq.error);
     });
 
-    // 2. Open via openExtensionDatabase at DB_VERSION = 7
+    // 2. Open via openExtensionDatabase at DB_VERSION = 8
     const upgradedDb = await openExtensionDatabase(fakeFactory);
-    expect(upgradedDb.version).toBe(7);
+    expect(upgradedDb.version).toBe(8);
 
     expect(upgradedDb.objectStoreNames.contains(STORE_HISTORY_STAGING)).toBe(true);
     expect(upgradedDb.objectStoreNames.contains(STORE_HISTORY_STAGING_MANIFESTS)).toBe(true);
@@ -375,9 +375,9 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       openReq.onerror = () => reject(openReq.error);
     });
 
-    // 2. Open via openExtensionDatabase at DB_VERSION = 7
+    // 2. Open via openExtensionDatabase at DB_VERSION = 8
     const upgradedDb = await openExtensionDatabase(fakeFactory);
-    expect(upgradedDb.version).toBe(7);
+    expect(upgradedDb.version).toBe(8);
 
     expect(upgradedDb.objectStoreNames.contains(STORE_HISTORY_STAGING)).toBe(true);
     expect(upgradedDb.objectStoreNames.contains(STORE_HISTORY_STAGING_MANIFESTS)).toBe(true);
@@ -390,6 +390,69 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       tx.oncomplete = () => {
         expect(stageReq.result).toBeDefined();
         expect(stageReq.result.stagingId).toBe('v6-stage');
+        resolve();
+      };
+      tx.onerror = () => reject(tx.error);
+    });
+  });
+
+  it('preserves existing v7 database and adds v8 projectionState index on messages', async () => {
+    // 1. Initialize DB at version 7
+    await new Promise<void>((resolve, reject) => {
+      const openReq = fakeFactory.open(DB_NAME, 7);
+      openReq.onupgradeneeded = (e) => {
+        const db = (e.target as IDBOpenDBRequest).result;
+        db.createObjectStore(STORE_CONVERSATIONS, { keyPath: 'id' });
+        const msgStore = db.createObjectStore(STORE_MESSAGES, { keyPath: 'id' });
+        msgStore.createIndex('conversationId', 'conversationId', { unique: false });
+        msgStore.createIndex('remoteId', 'remoteId', { unique: false });
+        msgStore.createIndex('parentId', 'parentId', { unique: false });
+        msgStore.createIndex('createdAt', 'createdAt', { unique: false });
+        msgStore.createIndex('conversationId_remoteId', ['conversationId', 'remoteId'], { unique: false });
+        msgStore.createIndex('identityState', 'identityState', { unique: false });
+        db.createObjectStore(STORE_REVISIONS, { keyPath: 'id' });
+        db.createObjectStore(STORE_RECOVERY_EVENTS, { keyPath: 'id' });
+        db.createObjectStore(STORE_RAW_STREAMS, { keyPath: 'id' });
+        db.createObjectStore(STORE_RAW_STREAM_BATCHES, { keyPath: 'id' });
+        db.createObjectStore(STORE_CANONICAL_CHECKPOINTS, { keyPath: 'streamKey' });
+        db.createObjectStore(STORE_HISTORY_STAGING, { keyPath: 'id' });
+        db.createObjectStore(STORE_HISTORY_STAGING_MANIFESTS, { keyPath: 'stagingId' });
+      };
+      openReq.onsuccess = () => {
+        const db = openReq.result;
+        const tx = db.transaction([STORE_MESSAGES], 'readwrite');
+        tx.objectStore(STORE_MESSAGES).put({
+          id: 'v7-msg-1',
+          remoteId: 'remote-700',
+          conversationId: 'v7-conv-1',
+          identityState: 'provisional',
+          role: 'assistant',
+          status: 'interrupted',
+          createdAt: 7000,
+          updatedAt: 7000,
+        });
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+      };
+      openReq.onerror = () => reject(openReq.error);
+    });
+
+    // 2. Open via openExtensionDatabase at DB_VERSION = 8
+    const upgradedDb = await openExtensionDatabase(fakeFactory);
+    expect(upgradedDb.version).toBe(8);
+
+    const tx = upgradedDb.transaction([STORE_MESSAGES], 'readonly');
+    const msgStore = tx.objectStore(STORE_MESSAGES);
+    expect(msgStore.indexNames.contains('projectionState')).toBe(true);
+
+    const msgReq = msgStore.get('v7-msg-1');
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => {
+        expect(msgReq.result).toBeDefined();
+        expect(msgReq.result.id).toBe('v7-msg-1');
         resolve();
       };
       tx.onerror = () => reject(tx.error);

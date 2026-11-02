@@ -55,6 +55,7 @@ export interface PersistedCanonicalCheckpointPayload {
     parentId?: string;
     remoteParentId?: string;
     identityState?: string;
+    projectionState?: string;
     sourceRawStreamKey?: string;
     remoteCreatedAt?: number;
     createdAt?: number;
@@ -108,6 +109,7 @@ export function serializeCanonicalCheckpointForFingerprint(
       parentId: input.message.parentId ?? null,
       remoteParentId: input.message.remoteParentId ?? null,
       identityState: input.message.identityState ?? null,
+      projectionState: input.message.projectionState ?? null,
       sourceRawStreamKey: input.message.sourceRawStreamKey ?? null,
       remoteCreatedAt: input.message.remoteCreatedAt ?? null,
       createdAt: input.message.createdAt ?? null,

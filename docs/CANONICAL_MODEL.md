@@ -29,6 +29,7 @@ StreamArchive introduces the **Canonical Storage Boundary** for DeepSeek StreamA
 | remoteId?: string (DeepSeek message_id)                                     |
 | remoteParentId?: string (server parent message_id)                          |
 | identityState: 'provisional' | 'reconciled'                                 |
+| projectionState?: 'logical' | 'provisional_logical' | 'unmatched_capture' | 'attempt_only' |
 | sourceRawStreamKey?: string (composite producerSessionId:streamId)          |
 | status: 'streaming' | 'finished' | 'filtered' | 'incomplete' | ...         |
 +-----------------------------------------------------------------------------+
@@ -71,12 +72,12 @@ StreamArchive introduces the **Canonical Storage Boundary** for DeepSeek StreamA
 
 ---
 
-## 2. Storage Schema & Indexing (Schema Version 5)
+## 2. Storage Schema & Indexing (Schema Version 8)
 
 The IndexedDB schema is managed in `src/storage/schema.ts` and `src/storage/db.ts`:
 
-- **Database Name:** `deepseek_streamarchive_db`
-- **Database Version:** `5`
+- **Database Name:** `StreamArchiveDB`
+- **Database Version:** `8`
 - **Object Stores:**
   - `conversations` (keyPath: `id`)
     - index: `remoteId`
@@ -85,18 +86,23 @@ The IndexedDB schema is managed in `src/storage/schema.ts` and `src/storage/db.t
     - index: `conversationId`
     - index: `remoteId`
     - index: `parentId`
+    - index: `createdAt`
     - index: `conversationId_remoteId` (compound index: `['conversationId', 'remoteId']`)
     - index: `identityState` (`'provisional'` vs `'reconciled'`)
+    - index: `projectionState` (`'logical'`, `'provisional_logical'`, `'unmatched_capture'`, `'attempt_only'`)
   - `revisions` (keyPath: `id`)
     - index: `messageId`
     - index: `capturedAt`
+    - index: `isLastGood`
   - `recovery_events` (keyPath: `id`)
     - index: `messageId`
-    - index: `capturedAt`
+    - index: `detectedAt`
   - `canonical_checkpoints` (keyPath: `streamKey`)
     - index: `updatedAt`
   - `raw_streams` (keyPath: `id`)
-  - `raw_batches` (keyPath: `id`)
+  - `raw_stream_batches` (keyPath: `id`)
+  - `history_staging` (keyPath: `id`)
+  - `history_staging_manifests` (keyPath: `stagingId`)
 
 ### Canonical Checkpoint Ledger (`canonical_checkpoints`):
 Tracks live progressive persistence progress per active stream:
@@ -164,3 +170,28 @@ To prevent sequence gaps and divergent payload replays:
 2. **Durable Semantic Checkpoint Fingerprints:** A SHA-256 fingerprint of the checkpoint payload (covering conversation title/remoteId, message parentId, remoteParentId, identityState, content, revisions, and recoveryEvents) is computed before opening the IndexedDB transaction and stored in `STORE_CANONICAL_CHECKPOINTS`. Re-deliveries of committed sequences are checked for fingerprint matching: matching fingerprints succeed idempotently; differing fingerprints reject with `checkpoint_conflict`. Checkpoints with `seq < lastCommittedSeq` are rejected as `stale_checkpoint`.
 3. **Terminal Checkpoint Locking:** Once a terminal checkpoint (`isTerminal: true`) commits, the repository locks the stream against any higher sequence numbers (`terminal_checkpoint_locked`), ensuring exactly one final checkpoint per stream.
 4. **History Staging Manifests & Completeness Barrier (Schema v7):** Incremental history slices require an explicit manifest stored in `STORE_HISTORY_STAGING_MANIFESTS` tracking expected batches and messages. Bounded history slices are staged in `STORE_HISTORY_STAGING` and committed atomically into canonical stores via `commitHistoryStagingPlan()`, requiring `receivedBatchCount === expectedBatchCount`. If incomplete, the commit transaction aborts and clears staging.
+
+---
+
+## 6. Transport Attempt Projections vs. Canonical Logical Messages (Schema v8)
+
+When network drops occur during generation, DeepSeek's frontend automatically triggers transport retry attempts (e.g., 3 XHR attempts for one prompt). StreamArchive enforces a strict architectural invariant:
+
+**Transport attempt $\neq$ canonical conversation message.**
+
+1. **Raw Journal Evidence:**
+   Every transport attempt is permanently retained in `raw_streams` and `raw_stream_batches`. Raw evidence is never deleted, merged, or altered.
+
+2. **Message Projection Taxonomy (`projectionState`):**
+   - `'logical'`: Reconciled server history message or confirmed logical conversation turn.
+   - `'provisional_logical'`: Active or in-flight provisional stream presumed logical until history reconciliation.
+   - `'unmatched_capture'`: Partial text or reasoning captured from a stream that was superseded by retries and not accepted into server history.
+   - `'attempt_only'`: Empty failed transport attempt (0 text, 0 thinking, no remote ID, terminal failure status).
+
+3. **Tree Link Isolation & Sibling Branch Integrity:**
+   - Non-logical records (`attempt_only` and `unmatched_capture`) are prohibited from having a `parentId` in the canonical tree (`parentId = undefined`).
+   - Sibling branching in `ConversationView.svelte` evaluates only `isLogicalMessage()`. Empty attempts never produce phantom sibling selectors (`Branch 1 of 3`).
+   - Real regenerate turns sharing `parentId` in server history strictly preserve full multi-branch navigation.
+   - Partial captures are safely preserved and exposed in a dedicated "Unmatched Captures" technical view with raw stream provenance.
+   - `listArchiveConversations` counts only `isLogicalMessage()` in `messageCount`.
+   - `repairCanonicalProjection()` provides idempotent, safe migration for legacy databases.

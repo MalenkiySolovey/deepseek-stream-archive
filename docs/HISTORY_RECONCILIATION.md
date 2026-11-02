@@ -119,14 +119,20 @@ Reconciliation builds an in-memory `HistoryReconciliationPlan` committed in a si
      - Sets `remoteId = String(msg.messageId)` and `remoteParentId = String(msg.parentId)`.
      - Appends an initial `ResponseRevision` containing the parsed text, thinking, and `contentFingerprint`.
 
+### Pass 1b: Unmatched Provisional Assistant Messages Classification (Schema v8)
+3. Evaluates all provisional assistant messages in the conversation that were not matched by server remote IDs:
+   - **Empty Failed Attempts:** If a message has 0 text, 0 thinking, no recovery events, and terminal failure status, it is classified as `projectionState = 'attempt_only'`. Its `parentId` is strictly set to `undefined`.
+   - **Meaningful Partial Captures:** If a message contains captured text or reasoning that was not accepted into server history (superseded by retries), it is classified as `projectionState = 'unmatched_capture'`. Its `parentId` is strictly set to `undefined` to isolate it from conversation branching, while its raw stream key and revisions are 100% preserved.
+
 ### Pass 2: Tree Linkage & Cycle Prevention
 1. Resolves `parentId` for all messages in the conversation:
+   - **Logical-Only Linkage:** Enforces `isLogicalMessage(m)`. Non-logical records (`attempt_only` and `unmatched_capture`) are strictly prohibited from receiving a `parentId` in the canonical tree, ensuring empty retry attempts never create phantom sibling branches (`Branch 1 of 3`).
    - Maps `remoteParentId` to local parent `id`.
    - **Ancestor Cycle Detection:** Traverses parent pointers from proposed parent back to root. If a cycle is detected (e.g. A $\to$ B $\to$ A), the cyclic link is broken to preserve a valid tree graph.
 2. **Branching Preservation:**
    - In DeepSeek, users can branch by editing a prompt or clicking "Regenerate".
    - This creates multiple child messages with the same `parentId`.
-   - Sibling branches are retained and never collapsed, overwritten, or pruned.
+   - Sibling branches between genuine logical turns are retained and never collapsed, overwritten, or pruned.
 
 ### Pass 3: Atomic Transaction Commit
 - The entire plan (`conversation`, `messagesToPut`, `revisionsToPut`) is committed atomically via `storageRepo.applyHistoryReconciliationPlan(plan)`, eliminating partial write states.

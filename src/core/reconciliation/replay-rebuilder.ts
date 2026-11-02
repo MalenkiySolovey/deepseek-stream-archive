@@ -81,6 +81,8 @@ export class ReplayRebuilder {
     }
 
     const identityState = existingMsg?.identityState === 'reconciled' ? 'reconciled' : 'provisional';
+    const projectionState: import('../models').MessageProjectionState =
+      identityState === 'reconciled' ? 'logical' : 'provisional_logical';
 
     const message: Message = {
       id: messageId,
@@ -91,6 +93,7 @@ export class ReplayRebuilder {
       content: existingMsg?.content,
       sourceRawStreamKey: stream.id,
       identityState,
+      projectionState,
       role: 'assistant',
       status: finalStatus,
       createdAt: existingMsg?.createdAt || stream.openedAt || now,

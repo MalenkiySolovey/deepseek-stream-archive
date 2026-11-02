@@ -1,5 +1,5 @@
 export const DB_NAME = 'StreamArchiveDB' as const;
-export const DB_VERSION = 7 as const;
+export const DB_VERSION = 8 as const;
 
 export const STORE_CONVERSATIONS = 'conversations' as const;
 export const STORE_MESSAGES = 'messages' as const;
@@ -56,6 +56,7 @@ export function configureDatabaseSchema(db: IDBDatabase, tx?: IDBTransaction | n
     msgStore.createIndex('createdAt', 'createdAt', { unique: false });
     msgStore.createIndex('conversationId_remoteId', ['conversationId', 'remoteId'], { unique: false });
     msgStore.createIndex('identityState', 'identityState', { unique: false });
+    msgStore.createIndex('projectionState', 'projectionState', { unique: false });
   } else if (tx) {
     const msgStore = tx.objectStore(STORE_MESSAGES);
     if (!msgStore.indexNames.contains('conversationId_remoteId')) {
@@ -63,6 +64,9 @@ export function configureDatabaseSchema(db: IDBDatabase, tx?: IDBTransaction | n
     }
     if (!msgStore.indexNames.contains('identityState')) {
       msgStore.createIndex('identityState', 'identityState', { unique: false });
+    }
+    if (!msgStore.indexNames.contains('projectionState')) {
+      msgStore.createIndex('projectionState', 'projectionState', { unique: false });
     }
   }
 

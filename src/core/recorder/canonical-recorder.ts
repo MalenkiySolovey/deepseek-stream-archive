@@ -226,6 +226,11 @@ export class CanonicalRevisionRecorder implements RevisionRecorder {
   }
 
   flush(isFinal = false): ResponseRevision | null {
+    // Invariant: Empty stream attempts must NEVER produce 0-char ResponseRevision records
+    if (this.accumulatedText === '' && this.accumulatedThinking === '') {
+      return null;
+    }
+
     const hasChanges =
       this.accumulatedText !== this.lastFlushedText ||
       this.accumulatedThinking !== this.lastFlushedThinking ||
@@ -302,14 +307,29 @@ export class CanonicalRevisionRecorder implements RevisionRecorder {
 
   buildMessageSnapshot(): Message {
     const now = Date.now();
+    const hasContent = this.accumulatedText.length > 0 || this.accumulatedThinking.length > 0;
+    const isTerminalAttempt =
+      this.status === 'interrupted' ||
+      this.status === 'degraded' ||
+      this.status === 'incomplete' ||
+      this.status === 'unknown';
+
+    let projectionState: import('../models').MessageProjectionState;
+    if (!hasContent && !this.remoteMessageId && this.recoveryEvents.length === 0 && isTerminalAttempt) {
+      projectionState = 'attempt_only';
+    } else {
+      projectionState = 'provisional_logical';
+    }
+
     return {
       id: this.messageId,
       remoteId: this.remoteMessageId,
       conversationId: this.conversationId,
-      parentId: this.parentId,
+      parentId: projectionState === 'attempt_only' ? undefined : this.parentId,
       remoteParentId: this.remoteParentId,
       sourceRawStreamKey: this.sourceRawStreamKey,
-      identityState: this.remoteMessageId ? 'provisional' : 'provisional',
+      identityState: 'provisional',
+      projectionState,
       role: 'assistant',
       status: this.status,
       createdAt: this.lastFlushedAt || now,

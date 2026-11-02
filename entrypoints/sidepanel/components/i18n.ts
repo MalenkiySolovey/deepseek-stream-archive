@@ -56,6 +56,8 @@ export const translations = {
     recoveryCardDesc: 'DeepSeek content filter triggered. The original uncensored response was safely captured prior to deletion.',
     copyPreservedText: 'Copy Uncensored Answer',
     censoredTemplate: 'Server filtered placeholder',
+    unmatchedCapturesTitle: 'Unmatched Stream Captures',
+    unmatchedCapturesDesc: 'Partial streams captured during network interruptions that were superseded by retries.',
 
     // Settings
     settingsTitle: 'Settings & Storage',
@@ -119,6 +121,8 @@ export const translations = {
     recoveryCardDesc: 'Сработал фильтр DeepSeek CONTENT_FILTER. Исходный ответ модели был перехвачен и сохранён в локальный архив до удаления сервером.',
     copyPreservedText: 'Копировать исходный ответ',
     censoredTemplate: 'Серверный шаблон цензуры',
+    unmatchedCapturesTitle: 'Несопоставленные захваты стримов',
+    unmatchedCapturesDesc: 'Частичные стримы, сохранённые при сетевых сбоях и заменённые последующими попытками.',
 
     // Settings
     settingsTitle: 'Настройки и Хранилище',

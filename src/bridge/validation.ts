@@ -616,6 +616,13 @@ const VALID_IDENTITY_STATES = new Set<import('../core/models').MessageIdentitySt
   'reconciled',
 ]);
 
+const VALID_PROJECTION_STATES = new Set<import('../core/models').MessageProjectionState>([
+  'logical',
+  'provisional_logical',
+  'unmatched_capture',
+  'attempt_only',
+]);
+
 export function validateMessage(raw: unknown): import('../core/models').Message | null {
   if (!isRecord(raw)) return null;
   if (typeof raw.id !== 'string' || raw.id.trim().length === 0 || raw.id.length > MAX_ID_CHARS) return null;
@@ -632,6 +639,10 @@ export function validateMessage(raw: unknown): import('../core/models').Message 
   const sourceRawStreamKey = typeof raw.sourceRawStreamKey === 'string' && raw.sourceRawStreamKey.trim().length > 0 && raw.sourceRawStreamKey.length <= MAX_ID_CHARS * 2 + 1 ? raw.sourceRawStreamKey.trim() : undefined;
   const content = typeof raw.content === 'string' ? raw.content : undefined;
   const remoteCreatedAt = typeof raw.remoteCreatedAt === 'number' && Number.isFinite(raw.remoteCreatedAt) ? raw.remoteCreatedAt : undefined;
+  const projectionState =
+    typeof raw.projectionState === 'string' && VALID_PROJECTION_STATES.has(raw.projectionState as any)
+      ? (raw.projectionState as import('../core/models').MessageProjectionState)
+      : undefined;
 
   return {
     id: raw.id.trim(),
@@ -639,6 +650,7 @@ export function validateMessage(raw: unknown): import('../core/models').Message 
     role: raw.role as import('../core/models').MessageRole,
     status: raw.status as import('../core/models').MessageStatus,
     identityState: raw.identityState as import('../core/models').MessageIdentityState,
+    projectionState,
     createdAt: raw.createdAt,
     updatedAt: raw.updatedAt,
     remoteId,
