@@ -150,5 +150,9 @@ export interface StorageRepository {
     attemptOnlyCount: number;
     unmatchedCapturesCount: number;
   }>;
+
+  // Export & Portable Backup operations (Milestone 2E.1)
+  getConversationExportModel(conversationId: string): Promise<import('../../export/types').ConversationExportModel | null>;
+  createPortableBackupSnapshot(options?: import('../../backup/snapshot').CreateSnapshotOptions): Promise<import('../../backup/snapshot').PortableBackupSnapshot>;
 }
 

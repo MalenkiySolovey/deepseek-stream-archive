@@ -171,3 +171,32 @@ StreamArchive requests **zero unnecessary permissions** (e.g. no `scripting`, no
    - All recovery UI is mounted within `attachShadow({ mode: 'closed' })`. Page scripts have zero DOM query access to recovery cards or clipboard buttons.
    - Unowned or spoofed root elements injected by page scripts are immediately evicted via `WeakSet` ownership tracking. If closed Shadow DOM attachment fails, the overlay disables itself safely rather than degrading to light DOM.
 
+---
+
+## 9. Export & Backup Security Boundary (Milestone 2E.1)
+
+1. **Zero Network Transmission:**
+   - Conversation export (Markdown and JSON) and Portable Archive Backup (`.streamarchive.jsonl.gz`) operate **strictly 100% client-side**.
+   - No external servers, telemetry, cloud storage, or third-party APIs are contacted during generation, serialization, compression, or file saving.
+
+2. **Zero `chrome.downloads` Permission:**
+   - StreamArchive refuses to request the powerful `chrome.downloads` manifest permission.
+   - File saving utilizes modern web standards:
+     - Primary: `window.showSaveFilePicker()` via the File System Access API, ensuring that file writes occur only to a location explicitly chosen by the user in an operating-system file picker dialog.
+     - Fallback: Transient `<a download>` object URLs (`URL.createObjectURL(blob)`), revocable immediately after triggering.
+   - Cancellation by the user in the file picker dialog is handled gracefully without errors.
+
+3. **Safe Filename Sanitization:**
+   - File titles are strictly sanitized before passing to save dialogs:
+     - Strips OS path separators (`/`, `\`), control characters (`0x00`-`0x1F`, `0x7F`-`0x9F`), and Windows forbidden characters (`<`, `>`, `:`, `"`, `|`, `?`, `*`).
+     - Neutralizes Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`).
+     - Normalizes spaces, bounds name length to $\le 60$ characters, and appends a UTC ISO date stamp (`YYYY-MM-DD`).
+
+4. **Unencrypted Portable Backup Disclosure:**
+   - Backup format v1 uses standard gzip compression over line-delimited JSON.
+   - The backup contains unencrypted conversation text, thinking traces, and raw journal streams.
+   - The extension Side Panel displays explicit warnings informing the user to store backup files in encrypted volumes or secure locations.
+
+5. **In-Memory Resource Ceilings:**
+   - Backup snapshots enforce a conservative 100 MiB raw text size limit (`MAX_IN_MEMORY_PORTABLE_BACKUP_SOURCE_BYTES`) evaluated inside the snapshot transaction to protect against out-of-memory errors in browser processes.
+

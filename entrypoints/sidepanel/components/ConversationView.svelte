@@ -3,10 +3,13 @@
   import {
     MESSAGE_GET_ARCHIVE_CONVERSATION,
     MESSAGE_GET_REVISION_CONTENT,
+    MESSAGE_GET_CONVERSATION_EXPORT,
     type GetArchiveConversationRequest,
     type GetArchiveConversationResponse,
     type GetRevisionContentRequest,
     type GetRevisionContentResponse,
+    type GetConversationExportRequest,
+    type GetConversationExportResponse,
   } from '../../../src/bridge/messages';
   import type {
     ArchiveConversationDetail,
@@ -20,6 +23,14 @@
   } from '../../../src/core/models';
   import SafeMarkdown from './SafeMarkdown.svelte';
   import { translations, type SupportedLocale } from './i18n';
+  import {
+    buildConversationMarkdown,
+    buildConversationJson,
+    sanitizeExportFilename,
+    formatDateUtc,
+    type ConversationExportOptions,
+  } from '../../../src/export';
+  import { saveLocalFile } from '../../../src/backup/save-file';
 
   interface Props {
     conversationId: string;
@@ -43,6 +54,89 @@
 
   // Branch index per parent grouping
   let branchSelections = $state<Record<string, number>>({});
+
+  // Milestone 2E.1: Export Popover/Dialog State
+  let showExportModal = $state(false);
+  let exportFormat = $state<'markdown' | 'json'>('markdown');
+  let exportBranches = $state<'all' | 'active'>('all');
+  let exportIncludeReasoning = $state(true);
+  let exportIncludeRevisions = $state(false);
+  let exportIncludeRecovery = $state(true);
+  let isExporting = $state(false);
+  let exportStatusMessage = $state<string | null>(null);
+
+  async function performExport() {
+    if (!detail) return;
+    isExporting = true;
+    exportStatusMessage = null;
+    try {
+      const res = await new Promise<GetConversationExportResponse>((resolve) => {
+        if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+          const req: GetConversationExportRequest = {
+            type: MESSAGE_GET_CONVERSATION_EXPORT,
+            conversationId: detail!.conversation.id,
+          };
+          chrome.runtime.sendMessage(req, (r) => {
+            resolve(r || { success: false, error: 'No response from background worker' });
+          });
+        } else {
+          resolve({ success: false, error: 'Extension runtime unavailable' });
+        }
+      });
+
+      if (!res.success || !res.exportModel) {
+        exportStatusMessage = `${t.exportError}: ${res.error || 'Failed to retrieve conversation export model'}`;
+        isExporting = false;
+        return;
+      }
+
+      const options: ConversationExportOptions = {
+        format: exportFormat,
+        branches: exportBranches,
+        includeReasoning: exportIncludeReasoning,
+        includeRevisions: exportIncludeRevisions,
+        includeRecovery: exportIncludeRecovery,
+        branchSelections,
+      };
+
+      let content: string;
+      let mimeType: string;
+      let ext: string;
+
+      if (exportFormat === 'markdown') {
+        content = buildConversationMarkdown(res.exportModel, options);
+        mimeType = 'text/markdown;charset=utf-8';
+        ext = 'md';
+      } else {
+        content = buildConversationJson(res.exportModel, options);
+        mimeType = 'application/json;charset=utf-8';
+        ext = 'json';
+      }
+
+      const dateStr = formatDateUtc(detail.conversation.updatedAt || Date.now());
+      const filename = sanitizeExportFilename(detail.conversation.title, dateStr, ext, detail.conversation.id);
+
+      const saveResult = await saveLocalFile({
+        suggestedName: filename,
+        mimeType,
+        data: content,
+        description: exportFormat === 'markdown' ? 'Markdown Document' : 'JSON Document',
+        extension: ext,
+      });
+
+      if (saveResult.success) {
+        showExportModal = false;
+      } else if (saveResult.canceled) {
+        // User closed the file dialog - return to idle cleanly
+      } else {
+        exportStatusMessage = `${t.exportError}: ${saveResult.error || 'Save failed'}`;
+      }
+    } catch (err) {
+      exportStatusMessage = `${t.exportError}: ${(err as Error).message}`;
+    } finally {
+      isExporting = false;
+    }
+  }
 
   onMount(() => {
     loadConversation();
@@ -223,6 +317,16 @@
         <span class="meta-item">{logicalMessages().length} {t.messagesCount}</span>
       </div>
     </div>
+    {#if detail}
+      <button
+        class="export-header-btn"
+        type="button"
+        onclick={() => { showExportModal = true; exportStatusMessage = null; }}
+        title={t.exportConversation}
+      >
+        📤 {t.exportBtn}
+      </button>
+    {/if}
   </div>
 
   {#if loading}
@@ -444,6 +548,101 @@
       {/if}
     </div>
   {/if}
+
+  {#if showExportModal}
+    <div
+      class="modal-backdrop"
+      role="presentation"
+      onclick={() => (showExportModal = false)}
+      onkeydown={(e) => { if (e.key === 'Escape') showExportModal = false; }}
+    >
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <div
+        class="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t.exportConversation}
+        tabindex="-1"
+        onclick={(e) => e.stopPropagation()}
+      >
+        <div class="modal-header">
+          <h3 class="modal-title">📤 {t.exportConversation}</h3>
+          <button class="modal-close" type="button" onclick={() => (showExportModal = false)}>✕</button>
+        </div>
+
+        <div class="modal-body">
+          <div class="export-option-group">
+            <span class="option-group-title">{t.exportFormat}</span>
+            <div class="radio-row">
+              <label class="radio-label">
+                <input type="radio" bind:group={exportFormat} value="markdown" />
+                <span>{t.exportFormatMarkdown}</span>
+              </label>
+              <label class="radio-label">
+                <input type="radio" bind:group={exportFormat} value="json" />
+                <span>{t.exportFormatJson}</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="export-option-group">
+            <span class="option-group-title">{t.exportBranches}</span>
+            <div class="radio-row">
+              <label class="radio-label">
+                <input type="radio" bind:group={exportBranches} value="all" />
+                <span>{t.exportAllBranches}</span>
+              </label>
+              <label class="radio-label">
+                <input type="radio" bind:group={exportBranches} value="active" />
+                <span>{t.exportActiveBranch}</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="export-option-group checkboxes">
+            <label class="checkbox-label">
+              <input type="checkbox" bind:checked={exportIncludeReasoning} />
+              <span>{t.exportIncludeReasoning}</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" bind:checked={exportIncludeRecovery} />
+              <span>{t.exportIncludeRecovery}</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" bind:checked={exportIncludeRevisions} />
+              <span>{t.exportIncludeRevisions}</span>
+            </label>
+          </div>
+
+          {#if exportStatusMessage}
+            <div class="export-status-banner">
+              {exportStatusMessage}
+            </div>
+          {/if}
+        </div>
+
+        <div class="modal-footer">
+          <button
+            class="modal-btn secondary"
+            type="button"
+            disabled={isExporting}
+            onclick={() => (showExportModal = false)}
+          >
+            {t.exportCancel}
+          </button>
+          <button
+            class="modal-btn primary"
+            type="button"
+            disabled={isExporting}
+            onclick={performExport}
+          >
+            {isExporting ? '...' : t.exportConfirm}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -461,6 +660,179 @@
     position: sticky;
     top: 0;
     z-index: 10;
+  }
+
+  .export-header-btn {
+    position: absolute;
+    right: 1rem;
+    top: 0.75rem;
+    padding: 0.3rem 0.65rem;
+    border-radius: 4px;
+    background: #1e293b;
+    border: 1px solid #334155;
+    color: #e2e8f0;
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    transition: background 0.15s, border-color 0.15s;
+  }
+
+  .export-header-btn:hover {
+    background: #334155;
+    border-color: #475569;
+  }
+
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.75);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    padding: 1rem;
+    backdrop-filter: blur(2px);
+  }
+
+  .modal-card {
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    width: 100%;
+    max-width: 380px;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .modal-header {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #1e293b;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: #090d16;
+  }
+
+  .modal-title {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: #f8fafc;
+    margin: 0;
+  }
+
+  .modal-close {
+    background: transparent;
+    border: none;
+    color: #94a3b8;
+    font-size: 1rem;
+    cursor: pointer;
+    padding: 0.2rem;
+  }
+
+  .modal-close:hover {
+    color: #f8fafc;
+  }
+
+  .modal-body {
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.875rem;
+  }
+
+  .export-option-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+  }
+
+  .option-group-title {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .radio-row {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.8125rem;
+    color: #e2e8f0;
+  }
+
+  .radio-label,
+  .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    cursor: pointer;
+    font-size: 0.8125rem;
+    color: #e2e8f0;
+  }
+
+  .export-option-group.checkboxes {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid #1e293b;
+  }
+
+  .export-status-banner {
+    font-size: 0.75rem;
+    color: #f87171;
+    background: #450a0a;
+    border: 1px solid #7f1d1d;
+    border-radius: 4px;
+    padding: 0.5rem;
+  }
+
+  .modal-footer {
+    padding: 0.75rem 1rem;
+    border-top: 1px solid #1e293b;
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    background: #090d16;
+  }
+
+  .modal-btn {
+    padding: 0.4rem 0.875rem;
+    border-radius: 4px;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid transparent;
+  }
+
+  .modal-btn.secondary {
+    background: #1e293b;
+    color: #cbd5e1;
+    border-color: #334155;
+  }
+
+  .modal-btn.secondary:hover {
+    background: #334155;
+  }
+
+  .modal-btn.primary {
+    background: #0284c7;
+    color: white;
+  }
+
+  .modal-btn.primary:hover {
+    background: #0369a1;
+  }
+
+  .modal-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .back-btn {

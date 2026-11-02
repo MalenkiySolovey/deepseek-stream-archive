@@ -8,7 +8,7 @@
 ![Framework](https://img.shields.io/badge/framework-WXT%20%2B%20Svelte%205-FF3E00?logo=svelte&logoColor=white)
 ![Tests](https://img.shields.io/badge/unit%20tests-379%20passing-3DDC84)
 ![E2E Tests](https://img.shields.io/badge/playwright%20e2e-10%20passing-brightgreen)
-![Status](https://img.shields.io/badge/live%20acceptance-preflight%20ready-orange)
+![Status](https://img.shields.io/badge/live%20compatibility-baseline%20accepted-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -120,7 +120,7 @@ flowchart TD
     subgraph EXTENSION_WORLD["EXTENSION Origin (chrome-extension://...)"]
         BackgroundWorker["Background Service Worker (background.ts)"]
         SidePanel["Extension Side Panel (Svelte 5)"]
-        StorageEngine["IndexedDB (StreamArchiveDB v7)"]
+        StorageEngine["IndexedDB (StreamArchiveDB v8)"]
         Reconciler["Passive History Reconciler"]
         
         RawBuffer -->|"chrome.runtime.sendMessage"| BackgroundWorker
@@ -137,7 +137,7 @@ flowchart TD
 ## Storage Hierarchy
 
 ```text
-IndexedDB: StreamArchiveDB (Version 7)
+IndexedDB: StreamArchiveDB (Version 8)
 ├── Raw Journal (Evidence Layer)
 │   ├── raw_streams: Stream session metadata, transport type, integrity flags
 │   └── raw_stream_batches: Persisted chunk batches with monotonic sequencing
@@ -148,7 +148,7 @@ IndexedDB: StreamArchiveDB (Version 7)
 │   └── history_staging: Multi-batch incremental history staging chunks
 └── Canonical Domain Entities
     ├── conversations: Logical chat threads with remote session mapping
-    ├── messages: Tree nodes preserving parent linkages, role, and identity state
+    ├── messages: Tree nodes preserving parent linkages, role, identity state, and projectionState
     ├── revisions: Immutable text and thinking snapshots with content fingerprints
     └── recovery_events: Structured censorship and recovery audit markers
 ```
@@ -188,8 +188,8 @@ IndexedDB: StreamArchiveDB (Version 7)
 4. Navigate to [DeepSeek Chat](https://chat.deepseek.com/).
 5. Open the **Side Panel** in Chrome and select **DeepSeek StreamArchive** from the dropdown.
 
-For manual live testing instructions and execution templates, see the [Live Acceptance Testing Guide](./docs/LIVE_ACCEPTANCE.md) and [Live Acceptance Results Template](./docs/LIVE_ACCEPTANCE_RESULTS_TEMPLATE.md).  
-*Current Project Status: Automated browser compatibility verified; live manual acceptance pending against production chat.deepseek.com.*
+For manual live testing records and protocol details, see the [Live Acceptance Testing Guide](./docs/LIVE_ACCEPTANCE.md) and [Live Acceptance Execution Report (2026-11-02)](./docs/LIVE_ACCEPTANCE_RESULTS_2026-11-02.md).  
+*Current Project Status: Automated synthetic compatibility verified; manual live compatibility baseline accepted on 2026-11-02 (tested transport: XMLHttpRequest streaming).*
 
 ---
 

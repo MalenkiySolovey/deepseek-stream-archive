@@ -26,6 +26,9 @@ import {
   MESSAGE_HISTORY_INGEST_ABORT,
   MESSAGE_GET_PAGE_RECOVERY_SUMMARY,
   MESSAGE_GET_PAGE_RECOVERY_CONTENT,
+  MESSAGE_GET_CONVERSATION_EXPORT,
+  MESSAGE_CREATE_PORTABLE_BACKUP_SNAPSHOT,
+  MESSAGE_GET_STORAGE_USAGE_ESTIMATE,
   type SaveSyntheticBatchRequest,
   type SaveSyntheticBatchResponse,
   type FoundationStatusResponse,
@@ -70,6 +73,8 @@ import {
   validateHistoryIngestAbortRequest,
   validateGetPageRecoverySummaryRequest,
   validateGetPageRecoveryContentRequest,
+  validateGetConversationExportRequest,
+  validateCreatePortableBackupSnapshotRequest,
 } from '../src/bridge/validation';
 import type { DeepSeekProtocolDiagnosticsData } from '../src/adapters/deepseek/protocol/types';
 import { DEFAULT_DEEPSEEK_PROFILE } from '../src/adapters/deepseek/compatibility/profiles';
@@ -1367,6 +1372,69 @@ export default defineBackground(() => {
         }
       })();
 
+      return true;
+    }
+
+    // 21. Handle Get Conversation Export Model (Milestone 2E.1)
+    if (message.type === MESSAGE_GET_CONVERSATION_EXPORT) {
+      const validated = validateGetConversationExportRequest(message);
+      if (!validated) {
+        sendResponse({ success: false, error: 'Invalid get conversation export request payload' });
+        return false;
+      }
+      storageRepo
+        .getConversationExportModel(validated.conversationId)
+        .then((exportModel) => {
+          if (!exportModel) {
+            sendResponse({ success: false, error: 'conversation_not_found' });
+          } else {
+            sendResponse({ success: true, exportModel });
+          }
+        })
+        .catch((err) => {
+          logger.error('Failed to get conversation export model', err);
+          sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) });
+        });
+      return true;
+    }
+
+    // 22. Handle Create Portable Backup Snapshot (Milestone 2E.1)
+    if (message.type === MESSAGE_CREATE_PORTABLE_BACKUP_SNAPSHOT) {
+      const validated = validateCreatePortableBackupSnapshotRequest(message);
+      if (!validated) {
+        sendResponse({ success: false, error: 'Invalid create backup snapshot request payload' });
+        return false;
+      }
+      storageRepo
+        .createPortableBackupSnapshot({ maxBytes: validated.maxBytes })
+        .then((snapshot) => {
+          sendResponse({ success: true, snapshot });
+        })
+        .catch((err) => {
+          logger.error('Failed to create portable backup snapshot', err);
+          sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) });
+        });
+      return true;
+    }
+
+    // 23. Handle Get Storage Usage Estimate (Milestone 2E.1)
+    if (message.type === MESSAGE_GET_STORAGE_USAGE_ESTIMATE) {
+      if (typeof navigator !== 'undefined' && navigator.storage && typeof navigator.storage.estimate === 'function') {
+        navigator.storage
+          .estimate()
+          .then((estimate) => {
+            sendResponse({
+              success: true,
+              usageBytes: estimate.usage,
+              quotaBytes: estimate.quota,
+            });
+          })
+          .catch((err) => {
+            sendResponse({ success: false, error: String(err) });
+          });
+      } else {
+        sendResponse({ success: false, error: 'Storage estimate API unavailable' });
+      }
       return true;
     }
 

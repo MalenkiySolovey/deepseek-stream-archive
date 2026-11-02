@@ -35,6 +35,10 @@ export const MESSAGE_HISTORY_INGEST_ABORT = 'STREAMARCHIVE_HISTORY_INGEST_ABORT'
 export const MESSAGE_GET_PAGE_RECOVERY_SUMMARY = 'STREAMARCHIVE_GET_PAGE_RECOVERY_SUMMARY' as const;
 export const MESSAGE_GET_PAGE_RECOVERY_CONTENT = 'STREAMARCHIVE_GET_PAGE_RECOVERY_CONTENT' as const;
 
+export const MESSAGE_GET_CONVERSATION_EXPORT = 'STREAMARCHIVE_GET_CONVERSATION_EXPORT' as const;
+export const MESSAGE_CREATE_PORTABLE_BACKUP_SNAPSHOT = 'STREAMARCHIVE_CREATE_PORTABLE_BACKUP_SNAPSHOT' as const;
+export const MESSAGE_GET_STORAGE_USAGE_ESTIMATE = 'STREAMARCHIVE_GET_STORAGE_USAGE_ESTIMATE' as const;
+
 
 export type ObservationState = 'not_observed' | 'observed' | 'failed' | 'unsupported';
 
@@ -397,6 +401,41 @@ export interface GetPageRecoveryContentResponse {
   error?: string;
 }
 
+// ── Milestone 2E.1: Export & Backup Messages ──
+
+export interface GetConversationExportRequest {
+  type: typeof MESSAGE_GET_CONVERSATION_EXPORT;
+  conversationId: string;
+}
+
+export interface GetConversationExportResponse {
+  success: boolean;
+  exportModel?: import('../export/types').ConversationExportModel;
+  error?: string;
+}
+
+export interface CreatePortableBackupSnapshotRequest {
+  type: typeof MESSAGE_CREATE_PORTABLE_BACKUP_SNAPSHOT;
+  maxBytes?: number;
+}
+
+export interface CreatePortableBackupSnapshotResponse {
+  success: boolean;
+  snapshot?: import('../backup/snapshot').PortableBackupSnapshot;
+  error?: string;
+}
+
+export interface GetStorageUsageEstimateRequest {
+  type: typeof MESSAGE_GET_STORAGE_USAGE_ESTIMATE;
+}
+
+export interface GetStorageUsageEstimateResponse {
+  success: boolean;
+  usageBytes?: number;
+  quotaBytes?: number;
+  error?: string;
+}
+
 export type ExtensionInternalMessage =
   | SaveSyntheticBatchRequest
   | GetFoundationStatusRequest
@@ -421,6 +460,9 @@ export type ExtensionInternalMessage =
   | HistoryIngestCommitRequest
   | HistoryIngestAbortRequest
   | GetPageRecoverySummaryRequest
-  | GetPageRecoveryContentRequest;
+  | GetPageRecoveryContentRequest
+  | GetConversationExportRequest
+  | CreatePortableBackupSnapshotRequest
+  | GetStorageUsageEstimateRequest;
 
 

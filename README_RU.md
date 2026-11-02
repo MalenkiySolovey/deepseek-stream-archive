@@ -8,7 +8,7 @@
 ![Фреймворк](https://img.shields.io/badge/фреймворк-WXT%20%2B%20Svelte%205-FF3E00?logo=svelte&logoColor=white)
 ![Юнит-тесты](https://img.shields.io/badge/юнит--тесты-379%20пройдены-3DDC84)
 ![E2E тесты](https://img.shields.io/badge/playwright%20e2e-10%20пройдены-brightgreen)
-![Статус](https://img.shields.io/badge/приёмочное%20тестирование-готов%20к%20тестам-orange)
+![Статус](https://img.shields.io/badge/совместимость-базовый%20уровень%20принят-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
 ![Лицензия](https://img.shields.io/badge/лицензия-MIT-green)
 
@@ -120,7 +120,7 @@ flowchart TD
     subgraph EXTENSION_WORLD["EXTENSION Origin (chrome-extension://...)"]
         BackgroundWorker["Background Service Worker (background.ts)"]
         SidePanel["Боковая панель (Svelte 5)"]
-        StorageEngine["IndexedDB (StreamArchiveDB v7)"]
+        StorageEngine["IndexedDB (StreamArchiveDB v8)"]
         Reconciler["Пассивный реконсилятор истории"]
         
         RawBuffer -->|"chrome.runtime.sendMessage"| BackgroundWorker
@@ -134,10 +134,10 @@ flowchart TD
 
 ---
 
-## Структура хранилища IndexedDB (v7)
+## Структура хранилища IndexedDB (v8)
 
 ```text
-IndexedDB: StreamArchiveDB (Версия 7)
+IndexedDB: StreamArchiveDB (Версия 8)
 ├── Сырой журнал (Raw Journal)
 │   ├── raw_streams: Метаданные потока, транспорт, статус целостности
 │   └── raw_stream_batches: Сохранённые чанки с монотонной нумерацией
@@ -148,7 +148,7 @@ IndexedDB: StreamArchiveDB (Версия 7)
 │   └── history_staging: Инкрементальные батчи истории
 └── Канонические сущности
     ├── conversations: Логические диалоги с привязкой к серверной сессии
-    ├── messages: Узлы дерева сообщений с сохранением иерархии веток и ролей
+    ├── messages: Узлы дерева сообщений с сохранением иерархии веток, ролей и projectionState
     ├── revisions: Неизменяемые ревизии текста и рассуждений с хеш-отпечатками
     └── recovery_events: Записи о фактах срабатывания цензуры и спасения текста
 ```
@@ -188,8 +188,8 @@ IndexedDB: StreamArchiveDB (Версия 7)
 4. Перейдите на сайт [DeepSeek Chat](https://chat.deepseek.com/).
 5. Откройте **Боковую панель** (Side Panel) в Chrome и выберите **DeepSeek StreamArchive** в выпадающем списке.
 
-Инструкции по ручному тестированию на живом `chat.deepseek.com` и шаблоны протоколов см. в [Руководстве по приёмочному тестированию](./docs/LIVE_ACCEPTANCE.md) и [Шаблоне отчёта](./docs/LIVE_ACCEPTANCE_RESULTS_TEMPLATE.md).  
-*Текущий статус проекта: Автоматическая совместимость с браузером подтверждена; требуется ручное приёмочное тестирование на production chat.deepseek.com.*
+Инструкции по ручному тестированию на живом `chat.deepseek.com` и протокол см. в [Руководстве по приёмочному тестированию](./docs/LIVE_ACCEPTANCE.md) и [Отчёте о приёмочном тестировании (2026-11-02)](./docs/LIVE_ACCEPTANCE_RESULTS_2026-11-02.md).  
+*Текущий статус проекта: Автоматическая синтетическая совместимость подтверждена; базовый уровень совместимости с живым интерфейсом принят 2026-11-02 (протестированный транспорт: XMLHttpRequest streaming).*
 
 ---
 

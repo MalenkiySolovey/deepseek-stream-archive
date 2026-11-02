@@ -35,6 +35,12 @@ import {
   computeCanonicalCheckpointFingerprint,
   serializeHistoryStagingBatchForFingerprint,
 } from '../../shared/crypto';
+import type { ConversationExportModel } from '../../export/types';
+import {
+  createPortableBackupSnapshot as createSnapshotInternal,
+  type PortableBackupSnapshot,
+  type CreateSnapshotOptions,
+} from '../../backup/snapshot';
 
 export class IndexedDbStorageRepository implements StorageRepository {
   constructor(private readonly idbFactory?: IDBFactory) {}
@@ -1654,6 +1660,37 @@ export class IndexedDbStorageRepository implements StorageRepository {
       tx.onerror = () => reject(tx.error || new Error('Batch transaction failed'));
       tx.onabort = () => reject(tx.error || new Error('Batch transaction aborted'));
     });
+  }
+
+  // ── Milestone 2E.1: Export & Portable Backup Methods ──
+
+  async getConversationExportModel(conversationId: string): Promise<ConversationExportModel | null> {
+    const conversation = await this.getConversation(conversationId);
+    if (!conversation) return null;
+
+    const messages = await this.listMessagesByConversation(conversationId);
+    messages.sort((a, b) => a.createdAt - b.createdAt);
+
+    const messageDetails: ConversationExportModel['messages'] = [];
+    for (const msg of messages) {
+      const revisions = await this.listRevisionsByMessage(msg.id);
+      const recoveryEvents = await this.listRecoveryEvents(msg.id);
+      messageDetails.push({
+        message: msg,
+        revisions,
+        recoveryEvents,
+      });
+    }
+
+    return {
+      conversation,
+      messages: messageDetails,
+    };
+  }
+
+  async createPortableBackupSnapshot(options?: CreateSnapshotOptions): Promise<PortableBackupSnapshot> {
+    const db = await this.getDb();
+    return createSnapshotInternal(db, options);
   }
 }
 

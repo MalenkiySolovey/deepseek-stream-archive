@@ -195,3 +195,56 @@ When network drops occur during generation, DeepSeek's frontend automatically tr
    - Partial captures are safely preserved and exposed in a dedicated "Unmatched Captures" technical view with raw stream provenance.
    - `listArchiveConversations` counts only `isLogicalMessage()` in `messageCount`.
    - `repairCanonicalProjection()` provides idempotent, safe migration for legacy databases.
+
+---
+
+## 7. Export & Backup Projections (Milestone 2E.1)
+
+The canonical data model provides deterministic, read-only projections for external consumption and backup:
+
+### 7.1 Single Conversation Export Model (`ConversationExportModel`)
+- **Clean Logical Message Tree:**
+  - Only records satisfying `isLogicalMessage(m)` are projected into the conversation message sequence.
+  - Technical retry attempts (`attempt_only`) are strictly excluded from export representations.
+  - Unmatched partial stream captures (`unmatched_capture`) are segregated into an `unmatchedCaptures` collection, preserving forensic provenance without corrupting the conversational narrative.
+- **Preferred Revision Resolution:**
+  - For each message, the export model projects `preferredRevision` via `selectPreferredRevision()`, which prioritizes uncensored last-good text (`isLastGood === true`) over server-overwritten content filter templates.
+  - If selected by user options, full revision history and recovery events are attached to each turn.
+- **Branch Awareness:**
+  - Parent/child relationships (`parentId`) are mapped into sibling branch indices (`siblingBranchIndex`, `siblingBranchCount`).
+  - Exporters can either follow the active path or serialize all sibling branches with explicit branch indicators (`Branch X of Y`).
+- **Reference Token Preservation:**
+  - Syntactic reference and search tokens (e.g. `[reference:0]`, `[citation:1]`) are preserved verbatim without mutation or accidental stripping.
+
+### 7.2 Structured Canonical JSON Export (`ConversationExportV1`)
+- Schema contract:
+  ```typescript
+  {
+    format: 'deepseek-streamarchive-conversation',
+    formatVersion: 1,
+    exportedAt: string, // ISO-8601 UTC
+    generator: 'deepseek-streamarchive',
+    generatorVersion: string,
+    conversation: { id, title, createdAt, updatedAt, remoteId },
+    messages: MessageExportModel[],
+    unmatchedCaptures?: UnmatchedCaptureExportModel[]
+  }
+  ```
+
+### 7.3 Human Markdown Export (`human-markdown-v1`)
+- Formatted for readability in modern Markdown readers, Obsidian, GitHub, and text viewers.
+- Includes YAML frontmatter, conversation title, generation metadata, and branch indicators.
+- DeepThink reasoning traces are rendered in native collapsible `<details>` blocks when enabled.
+- Pre-filter censorship recoveries are highlighted with blockquotes detailing pre-filter text and recovery provenance.
+
+### 7.4 Multi-Store Portable Backup Snapshot (`PortableBackupSnapshot`)
+- Captured in a single atomic read-only IndexedDB transaction across 6 stores:
+  1. `conversations`
+  2. `messages`
+  3. `revisions`
+  4. `recovery_events`
+  5. `raw_streams`
+  6. `raw_stream_batches`
+- Records within each store are sorted deterministically by primary key `id` ascending.
+- Enforces memory ceiling (`MAX_IN_MEMORY_PORTABLE_BACKUP_SOURCE_BYTES = 100 MiB`) to prevent service worker OOM in large archives.
+- Serialized into compressed newline-delimited JSON (`.streamarchive.jsonl.gz`) with strict SHA-256 header manifest and record count footer.

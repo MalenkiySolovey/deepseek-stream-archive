@@ -454,5 +454,47 @@ The automated regression corpus stands at **379 Vitest tests across 55 test file
    - End-to-end Chromium MV3 test with dynamic network simulator: 2 interrupted/reset attempts followed by 1 successful response and history sync.
    - Asserts raw streams $\ge 3$, logical assistant messages $= 1$, sidepanel displays honest 2 messages with zero fake branch navigation buttons.
 
+---
+
+## 20. Tier 18: Human Export & Portable Backup Verification (Milestone 2E.1)
+
+The automated regression corpus stands at **405 Vitest tests across 59 test files (100% green)** plus **11 Playwright Chromium MV3 end-to-end specifications (12 tests)** under strict fail-closed network isolation:
+
+1. **Safe Filename Sanitization (`tests/filename-sanitizer.test.ts`):**
+   - Verifies stripping of Windows forbidden characters (`<`, `>`, `:`, `"`, `/`, `\`, `|`, `?`, `*`).
+   - Neutralizes reserved OS device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`).
+   - Preserves Unicode letters while stripping control codes and non-printable surrogate anomalies.
+   - Normalizes contiguous whitespace and enforces a maximum base filename length of 60 characters with an appended UTC ISO date stamp (`YYYY-MM-DD`).
+
+2. **Conversation Exporter (`tests/conversation-export.test.ts`):**
+   - Verifies Human Markdown (`human-markdown-v1`) and Canonical JSON (`deepseek-streamarchive-conversation` v1).
+   - Asserts strict omission of technical retry attempts (`attempt_only`).
+   - Verifies branch-aware sibling numbering (`Branch X of Y`) and active branch filtering.
+   - Verifies inclusion and formatting of pre-filter censorship recoveries with last-good text and recovery provenance.
+   - Verifies verbatim retention of syntactic reference and citation tokens (`[reference:0]`, `[citation:1]`).
+   - Verifies routing of partial captures (`unmatched_capture`) into a dedicated technical appendix.
+
+3. **Portable Backup Snapshot, Serialization & Validation (`tests/portable-backup.test.ts`):**
+   - Verifies multi-store readonly snapshotting across 6 stores (`conversations`, `messages`, `revisions`, `recovery_events`, `raw_streams`, `raw_stream_batches`).
+   - Validates strict ascending primary-key order (`id`) within every store block.
+   - Verifies streaming JSONL piping directly through Web Streams `CompressionStream('gzip')`.
+   - Pure validator (`validatePortableBackup`) confirms manifest integrity line 0, SHA-256 store sequence, primary key monotonicity, footer completion, and exact record count parity.
+   - Proves robust error rejection on truncated archives, corrupted gzip headers, missing manifests, and mismatched record counts.
+
+4. **Backup Size & Scalability Benchmark (`tests/backup-size-benchmark.test.ts`):**
+   - Evaluates serialization throughput and gzip compression ratios across large multi-batch conversation datasets.
+   - Confirms compression ratios exceeding 5:1 on realistic SSE stream and text payloads.
+
+5. **Browser E2E Human Conversation Export (`tests/browser/human-export.spec.ts`):**
+   - Chromium MV3 extension test navigating to a captured conversation in the Sidepanel.
+   - Opens the export configuration dialog, toggles reasoning traces, and downloads Markdown and JSON files.
+   - Confirms downloads trigger properly through `BlobDownloadFallbackAdapter` with zero `chrome.downloads` permission.
+
+6. **Browser E2E Portable Archive Backup (`tests/browser/portable-backup.spec.ts`):**
+   - Chromium MV3 extension test navigating to Settings & Storage in the Sidepanel.
+   - Asserts accurate display of storage quota usage estimate badge.
+   - Triggers full archive backup, asserts progress state transition, and captures generated `.streamarchive.jsonl.gz` download.
+   - Decompresses downloaded artifact in-memory and validates manifest, store sequence, and footer completion.
+
 > [!IMPORTANT]
 > Automated tests confirm structural and protocol compliance. For instructions on executing real-world manual acceptance testing against live `chat.deepseek.com`, see the [Live Acceptance Testing Guide](./LIVE_ACCEPTANCE.md) and [Live Acceptance Results Template](./LIVE_ACCEPTANCE_RESULTS_TEMPLATE.md).

@@ -948,5 +948,31 @@ export function validateGetPageRecoveryContentRequest(
   };
 }
 
+export function validateGetConversationExportRequest(
+  raw: unknown
+): import('./messages').GetConversationExportRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_GET_CONVERSATION_EXPORT') return null;
+  if (typeof raw.conversationId !== 'string' || !raw.conversationId.trim()) return null;
+
+  return {
+    type: 'STREAMARCHIVE_GET_CONVERSATION_EXPORT',
+    conversationId: raw.conversationId.trim(),
+  };
+}
+
+export function validateCreatePortableBackupSnapshotRequest(
+  raw: unknown
+): import('./messages').CreatePortableBackupSnapshotRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_CREATE_PORTABLE_BACKUP_SNAPSHOT') return null;
+
+  return {
+    type: 'STREAMARCHIVE_CREATE_PORTABLE_BACKUP_SNAPSHOT',
+    maxBytes: typeof raw.maxBytes === 'number' && raw.maxBytes > 0 ? raw.maxBytes : undefined,
+  };
+}
+
+
 
 
