@@ -29,6 +29,8 @@
     backgroundAlive: false,
     storageOperational: false,
     persistedCount: 0,
+    runtimeEpochId: '',
+    runtimeStartedAt: 0,
     transport: {
       fetchStreamsCount: 0,
       xhrStreamsCount: 0,
@@ -209,7 +211,14 @@
 
     <!-- Foundation & Transport -->
     <div class="section-card">
-      <h3 class="card-title">Foundation & Transport Health</h3>
+      <div class="card-header-row">
+        <h3 class="card-title">Foundation & Transport Health</h3>
+        {#if status.runtimeEpochId}
+          <span class="epoch-badge" title={`Started: ${status.runtimeStartedAt ? new Date(status.runtimeStartedAt).toLocaleTimeString() : 'unknown'}`}>
+            Epoch: {status.runtimeEpochId.slice(0, 14)}
+          </span>
+        {/if}
+      </div>
       <div class="metrics-grid">
         <div class="metric-box">
           <span class="m-val" class:highlight-success={status.backgroundAlive}>
@@ -273,7 +282,7 @@
         <h3 class="card-title">Pipeline Verification Chain</h3>
         <div class="pipeline-list">
           {#each status.pipelineStages as stage}
-            <div class="pipeline-item">
+            <div class="pipeline-item" data-stage-id={stage.id}>
               <span class="stage-name">{stage.name}</span>
               <div class="stage-status-wrap">
                 {#if stage.details}
@@ -354,6 +363,23 @@
     border: 1px solid #1e293b;
     border-radius: 0.5rem;
     padding: 0.875rem;
+  }
+
+  .card-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+  }
+
+  .epoch-badge {
+    font-size: 0.625rem;
+    font-family: monospace;
+    background: #1e293b;
+    color: #38bdf8;
+    padding: 0.15rem 0.4rem;
+    border-radius: 0.25rem;
+    border: 1px solid #334155;
   }
 
   .card-title {

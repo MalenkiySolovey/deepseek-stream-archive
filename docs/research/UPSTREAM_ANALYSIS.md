@@ -26,7 +26,7 @@ This document details the comparative analysis and formalizes why StreamArchive 
 | **Delivery Ordering** | Unordered or debounced event emission without sequence enforcement or ACKs. | **Monotonic Canonical Delivery:** Strict sequence numbers (`seq = lastCommitted + 1`) and immutable checkpoints. |
 | **Route Navigation** | Stale overlays persist across single-page app route switches (`/a/chat/s/<id>`). | **Route Epoch Fencing:** Monotonic route tokens purge overlays instantly upon URL change. |
 | **Network Footprint** | Active API polling or external telemetry backends. | **Zero External Network:** Passive-only streaming tap; zero external network calls; strict manifest permissions. |
-| **Verification Gate** | Manual ad-hoc verification or Node-only unit tests without browser runtime validation. | **Dual Gate:** 367 Vitest unit tests + Playwright MV3 Chromium harness with synthetic offline fixtures. |
+| **Verification Gate** | Manual ad-hoc verification or Node-only unit tests without browser runtime validation. | **Dual Gate:** 373 Vitest unit tests (54 suites) + 8 Playwright MV3 Chromium specifications (9 tests) under a strict fail-closed network router. |
 
 ---
 

@@ -87,8 +87,15 @@ export class StreamArchiveOverlayPortal {
   private pollInterval: ReturnType<typeof setInterval> | null = null;
   private repositionRaf: number | null = null;
   private domMutationObserver: MutationObserver | null = null;
+  private rootObserver: MutationObserver | null = null;
   private bootstrapObserver: MutationObserver | null = null;
+  private earlyDomReadyHandler: (() => void) | null = null;
   private domContentLoadedHandler: (() => void) | null = null;
+  private observedBody: HTMLElement | null = null;
+  private navigationNavigateHandler: ((e: any) => void) | null = null;
+  private navigationCurrentEntryChangeHandler: (() => void) | null = null;
+  private originalPushState: typeof history.pushState | null = null;
+  private originalReplaceState: typeof history.replaceState | null = null;
   private isDestroyed = false;
   private isMounted = false;
 
@@ -140,15 +147,20 @@ export class StreamArchiveOverlayPortal {
   }
 
   private initPortal(customMount?: HTMLElement): void {
-    if (typeof document === 'undefined') return;
+    if (this.isDestroyed || typeof document === 'undefined') return;
 
     // Handle document_start execution where documentElement might not yet exist
     if (!document.documentElement && !customMount) {
-      const onReady = () => {
-        document.removeEventListener('DOMContentLoaded', onReady);
-        this.initPortal(customMount);
+      this.earlyDomReadyHandler = () => {
+        if (this.earlyDomReadyHandler && typeof document !== 'undefined') {
+          document.removeEventListener('DOMContentLoaded', this.earlyDomReadyHandler);
+          this.earlyDomReadyHandler = null;
+        }
+        if (!this.isDestroyed) {
+          this.initPortal(customMount);
+        }
       };
-      document.addEventListener('DOMContentLoaded', onReady);
+      document.addEventListener('DOMContentLoaded', this.earlyDomReadyHandler);
       return;
     }
 
@@ -202,62 +214,137 @@ export class StreamArchiveOverlayPortal {
       window.addEventListener('resize', this.handleScrollOrResize, { passive: true });
       window.addEventListener('popstate', this.checkNavigationImmediately);
       window.addEventListener('hashchange', this.checkNavigationImmediately);
-      if (typeof (window as any).navigation !== 'undefined' && (window as any).navigation.addEventListener) {
-        (window as any).navigation.addEventListener('navigate', this.checkNavigationImmediately);
+
+      // Chromium Navigation API: Pre-navigation revocation via 'navigate' and post-commit via 'currententrychange'
+      if (typeof (window as any).navigation !== 'undefined') {
+        const nav = (window as any).navigation;
+        if (typeof nav.addEventListener === 'function') {
+          this.navigationNavigateHandler = (e: any) => {
+            if (this.isDestroyed || !this.isMounted) return;
+            const destUrl = e.destination?.url;
+            if (destUrl && typeof destUrl === 'string') {
+              const destSession = extractSessionIdFromUrl(destUrl) || null;
+              if (destSession !== this.currentSessionId) {
+                // Pre-navigation revocation: purge previous session state immediately
+                this.preRevokeRouteState(destSession);
+              }
+            }
+          };
+          nav.addEventListener('navigate', this.navigationNavigateHandler);
+
+          this.navigationCurrentEntryChangeHandler = () => {
+            this.checkNavigationImmediately();
+          };
+          nav.addEventListener('currententrychange', this.navigationCurrentEntryChangeHandler);
+        }
       }
+
+      // Hook history.pushState and replaceState to detect SPA navigation without artificial popstate dispatch
+      if (typeof history !== 'undefined') {
+        this.originalPushState = history.pushState;
+        this.originalReplaceState = history.replaceState;
+
+        const portal = this;
+        history.pushState = function (this: History, ...args: Parameters<History['pushState']>) {
+          const urlArg = args[2];
+          if (urlArg && typeof urlArg === 'string' && typeof window !== 'undefined') {
+            try {
+              const targetUrl = new URL(urlArg, window.location.href).href;
+              const targetSession = extractSessionIdFromUrl(targetUrl) || null;
+              if (targetSession !== portal.currentSessionId) {
+                portal.preRevokeRouteState(targetSession);
+              }
+            } catch {
+              // ignore invalid url
+            }
+          }
+          const res = portal.originalPushState?.apply(this, args);
+          portal.checkNavigationImmediately();
+          return res;
+        };
+
+        history.replaceState = function (this: History, ...args: Parameters<History['replaceState']>) {
+          const urlArg = args[2];
+          if (urlArg && typeof urlArg === 'string' && typeof window !== 'undefined') {
+            try {
+              const targetUrl = new URL(urlArg, window.location.href).href;
+              const targetSession = extractSessionIdFromUrl(targetUrl) || null;
+              if (targetSession !== portal.currentSessionId) {
+                portal.preRevokeRouteState(targetSession);
+              }
+            } catch {
+              // ignore invalid url
+            }
+          }
+          const res = portal.originalReplaceState?.apply(this, args);
+          portal.checkNavigationImmediately();
+          return res;
+        };
+      }
+
       this.pollInterval = setInterval(this.checkNavigationImmediately, 1000);
     }
 
     this.setupDomObserver();
   }
 
+  private preRevokeRouteState(newSessionId: string | null): void {
+    if (this.isDestroyed) return;
+    this.routeEpoch++;
+    this.currentSessionId = newSessionId;
+    this.activeSummary = null;
+    this.activeModalMessageId = null;
+    this.modalContentCache.clear();
+    this.dismissedMessageIds.clear();
+    this.render();
+  }
+
   private setupDomObserver(): void {
     if (typeof MutationObserver === 'undefined') return;
 
-    if (typeof document !== 'undefined' && document.body) {
-      this.installBodyObserver(document.body);
-    } else if (typeof document !== 'undefined') {
-      // document_start bootstrap: documentElement exists but body is absent
-      this.domContentLoadedHandler = () => {
-        if (this.domContentLoadedHandler) {
-          document.removeEventListener('DOMContentLoaded', this.domContentLoadedHandler);
-          this.domContentLoadedHandler = null;
-        }
-        if (this.bootstrapObserver) {
-          this.bootstrapObserver.disconnect();
-          this.bootstrapObserver = null;
-        }
-        if (document.body && !this.domMutationObserver && !this.isDestroyed) {
-          this.installBodyObserver(document.body);
-        }
-      };
-      document.addEventListener('DOMContentLoaded', this.domContentLoadedHandler);
+    if (typeof document !== 'undefined') {
+      if (document.body) {
+        this.installBodyObserver(document.body);
+      } else {
+        // document_start bootstrap: documentElement exists but body is absent
+        this.domContentLoadedHandler = () => {
+          if (this.domContentLoadedHandler) {
+            document.removeEventListener('DOMContentLoaded', this.domContentLoadedHandler);
+            this.domContentLoadedHandler = null;
+          }
+          if (document.body && !this.isDestroyed) {
+            this.installBodyObserver(document.body);
+          }
+        };
+        document.addEventListener('DOMContentLoaded', this.domContentLoadedHandler);
+      }
 
+      // Root-level watcher on documentElement to detect body appearance or dynamic replacement
       if (document.documentElement) {
-        this.bootstrapObserver = new MutationObserver(() => {
-          if (document.body) {
-            if (this.bootstrapObserver) {
-              this.bootstrapObserver.disconnect();
-              this.bootstrapObserver = null;
-            }
-            if (this.domContentLoadedHandler) {
-              document.removeEventListener('DOMContentLoaded', this.domContentLoadedHandler);
-              this.domContentLoadedHandler = null;
-            }
+        this.rootObserver = new MutationObserver(() => {
+          if (this.isDestroyed) return;
+          if (document.body && document.body !== this.observedBody) {
             this.installBodyObserver(document.body);
           }
         });
-        this.bootstrapObserver.observe(document.documentElement, {
-          childList: true,
-          subtree: true,
-        });
+        this.rootObserver.observe(document.documentElement, { childList: true });
       }
     }
   }
 
   private installBodyObserver(body: HTMLElement): void {
-    if (this.domMutationObserver || this.isDestroyed) return;
+    if (this.isDestroyed) return;
+    this.observedBody = body;
+    if (this.domMutationObserver) {
+      this.domMutationObserver.disconnect();
+      this.domMutationObserver = null;
+    }
     this.domMutationObserver = new MutationObserver(() => {
+      if (this.isDestroyed) return;
+      if (document.body && document.body !== this.observedBody) {
+        this.installBodyObserver(document.body);
+        return;
+      }
       this.checkNavigationImmediately();
       this.handleScrollOrResize();
     });
@@ -613,6 +700,10 @@ export class StreamArchiveOverlayPortal {
 
   destroy(): void {
     this.isDestroyed = true;
+    if (this.earlyDomReadyHandler && typeof document !== 'undefined') {
+      document.removeEventListener('DOMContentLoaded', this.earlyDomReadyHandler);
+      this.earlyDomReadyHandler = null;
+    }
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
@@ -620,6 +711,10 @@ export class StreamArchiveOverlayPortal {
     if (this.repositionRaf !== null) {
       cancelAnimationFrame(this.repositionRaf);
       this.repositionRaf = null;
+    }
+    if (this.rootObserver) {
+      this.rootObserver.disconnect();
+      this.rootObserver = null;
     }
     if (this.bootstrapObserver) {
       this.bootstrapObserver.disconnect();
@@ -633,13 +728,33 @@ export class StreamArchiveOverlayPortal {
       this.domMutationObserver.disconnect();
       this.domMutationObserver = null;
     }
+    this.observedBody = null;
+
     if (typeof window !== 'undefined') {
       window.removeEventListener('scroll', this.handleScrollOrResize);
       window.removeEventListener('resize', this.handleScrollOrResize);
       window.removeEventListener('popstate', this.checkNavigationImmediately);
       window.removeEventListener('hashchange', this.checkNavigationImmediately);
-      if (typeof (window as any).navigation !== 'undefined' && (window as any).navigation.removeEventListener) {
-        (window as any).navigation.removeEventListener('navigate', this.checkNavigationImmediately);
+
+      if (typeof (window as any).navigation !== 'undefined') {
+        const nav = (window as any).navigation;
+        if (this.navigationNavigateHandler && nav.removeEventListener) {
+          nav.removeEventListener('navigate', this.navigationNavigateHandler);
+          this.navigationNavigateHandler = null;
+        }
+        if (this.navigationCurrentEntryChangeHandler && nav.removeEventListener) {
+          nav.removeEventListener('currententrychange', this.navigationCurrentEntryChangeHandler);
+          this.navigationCurrentEntryChangeHandler = null;
+        }
+      }
+
+      if (this.originalPushState && typeof history !== 'undefined') {
+        history.pushState = this.originalPushState;
+        this.originalPushState = null;
+      }
+      if (this.originalReplaceState && typeof history !== 'undefined') {
+        history.replaceState = this.originalReplaceState;
+        this.originalReplaceState = null;
       }
     }
     if (this.rootHost && OWNED_PORTAL_HOSTS.has(this.rootHost)) {

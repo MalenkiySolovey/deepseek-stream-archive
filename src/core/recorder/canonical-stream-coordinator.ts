@@ -14,10 +14,38 @@ export interface CanonicalCheckpointDto {
   isFinal: boolean;
 }
 
-export interface SealedCanonicalCheckpoint extends CanonicalCheckpointDto {
-  sealedAt: number;
+export type DeepReadonly<T> = T extends (infer R)[]
+  ? ReadonlyArray<DeepReadonly<R>>
+  : T extends Function
+  ? T
+  : T extends object
+  ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+  : T;
+
+export function deepFreeze<T>(obj: T): T {
+  if (obj === null || typeof obj !== 'object' || Object.isFrozen(obj)) {
+    return obj;
+  }
+  Object.freeze(obj);
+  for (const key of Object.keys(obj) as Array<keyof T>) {
+    const val = obj[key];
+    if (val !== null && typeof val === 'object') {
+      deepFreeze(val);
+    }
+  }
+  return obj;
+}
+
+export interface SealedCheckpointState {
+  readonly payload: DeepReadonly<CanonicalCheckpointDto>;
+  readonly sealedAt: number;
   attempts: number;
 }
+
+export type SealedCanonicalCheckpoint = CanonicalCheckpointDto & {
+  sealedAt: number;
+  attempts: number;
+};
 
 export interface CanonicalCheckpointAck {
   success: boolean;
@@ -29,6 +57,7 @@ export interface CanonicalCheckpointAck {
 
 export type FinalPersistenceResult =
   | { state: 'committed'; checkpointSeq: number }
+  | { state: 'unconfirmed'; reason: string; checkpointSeq?: number }
   | { state: 'failed'; reason: string; checkpointSeq?: number };
 
 export type CoordinatorState =
@@ -94,7 +123,7 @@ export class CanonicalStreamCoordinator {
   private readonly recorder: CanonicalRevisionRecorder;
   private state: CoordinatorState = 'idle';
   private nextCheckpointSeq = 0;
-  private pendingCheckpoint: SealedCanonicalCheckpoint | null = null;
+  private pendingCheckpointState: SealedCheckpointState | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private inFlightPromise: Promise<CanonicalCheckpointAck | null> | null = null;
@@ -157,7 +186,7 @@ export class CanonicalStreamCoordinator {
   }
 
   hasPendingCheckpoint(): boolean {
-    return this.pendingCheckpoint !== null;
+    return this.pendingCheckpointState !== null;
   }
 
   getState(): CoordinatorState {
@@ -170,9 +199,9 @@ export class CanonicalStreamCoordinator {
       state: this.state,
       lastAckedSeq: this.lastAckedSeq,
       nextCheckpointSeq: this.nextCheckpointSeq,
-      hasPendingCheckpoint: this.pendingCheckpoint !== null,
-      pendingCheckpointSeq: this.pendingCheckpoint?.checkpointSeq,
-      pendingCheckpointAttempts: this.pendingCheckpoint?.attempts ?? 0,
+      hasPendingCheckpoint: this.pendingCheckpointState !== null,
+      pendingCheckpointSeq: this.pendingCheckpointState?.payload.checkpointSeq,
+      pendingCheckpointAttempts: this.pendingCheckpointState?.attempts ?? 0,
       retryAttempts: this.retryAttempts,
       isTerminalLocked: this.isTerminalLocked,
       isTerminalCommitted: this.isTerminalCommitted,
@@ -280,7 +309,7 @@ export class CanonicalStreamCoordinator {
       return {
         state: 'failed',
         reason: this.lastAttemptError || 'retry_exhausted',
-        checkpointSeq: this.pendingCheckpoint?.checkpointSeq,
+        checkpointSeq: this.pendingCheckpointState?.payload.checkpointSeq,
       };
     }
 
@@ -303,9 +332,9 @@ export class CanonicalStreamCoordinator {
             this.finalPersistenceWaiters.splice(idx, 1);
           }
           resolve({
-            state: 'failed',
+            state: 'unconfirmed',
             reason: 'await_final_persistence_timeout',
-            checkpointSeq: this.pendingCheckpoint?.checkpointSeq,
+            checkpointSeq: this.pendingCheckpointState?.payload.checkpointSeq,
           });
         }, timeoutMs);
       }
@@ -331,9 +360,7 @@ export class CanonicalStreamCoordinator {
     // retry this exact sealed checkpoint without altering sequence or content.
     // Invariant: A sealed checkpoint must NEVER mutate. Terminal events arriving
     // during backoff are queued for the subsequent checkpoint seq.
-    let sealedToDeliver = this.pendingCheckpoint;
-
-    if (!sealedToDeliver) {
+    if (!this.pendingCheckpointState) {
       this.recorder.flush(isFinal);
 
       const allRevisions = this.recorder.getRevisions();
@@ -381,9 +408,9 @@ export class CanonicalStreamCoordinator {
         };
       }
 
-      // Seal the checkpoint immutably via defensive deep clone
+      // Seal the checkpoint immutably via deep clone and deep freeze
       const seq = this.nextCheckpointSeq;
-      sealedToDeliver = {
+      const checkpointDto: CanonicalCheckpointDto = {
         streamKey: this.rawStreamKey,
         checkpointSeq: seq,
         conversation: conversation ? deepClone(conversation) : undefined,
@@ -391,22 +418,31 @@ export class CanonicalStreamCoordinator {
         revisions: deepClone(newRevisions),
         recoveryEvents: deepClone(newRecoveryEvents),
         isFinal,
+      };
+
+      const frozenPayload = deepFreeze(deepClone(checkpointDto));
+      this.pendingCheckpointState = {
+        payload: frozenPayload,
         sealedAt: Date.now(),
         attempts: 0,
       };
-
-      this.pendingCheckpoint = sealedToDeliver;
       this.state = 'sealed_pending';
     }
 
     this.state = 'in_flight';
-    (sealedToDeliver as { attempts: number }).attempts++;
+    this.pendingCheckpointState.attempts++;
+
+    // Defensive clone: provide a decoupled copy so callback mutations never tamper with internal sealed payload
+    const targetPayload = this.pendingCheckpointState.payload;
+    const deliveryClone = deepClone(targetPayload) as CanonicalCheckpointDto;
+    const targetSeq = targetPayload.checkpointSeq;
+    const isTargetFinal = targetPayload.isFinal;
 
     const runPromise: Promise<CanonicalCheckpointAck | null> = (async () => {
       try {
         const timeoutMs = this.checkpointAttemptTimeoutMs;
         let attemptTimer: ReturnType<typeof setTimeout> | null = null;
-        const attemptPromise = this.onCheckpoint(sealedToDeliver!);
+        const attemptPromise = this.onCheckpoint(deliveryClone);
         const timeoutPromise = new Promise<CanonicalCheckpointAck>((_, reject) => {
           if (timeoutMs > 0) {
             attemptTimer = setTimeout(() => {
@@ -426,20 +462,20 @@ export class CanonicalStreamCoordinator {
           ack &&
           ack.success &&
           ack.streamKey === this.rawStreamKey &&
-          ack.checkpointSeq === sealedToDeliver!.checkpointSeq
+          ack.checkpointSeq === targetSeq
         ) {
           // Authoritative positive ACK
-          this.lastAckedSeq = sealedToDeliver!.checkpointSeq;
-          this.nextCheckpointSeq = sealedToDeliver!.checkpointSeq + 1;
-          this.lastAckedRevisionCount += sealedToDeliver!.revisions.length;
-          this.lastAckedRecoveryEventCount += sealedToDeliver!.recoveryEvents.length;
-          this.lastAckedRemoteId = sealedToDeliver!.message.remoteId;
-          this.lastAckedStatus = sealedToDeliver!.message.status;
-          if (sealedToDeliver!.conversation) {
+          this.lastAckedSeq = targetSeq;
+          this.nextCheckpointSeq = targetSeq + 1;
+          this.lastAckedRevisionCount += targetPayload.revisions.length;
+          this.lastAckedRecoveryEventCount += targetPayload.recoveryEvents.length;
+          this.lastAckedRemoteId = targetPayload.message.remoteId;
+          this.lastAckedStatus = targetPayload.message.status;
+          if (targetPayload.conversation) {
             this.initialConversationSent = true;
           }
 
-          this.pendingCheckpoint = null;
+          this.pendingCheckpointState = null;
           this.retryAttempts = 0;
           this.lastAttemptError = undefined;
 
@@ -448,11 +484,11 @@ export class CanonicalStreamCoordinator {
             this.retryTimer = null;
           }
 
-          if (sealedToDeliver!.isFinal) {
+          if (isTargetFinal) {
             this.isTerminalCommitted = true;
             this.isTerminalLocked = true;
             this.state = 'committed';
-            this.resolveWaiters({ state: 'committed', checkpointSeq: sealedToDeliver!.checkpointSeq });
+            this.resolveWaiters({ state: 'committed', checkpointSeq: targetSeq });
             return ack;
           }
 
@@ -467,12 +503,12 @@ export class CanonicalStreamCoordinator {
           return ack;
         } else {
           const errorMsg = ack?.error || 'checkpoint_nack_or_mismatch';
-          this.handleDeliveryFailure(sealedToDeliver!, errorMsg);
+          this.handleDeliveryFailure(errorMsg);
           return ack || null;
         }
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
-        this.handleDeliveryFailure(sealedToDeliver!, errorMsg);
+        this.handleDeliveryFailure(errorMsg);
         return null;
       }
     })();
@@ -487,14 +523,20 @@ export class CanonicalStreamCoordinator {
     return runPromise;
   }
 
-  private handleDeliveryFailure(checkpoint: SealedCanonicalCheckpoint, error: string): void {
+  private handleDeliveryFailure(error: string): void {
+    if (!this.pendingCheckpointState) return;
+
     this.retryAttempts++;
     this.lastAttemptError = error;
 
+    const seq = this.pendingCheckpointState.payload.checkpointSeq;
+    const attempts = this.pendingCheckpointState.attempts;
+    const isFinal = this.pendingCheckpointState.payload.isFinal;
+
     logger.warn('Canonical checkpoint delivery failed; will retry with backoff', {
       streamKey: this.rawStreamKey,
-      seq: checkpoint.checkpointSeq,
-      attempts: checkpoint.attempts,
+      seq,
+      attempts,
       retryAttempts: this.retryAttempts,
       error,
     });
@@ -502,22 +544,22 @@ export class CanonicalStreamCoordinator {
     if (this.retryAttempts > this.maxRetries) {
       logger.error('Canonical checkpoint exceeded maximum retry attempts', {
         streamKey: this.rawStreamKey,
-        seq: checkpoint.checkpointSeq,
-        attempts: checkpoint.attempts,
+        seq,
+        attempts,
         maxRetries: this.maxRetries,
       });
       this.state = 'failed';
       this.resolveWaiters({
         state: 'failed',
         reason: `max_retries_exhausted:${error}`,
-        checkpointSeq: checkpoint.checkpointSeq,
+        checkpointSeq: seq,
       });
       return;
     }
 
     this.state = 'backoff_wait';
 
-    const isTerminalPending = checkpoint.isFinal || this.isTerminalRequested;
+    const isTerminalPending = isFinal || this.isTerminalRequested;
 
     if (!this.retryTimer && (!this.isDisposed || isTerminalPending)) {
       const delay =
@@ -526,14 +568,14 @@ export class CanonicalStreamCoordinator {
         ] ?? 1000;
       this.retryTimer = setTimeout(() => {
         this.retryTimer = null;
-        this.executeCheckpoint(checkpoint.isFinal);
+        this.executeCheckpoint(isFinal);
       }, delay);
     }
   }
 
   dispose(): void {
     const isTerminalPending =
-      (this.isTerminalRequested || this.pendingCheckpoint?.isFinal) &&
+      (this.isTerminalRequested || this.pendingCheckpointState?.payload.isFinal) &&
       !this.isTerminalCommitted &&
       this.state !== 'failed';
 
@@ -554,7 +596,7 @@ export class CanonicalStreamCoordinator {
         this.resolveWaiters({
           state: 'failed',
           reason: 'coordinator_disposed',
-          checkpointSeq: this.pendingCheckpoint?.checkpointSeq,
+          checkpointSeq: this.pendingCheckpointState?.payload.checkpointSeq,
         });
       }
     }

@@ -103,6 +103,16 @@ export default defineBackground(() => {
   const historyReconciler = new HistoryReconciler(storageRepo);
 
   // Transient in-memory runtime diagnostics (reset on Service Worker restart)
+  const runtimeEpochId = `epoch_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const runtimeStartedAt = Date.now();
+
+  let runtimeRawBatchesCount = 0;
+  let runtimeRawStreamsCount = 0;
+  let runtimeCanonicalCheckpointsCount = 0;
+  let runtimeRevisionsCommittedCount = 0;
+  let runtimeHistoryObservationsCount = 0;
+  let runtimeHistoryReconciliationsCount = 0;
+
   let bridgeState: ObservationState = 'not_observed';
   const activeTransportStreams = new Set<string>(); // composite keys: `${producerSessionId}:${streamId}`
   const seenFetchStreams = new Set<string>();
@@ -372,10 +382,12 @@ export default defineBackground(() => {
         })),
       ])
         .then(async ([conversations, rawMeta]) => {
+          let totalMessages = 0;
           let revCount = 0;
           let reconciledCount = 0;
           for (const conv of conversations) {
             const msgs = await storageRepo.listMessagesByConversation(conv.id);
+            totalMessages += msgs.length;
             for (const msg of msgs) {
               if (msg.identityState === 'reconciled') reconciledCount++;
               const revs = await storageRepo.listRevisionsByMessage(msg.id);
@@ -390,7 +402,7 @@ export default defineBackground(() => {
               id: 'bg_reachable',
               name: 'Background Service Worker Reachable',
               status: 'healthy',
-              details: 'Active MV3 service worker',
+              details: `Active MV3 service worker (epoch: ${runtimeEpochId.slice(0, 14)})`,
             },
             {
               id: 'isolated_content',
@@ -444,14 +456,14 @@ export default defineBackground(() => {
             {
               id: 'raw_chunk_observed',
               name: 'Raw Journal Chunk Observed',
-              status: rawMeta.totalBatchesCount > 0 ? 'healthy' : 'not_observed',
-              details: `${rawMeta.totalBatchesCount} batch(es)`,
+              status: runtimeRawBatchesCount > 0 ? 'healthy' : 'not_observed',
+              details: `${runtimeRawBatchesCount} batch(es) this runtime`,
             },
             {
               id: 'raw_journal_ack',
               name: 'Raw Journal ACK Confirmed',
-              status: rawMeta.streamCount > 0 ? 'healthy' : 'not_observed',
-              details: `${rawMeta.streamCount} stream(s) recorded`,
+              status: runtimeRawStreamsCount > 0 ? 'healthy' : 'not_observed',
+              details: `${runtimeRawStreamsCount} stream(s) this runtime`,
             },
             {
               id: 'protocol_frame_decoded',
@@ -462,25 +474,25 @@ export default defineBackground(() => {
             {
               id: 'canonical_checkpoint_ack',
               name: 'Canonical Checkpoint ACK Confirmed',
-              status: revCount > 0 ? 'healthy' : 'not_observed',
-              details: `${revCount} revision(s) persisted`,
+              status: runtimeCanonicalCheckpointsCount > 0 ? 'healthy' : 'not_observed',
+              details: `${runtimeRevisionsCommittedCount} revision(s) this runtime`,
             },
             {
               id: 'history_observation',
               name: 'History Observation Seen',
-              status: historyObservationsCount > 0 ? 'observed' : 'not_observed',
-              details: `${historyObservationsCount} observation(s)`,
+              status: runtimeHistoryObservationsCount > 0 ? 'observed' : 'not_observed',
+              details: `${runtimeHistoryObservationsCount} observation(s) this runtime`,
             },
             {
               id: 'history_reconciliation',
               name: 'History Reconciliation Succeeded',
               status:
-                reconciledCount > 0
+                runtimeHistoryReconciliationsCount > 0
                   ? 'healthy'
-                  : historyObservationsCount > 0
+                  : runtimeHistoryObservationsCount > 0
                   ? 'observed'
                   : 'not_observed',
-              details: `${reconciledCount} message(s) reconciled`,
+              details: `${runtimeHistoryReconciliationsCount} reconciliation(s) this runtime`,
             },
             {
               id: 'compatibility_profile',
@@ -496,6 +508,16 @@ export default defineBackground(() => {
               details: `Profile: ${DEFAULT_DEEPSEEK_PROFILE.id}`,
             },
           ];
+
+          const durableArchiveEvidence: import('../src/bridge/messages').DurableArchiveEvidence = {
+            totalRawStreams: rawMeta.streamCount,
+            totalBatches: rawMeta.totalBatchesCount,
+            totalConversations: conversations.length,
+            totalMessages,
+            totalRevisions: revCount,
+            reconciledMessages: reconciledCount,
+            lastPersistedAt,
+          };
 
           const status: FoundationStatusResponse = {
             bridgeState,
@@ -513,6 +535,9 @@ export default defineBackground(() => {
             },
             protocol: aggProtocol,
             pipelineStages,
+            runtimeEpochId,
+            runtimeStartedAt,
+            durableArchiveEvidence,
           };
           sendResponse(status);
         })
@@ -547,6 +572,8 @@ export default defineBackground(() => {
                 details: err instanceof Error ? err.message : String(err),
               },
             ],
+            runtimeEpochId,
+            runtimeStartedAt,
           });
         });
 
@@ -646,6 +673,7 @@ export default defineBackground(() => {
           integrity: validated.integrity,
         })
         .then((record) => {
+          runtimeRawStreamsCount++;
           const res: PersistRawStreamOpenResponse = {
             success: true,
             streamKey: record.id,
@@ -685,6 +713,7 @@ export default defineBackground(() => {
       rawStreamRepo
         .persistBatch(validated.batch)
         .then((ack) => {
+          runtimeRawBatchesCount++;
           lastPersistedAt = ack.persistedAt;
           const res: PersistRawBatchResponse = {
             success: true,
@@ -809,6 +838,7 @@ export default defineBackground(() => {
       }
 
       historyObservationsCount++;
+      runtimeHistoryObservationsCount++;
       lastHistoryObservedAt = Date.now();
 
       const sessionId = parsed.session.sessionId;
@@ -817,6 +847,7 @@ export default defineBackground(() => {
       const runReconciliation = async () => {
         try {
           const result = await historyReconciler.reconcile(parsed);
+          runtimeHistoryReconciliationsCount++;
           const res: ForwardHistoryObservationResponse = {
             success: true,
             reconciled: true,
@@ -969,6 +1000,8 @@ export default defineBackground(() => {
             await storageRepo.commitHistoryStagingPlan(validated.stagingId, plan);
 
             historyObservationsCount++;
+            runtimeHistoryObservationsCount++;
+            runtimeHistoryReconciliationsCount++;
             lastHistoryObservedAt = Date.now();
 
             sendResponse({
@@ -1050,6 +1083,8 @@ export default defineBackground(() => {
       storageRepo
         .saveCanonicalCheckpoint(validated.checkpoint)
         .then(() => {
+          runtimeCanonicalCheckpointsCount++;
+          runtimeRevisionsCommittedCount += validated.checkpoint.revisions.length;
           lastPersistedAt = Date.now();
           const res: PersistCanonicalCheckpointResponse = {
             success: true,

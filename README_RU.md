@@ -6,8 +6,8 @@
 
 ![Платформа](https://img.shields.io/badge/платформа-Chrome%20%7C%20Chromium%20MV3-4285F4?logo=googlechrome&logoColor=white)
 ![Фреймворк](https://img.shields.io/badge/фреймворк-WXT%20%2B%20Svelte%205-FF3E00?logo=svelte&logoColor=white)
-![Юнит-тесты](https://img.shields.io/badge/юнит--тесты-367%20пройдены-3DDC84)
-![E2E тесты](https://img.shields.io/badge/playwright%20e2e-6%20пройдены-brightgreen)
+![Юнит-тесты](https://img.shields.io/badge/юнит--тесты-373%20пройдены-3DDC84)
+![E2E тесты](https://img.shields.io/badge/playwright%20e2e-9%20пройдены-brightgreen)
 ![Статус](https://img.shields.io/badge/приёмочное%20тестирование-готов%20к%20тестам-orange)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
 ![Лицензия](https://img.shields.io/badge/лицензия-MIT-green)
@@ -198,7 +198,7 @@ IndexedDB: StreamArchiveDB (Версия 7)
 Проект покрыт многоуровневым набором автоматических тестов (фаззинг границ чанков, декодирование протокола, перехват цензуры, миграции базы данных и браузерный стенд в headless Chromium MV3):
 
 ```bash
-# Запуск полного набора юнит- и интеграционных тестов Vitest (53 файла, 367 тестов)
+# Запуск полного набора юнит- и интеграционных тестов Vitest (54 файла, 373 теста)
 pnpm run test
 
 # Проверка типов TypeScript
@@ -207,7 +207,7 @@ pnpm run typecheck
 # Сборка распакованного расширения Chrome MV3
 pnpm run build
 
-# Запуск браузерного стенда совместимости Playwright (6 сценариев, без внешних запросов)
+# Запуск браузерного стенда совместимости Playwright (8 сценариев, 9 тестов, fail-closed изоляция)
 pnpm run test:e2e
 
 # Запуск dev-сервера WXT с горячей перезагрузкой

@@ -220,6 +220,8 @@ describe('ACK Pipeline & Batch Persistence Semantics', () => {
       storageOperational: true,
       persistedCount: revCount,
       lastPersistedAt: Date.now(),
+      runtimeEpochId: 'epoch_test_1',
+      runtimeStartedAt: Date.now(),
       transport: {
         fetchStreamsCount: 0,
         xhrStreamsCount: 0,

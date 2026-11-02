@@ -495,7 +495,6 @@ describe('StreamArchive In-Page Recovery Overlay Portal (Shadow DOM)', () => {
   describe('document_start body bootstrap lifecycle', () => {
     it('defers body observer installation until document.body exists', () => {
       // Simulate document_start where document.body is not yet present
-      const originalBody = document.body;
       const fakeDocElement = document.createElement('html');
       const fakeHead = document.createElement('head');
       fakeDocElement.appendChild(fakeHead);
@@ -515,6 +514,132 @@ describe('StreamArchive In-Page Recovery Overlay Portal (Shadow DOM)', () => {
 
       portal.destroy();
       expect(fakeDocElement.querySelector('div[data-streamarchive-overlay-root]')).toBeNull();
+    });
+
+    it('cancels early DOMContentLoaded listener on destroy and does NOT resurrect portal if DOMContentLoaded fires later', () => {
+      // Temporarily mock document.documentElement as undefined to test very early document_start
+      const origDocElement = document.documentElement;
+      try {
+        Object.defineProperty(document, 'documentElement', {
+          value: null,
+          configurable: true,
+        });
+
+        const portal = new StreamArchiveOverlayPortal({
+          fetchSummary: vi.fn(),
+          fetchContent: vi.fn(),
+        });
+
+        expect(portal.getDiagnostics().isMounted).toBe(false);
+
+        // Destroy before DOMContentLoaded
+        portal.destroy();
+        expect(portal.getDiagnostics().isDestroyed).toBe(true);
+
+        // Restore documentElement and fire DOMContentLoaded later
+        Object.defineProperty(document, 'documentElement', {
+          value: origDocElement,
+          configurable: true,
+        });
+
+        document.dispatchEvent(new Event('DOMContentLoaded'));
+
+        // PROVE: Portal remains destroyed and NEVER mounted/resurrected!
+        expect(portal.getDiagnostics().isMounted).toBe(false);
+        expect(document.querySelector('div[data-streamarchive-overlay-root]')).toBeNull();
+      } finally {
+        Object.defineProperty(document, 'documentElement', {
+          value: origDocElement,
+          configurable: true,
+        });
+      }
+    });
+
+    it('handles dynamic document.body replacement and rebinds observer without leaking', async () => {
+      const portal = new StreamArchiveOverlayPortal({
+        mountTarget: mountContainer,
+        fetchSummary: vi.fn().mockResolvedValue(null),
+        fetchContent: vi.fn().mockResolvedValue(null),
+      });
+
+      expect(portal.getDiagnostics().isMounted).toBe(true);
+
+      // Simulate framework replacing document.body
+      const oldBody = document.body;
+      const newBody = document.createElement('body');
+      document.documentElement.replaceChild(newBody, oldBody);
+
+      // Trigger mutation observer on documentElement
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Destroy portal after body replacement
+      portal.destroy();
+      expect(portal.getDiagnostics().isDestroyed).toBe(true);
+      expect(mountContainer.querySelector('div[data-streamarchive-overlay-root]')).toBeNull();
+
+      // Restore original body
+      document.documentElement.replaceChild(oldBody, newBody);
+    });
+
+    it('immediately revokes Session A state upon client-side pushState navigation without artificial popstate event', async () => {
+      window.history.pushState({}, '', '/a/chat/s/sess-route-alpha');
+
+      const summaryA: PageRecoverySummary = {
+        conversationId: 'sess-route-alpha',
+        recoverableCount: 1,
+        messages: [
+          {
+            messageId: 'msg-alpha-1',
+            role: 'assistant',
+            status: 'filtered',
+            hasLastGood: true,
+            recoveryKind: 'authoritative_recovery',
+            capturedAt: 100,
+            recoveredRevisionId: 'rev-alpha-1',
+          },
+        ],
+      };
+
+      let resolveSummaryB: ((val: any) => void) | null = null;
+      const summaryBPromise = new Promise((resolve) => {
+        resolveSummaryB = resolve;
+      });
+
+      const fetchSummary = vi.fn().mockImplementation((sessionId: string) => {
+        if (sessionId === 'sess-route-alpha') return Promise.resolve(summaryA);
+        if (sessionId === 'sess-route-beta') return summaryBPromise;
+        return Promise.resolve(null);
+      });
+
+      const portal = new StreamArchiveOverlayPortal({
+        mountTarget: mountContainer,
+        fetchSummary,
+        fetchContent: vi.fn(),
+      });
+
+      await vi.waitFor(() => {
+        expect(portal.getDiagnostics().activeSummarySessionId).toBe('sess-route-alpha');
+      });
+
+      // Genuine SPA navigation via pushState without any synthetic dispatchEvent(new PopStateEvent)
+      window.history.pushState({}, '', '/a/chat/s/sess-route-beta');
+
+      // Invariant: Session A data must be wiped immediately BEFORE Session B summary resolves!
+      expect(portal.getDiagnostics().activeSummarySessionId).toBeNull();
+      expect(portal.getDiagnostics().modalContentCacheSize).toBe(0);
+
+      // Now allow Session B summary to resolve
+      resolveSummaryB!({
+        conversationId: 'sess-route-beta',
+        recoverableCount: 0,
+        messages: [],
+      });
+
+      await vi.waitFor(() => {
+        expect(portal.getDiagnostics().activeSummarySessionId).toBe('sess-route-beta');
+      });
+
+      portal.destroy();
     });
   });
 });

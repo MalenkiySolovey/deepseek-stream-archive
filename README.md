@@ -6,8 +6,8 @@
 
 ![Platform](https://img.shields.io/badge/platform-Chrome%20%7C%20Chromium%20MV3-4285F4?logo=googlechrome&logoColor=white)
 ![Framework](https://img.shields.io/badge/framework-WXT%20%2B%20Svelte%205-FF3E00?logo=svelte&logoColor=white)
-![Tests](https://img.shields.io/badge/unit%20tests-367%20passing-3DDC84)
-![E2E Tests](https://img.shields.io/badge/playwright%20e2e-6%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/unit%20tests-373%20passing-3DDC84)
+![E2E Tests](https://img.shields.io/badge/playwright%20e2e-9%20passing-brightgreen)
 ![Status](https://img.shields.io/badge/live%20acceptance-preflight%20ready-orange)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -198,7 +198,7 @@ For manual live testing instructions and execution templates, see the [Live Acce
 StreamArchive maintains an exhaustive multi-tier automated test suite covering chunk boundary fuzzing, protocol decoding, censorship interception, database migrations, and a headless Chromium MV3 compatibility harness:
 
 ```bash
-# Run unit and integration tests (53 test files, 367 tests)
+# Run unit and integration tests (54 test files, 373 tests)
 pnpm run test
 
 # Run TypeScript typecheck
@@ -207,7 +207,7 @@ pnpm run typecheck
 # Build unpacked Chrome MV3 extension
 pnpm run build
 
-# Run Playwright Chromium MV3 browser compatibility harness (6 specs, zero external network)
+# Run Playwright Chromium MV3 browser compatibility harness (8 specs, 9 tests, fail-closed network isolation)
 pnpm run test:e2e
 
 # Start WXT development server with live-reloading

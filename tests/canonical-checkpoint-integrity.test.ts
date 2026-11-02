@@ -551,6 +551,97 @@ describe('Canonical Checkpoint Delivery Integrity & Terminal Locking', () => {
       coordinator.dispose();
     });
 
+    it('defends against adversarial or buggy onCheckpoint mutating payload: retry delivers pristine sealed payload', async () => {
+      const deliveredCheckpoints: CanonicalCheckpointDto[] = [];
+      let attemptCount = 0;
+
+      const coordinator = new CanonicalStreamCoordinator({
+        producerSessionId: 'prod-adversarial',
+        streamId: 'stream-adversarial',
+        debounceMs: 50,
+        retryBackoffMs: [100],
+        onCheckpoint: async (cp) => {
+          deliveredCheckpoints.push(JSON.parse(JSON.stringify(cp)));
+          attemptCount++;
+          if (attemptCount === 1) {
+            // Adversarial mutation on received object:
+            // Attempt to mutate isFinal, message status, content, revisions
+            cp.isFinal = true;
+            cp.message.status = 'filtered';
+            cp.message.content = 'HACKED_CONTENT';
+            if (cp.revisions[0]) {
+              cp.revisions[0].text = 'HACKED_REVISION';
+            }
+            (cp.revisions as any).push({
+              id: 'injected_rev',
+              messageId: cp.message.id,
+              revisionIndex: 99,
+              text: 'INJECTED',
+              source: 'network',
+              capturedAt: Date.now(),
+            });
+
+            // Return NACK to force retry
+            return {
+              success: false,
+              streamKey: cp.streamKey,
+              checkpointSeq: cp.checkpointSeq,
+              error: 'simulated_first_attempt_nack',
+            };
+          }
+
+          // On retry (attempt 2), persist to actual storage repository
+          await storageRepo.saveCanonicalCheckpoint(cp);
+          return {
+            success: true,
+            streamKey: cp.streamKey,
+            checkpointSeq: cp.checkpointSeq,
+            persistedAt: Date.now(),
+          };
+        },
+      });
+
+      coordinator.feedSemanticEvent({
+        streamId: 'stream-adversarial',
+        sequence: 1,
+        timestamp: 100,
+        type: 'answer_delta',
+        delta: 'Original pristine content',
+      });
+
+      // Flush seq 0
+      await vi.advanceTimersByTimeAsync(60);
+      expect(deliveredCheckpoints).toHaveLength(1);
+      expect(deliveredCheckpoints[0]!.isFinal).toBe(false);
+      expect(deliveredCheckpoints[0]!.revisions[0]!.text).toBe('Original pristine content');
+      expect(coordinator.getState()).toBe('backoff_wait');
+
+      // Advance backoff timer (100ms) to trigger retry
+      await vi.advanceTimersByTimeAsync(110);
+      await vi.waitFor(() => {
+        expect(coordinator.getLastAckedSeq()).toBe(0);
+      });
+
+      // Verify second delivery attempt
+      expect(deliveredCheckpoints).toHaveLength(2);
+      const retryCp = deliveredCheckpoints[1]!;
+
+      // PROVE: All injected mutations are absent!
+      expect(retryCp.checkpointSeq).toBe(0);
+      expect(retryCp.isFinal).toBe(false);
+      expect(retryCp.message.status).toBe('streaming');
+      expect(retryCp.message.content).toBeUndefined();
+      expect(retryCp.revisions).toHaveLength(1);
+      expect(retryCp.revisions[0]!.text).toBe('Original pristine content');
+
+      // Verify repository accepted retry and correctly persisted
+      const stored = await storageRepo.getCanonicalCheckpoint('prod-adversarial:stream-adversarial');
+      expect(stored).not.toBeNull();
+      expect(stored!.lastCommittedCheckpointSeq).toBe(0);
+
+      coordinator.dispose();
+    });
+
     it('ignores duplicate or subsequent terminal semantic events', async () => {
       const deliveredCheckpoints: CanonicalCheckpointDto[] = [];
 

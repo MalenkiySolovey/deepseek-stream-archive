@@ -84,6 +84,16 @@ export interface PipelineDiagnosticStage {
   details?: string;
 }
 
+export interface DurableArchiveEvidence {
+  totalRawStreams: number;
+  totalBatches: number;
+  totalConversations: number;
+  totalMessages: number;
+  totalRevisions: number;
+  reconciledMessages: number;
+  lastPersistedAt?: number;
+}
+
 export interface FoundationStatusResponse {
   bridgeState: ObservationState;
   backgroundAlive: boolean;
@@ -93,6 +103,9 @@ export interface FoundationStatusResponse {
   transport: TransportDiagnostics;
   protocol?: DeepSeekProtocolDiagnosticsData;
   pipelineStages?: PipelineDiagnosticStage[];
+  runtimeEpochId: string;
+  runtimeStartedAt: number;
+  durableArchiveEvidence?: DurableArchiveEvidence;
 }
 
 export interface ListSyntheticRevisionsRequest {

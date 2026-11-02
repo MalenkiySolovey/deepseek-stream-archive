@@ -398,12 +398,13 @@ The automated regression corpus contains **318 tests across 48 test files (100% 
 
 ---
 
-## 18. Tier 16: Immutable Delivery & Browser Compatibility Gate (Milestone 2D.2.2)
+## 18. Tier 16: Harness Credibility, MV3 Lifecycle & Route Isolation Hardening (Milestone 2D.2.3)
 
-The regression corpus stands at **367 Vitest tests across 53 test files (100% green)** plus **6 Playwright Chromium MV3 end-to-end specifications**:
+The regression corpus stands at **373 Vitest tests across 54 test files (100% green)** plus **8 Playwright Chromium MV3 end-to-end specifications (9 tests)** with strict fail-closed network isolation:
 
-1. **Immutable Checkpoint Delivery & Lost-ACK Finalization (`tests/canonical-stream-coordinator.test.ts`):**
+1. **Immutable Checkpoint Delivery & Lost-ACK Finalization (`tests/canonical-stream-coordinator.test.ts`, `tests/canonical-checkpoint-integrity.test.ts`):**
    - Proves sealed canonical checkpoints never mutate `isFinal`, revisions, or sequences in-place during retries.
+   - Enforces runtime immutability via `deepFreeze()` and defensive cloning for all delivery callbacks.
    - Handles lost ACKs with incoming terminal events by committing sequence $N$ first, then cleanly emitting sequence $N+1$ with `isFinal = true` without sequence gaps or conflicts.
    - Validates Web Crypto SHA-256 fingerprint generation binding all canonical checkpoint attributes.
 
@@ -413,20 +414,23 @@ The regression corpus stands at **367 Vitest tests across 53 test files (100% gr
 
 3. **Zero Host-DOM Mutation & In-Memory Portal Lifecycle (`tests/recovery-overlay-portal.test.ts`):**
    - Verifies portal container is tracked strictly in-memory without host DOM queries or spoofing vulnerabilities.
-   - Confirms immediate cleanup and route isolation without leaving orphaned DOM nodes.
+   - Handles dynamic `document.body` replacement and bootstrap race conditions.
+   - Intercepts real SPA `history.pushState` and `navigation` API calls with instant pre-revocation of prior session state.
 
 4. **Atomic Recovery Metadata Query Benchmark (`tests/recovery-metadata-benchmark.test.ts`):**
    - Validates single-transaction retrieval of conversation recovery state (`getRecoveryMetadataForConversation`).
-   - Benchmark proves sub-millisecond execution for standard conversations and under 200ms for 5,000-message trees.
+   - Benchmark proves sub-millisecond execution for standard conversations and under 220ms for 5,000-message trees.
 
-5. **Browser Compatibility Harness (`tests/browser/*.spec.ts`):**
-   - Headless Chromium MV3 integration against synthetic offline fixtures (zero external network calls):
-     - `normal-generation.spec.ts`: Streaming SSE capture, monotonic checkpoints, side panel verification.
-     - `filter-replacement.spec.ts`: Pre-filter `lastGood` revision freezing, closed shadow root badge rendering, clipboard copy.
-     - `history-reconciliation.spec.ts`: Multi-batch staged ingest and atomic commit.
-     - `route-isolation.spec.ts`: Route epoch fencing and zero cross-session recovery leakage.
-     - `network-interruption.spec.ts`: Abort detection and durable partial checkpoint persistence.
-     - `degradation-profile.spec.ts`: High-throughput stress test with minimal CPU/memory overhead.
+5. **Fail-Closed Browser Compatibility Harness (`tests/browser/*.spec.ts`):**
+   - Headless Chromium MV3 integration against synthetic fixtures under a deny-by-default `FailClosedFixtureRouter`:
+     - `normal-generation.spec.ts`: Fetch streaming SSE capture, monotonic checkpoints, concrete pipeline stages.
+     - `xhr-generation.spec.ts`: `XMLHttpRequest` streaming capture, raw journal batches, canonical revisions.
+     - `filter-replacement.spec.ts`: Pre-filter `lastGood` revision freezing and authoritative `RecoveryEvent`.
+     - `history-reconciliation.spec.ts`: Dual-shape history reconciliation (`fragments[]` and flat `content`/`thinking_content`).
+     - `mv3-service-worker-lifecycle.spec.ts`: Service worker runtime epochs vs permanent durable IndexedDB archive evidence.
+     - `route-isolation.spec.ts`: Immediate pre-revocation on SPA `pushState` without artificial `popstate` events.
+     - `network-interruption.spec.ts`: Consumer abort detection and partial capture retention.
+     - `degradation-profile.spec.ts`: Unknown SSE protocol shape degradation with zero page disruption.
 
 > [!IMPORTANT]
 > Automated tests confirm structural and protocol compliance. For instructions on executing real-world manual acceptance testing against live `chat.deepseek.com`, see the [Live Acceptance Testing Guide](./LIVE_ACCEPTANCE.md) and [Live Acceptance Results Template](./LIVE_ACCEPTANCE_RESULTS_TEMPLATE.md).

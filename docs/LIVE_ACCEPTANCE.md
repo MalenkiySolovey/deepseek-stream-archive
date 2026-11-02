@@ -2,7 +2,7 @@
 
 > [!IMPORTANT]
 > **LIVE MANUAL VERIFICATION REQUIRED**  
-> Automated unit, fuzzing, mock-environment integration tests (367 passing across 53 test suites), and Playwright Chromium MV3 compatibility harness (6 passing end-to-end browser specifications) establish mathematical correctness of invariants and crash-durability. However, automated tests **cannot substitute for real user-authenticated sessions on `chat.deepseek.com`**.  
+> Automated unit, fuzzing, mock-environment integration tests (373 passing across 54 test suites), and Playwright Chromium MV3 compatibility harness (8 specifications, 9 passing end-to-end browser tests under strict fail-closed network isolation) establish mathematical correctness of invariants and crash-durability. However, automated tests **cannot substitute for real user-authenticated sessions on `chat.deepseek.com`**.  
 > This document specifies the exact protocol for conducting manual end-to-end acceptance testing against the live production DeepSeek web application.
 
 ---
