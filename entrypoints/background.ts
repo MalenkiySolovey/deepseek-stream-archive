@@ -31,6 +31,16 @@ import {
   MESSAGE_GET_STORAGE_USAGE_ESTIMATE,
   MESSAGE_RESTORE_PREVIEW,
   MESSAGE_EXECUTE_RESTORE,
+  MESSAGE_GET_STORAGE_MAINTENANCE_STATUS,
+  MESSAGE_REQUEST_STORAGE_PERSISTENCE,
+  MESSAGE_GET_RETENTION_SETTINGS,
+  MESSAGE_SET_RETENTION_SETTINGS,
+  MESSAGE_PREVIEW_CONVERSATION_DELETE,
+  MESSAGE_DELETE_CONVERSATION,
+  MESSAGE_PREVIEW_RAW_RETENTION,
+  MESSAGE_EXECUTE_RAW_RETENTION,
+  MESSAGE_CLEAR_RAW_EVIDENCE,
+  MESSAGE_CLEAR_ENTIRE_ARCHIVE,
   type SaveSyntheticBatchRequest,
   type SaveSyntheticBatchResponse,
   type FoundationStatusResponse,
@@ -79,7 +89,18 @@ import {
   validateCreatePortableBackupSnapshotRequest,
   validateRestorePreviewRequest,
   validateExecuteRestoreRequest,
+  validatePreviewConversationDeleteRequest,
+  validateDeleteConversationRequest,
+  validatePreviewRawRetentionRequest,
+  validateExecuteRawRetentionRequest,
+  validateSetRetentionSettingsRequest,
 } from '../src/bridge/validation';
+import {
+  getRetentionSettings,
+  saveRetentionSettings,
+  recordAutomaticCleanup,
+  requestStoragePersistence,
+} from '../src/storage/retention';
 import type { MaterializedPortableBackup } from '../src/backup/reader';
 import type { DeepSeekProtocolDiagnosticsData } from '../src/adapters/deepseek/protocol/types';
 import { DEFAULT_DEEPSEEK_PROFILE } from '../src/adapters/deepseek/compatibility/profiles';
@@ -254,6 +275,35 @@ export default defineBackground(() => {
       logger.warn('Failed to set Side Panel behavior', err);
     });
   }
+
+  // Opportunistic rate-limited automatic retention check (at most once every 24 hours, no alarms permission)
+  async function runOpportunisticRetentionCheck(): Promise<void> {
+    try {
+      const settings = await getRetentionSettings();
+      if (settings.rawRetention === 'forever') {
+        return;
+      }
+      const now = Date.now();
+      const oneDayMs = 24 * 60 * 60 * 1000;
+      if (settings.lastAutomaticCleanupAt && now - settings.lastAutomaticCleanupAt < oneDayMs) {
+        return;
+      }
+      if (activeTransportStreams.size > 0) {
+        return;
+      }
+      const plan = await storageRepo.buildRawRetentionPlan(settings.rawRetention, activeTransportStreams, now);
+      if (plan.candidateStreamKeys.length > 0) {
+        await storageRepo.executeRawRetentionPlan(plan, activeTransportStreams);
+        logger.info(`Opportunistic retention cleanup pruned ${plan.candidateStreamKeys.length} raw streams`);
+      }
+      await recordAutomaticCleanup(now);
+    } catch (err) {
+      logger.warn('Opportunistic retention check skipped/failed', err);
+    }
+  }
+
+  // Trigger opportunistic cleanup on background worker startup
+  runOpportunisticRetentionCheck().catch(() => {});
 
   // Handle incoming internal extension messages
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -782,6 +832,7 @@ export default defineBackground(() => {
             finalizedAt: result.finalizedAt,
           };
           sendResponse(res);
+          runOpportunisticRetentionCheck().catch(() => {});
         })
         .catch((err) => {
           const errCode = (err as any)?.code || 'database_unavailable';
@@ -1526,6 +1577,110 @@ export default defineBackground(() => {
           logger.error('Failed to execute restore', err);
           sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) });
         });
+      return true;
+    }
+
+    // ── Milestone 2E.3: Retention, Cleanup & Safe Deletion Handlers ──
+
+    if (message.type === MESSAGE_GET_STORAGE_MAINTENANCE_STATUS) {
+      storageRepo
+        .getStorageMaintenanceStatus()
+        .then((status) => sendResponse({ success: true, status }))
+        .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
+      return true;
+    }
+
+    if (message.type === MESSAGE_REQUEST_STORAGE_PERSISTENCE) {
+      requestStoragePersistence()
+        .then((res) => sendResponse({ success: true, granted: res.granted, persistenceStatus: res.persistenceStatus }))
+        .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
+      return true;
+    }
+
+    if (message.type === MESSAGE_GET_RETENTION_SETTINGS) {
+      getRetentionSettings()
+        .then((settings) => sendResponse({ success: true, settings }))
+        .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
+      return true;
+    }
+
+    if (message.type === MESSAGE_SET_RETENTION_SETTINGS) {
+      const validated = validateSetRetentionSettingsRequest(message);
+      if (!validated) {
+        sendResponse({ success: false, error: 'Invalid retention settings payload' });
+        return false;
+      }
+      saveRetentionSettings(validated.settings)
+        .then((settings) => {
+          sendResponse({ success: true, settings });
+        })
+        .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
+      return true;
+    }
+
+    if (message.type === MESSAGE_PREVIEW_CONVERSATION_DELETE) {
+      const validated = validatePreviewConversationDeleteRequest(message);
+      if (!validated) {
+        sendResponse({ success: false, error: 'Invalid preview conversation delete payload' });
+        return false;
+      }
+      storageRepo
+        .buildConversationDeletionPlan(validated.conversationId, activeTransportStreams)
+        .then((plan) => sendResponse({ success: true, plan }))
+        .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
+      return true;
+    }
+
+    if (message.type === MESSAGE_DELETE_CONVERSATION) {
+      const validated = validateDeleteConversationRequest(message);
+      if (!validated) {
+        sendResponse({ success: false, error: 'Invalid delete conversation payload' });
+        return false;
+      }
+      storageRepo
+        .deleteConversationCascade(validated.plan, activeTransportStreams)
+        .then(() => sendResponse({ success: true }))
+        .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
+      return true;
+    }
+
+    if (message.type === MESSAGE_PREVIEW_RAW_RETENTION) {
+      const validated = validatePreviewRawRetentionRequest(message);
+      const mode = validated?.mode;
+      const getModePromise = mode ? Promise.resolve(mode) : getRetentionSettings().then((s) => s.rawRetention);
+      getModePromise
+        .then((effMode) => storageRepo.buildRawRetentionPlan(effMode, activeTransportStreams))
+        .then((plan) => sendResponse({ success: true, plan }))
+        .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
+      return true;
+    }
+
+    if (message.type === MESSAGE_EXECUTE_RAW_RETENTION) {
+      const validated = validateExecuteRawRetentionRequest(message);
+      if (!validated) {
+        sendResponse({ success: false, error: 'Invalid execute raw retention payload' });
+        return false;
+      }
+      storageRepo
+        .executeRawRetentionPlan(validated.plan, activeTransportStreams)
+        .then((result) => sendResponse({ success: result.success, result, error: result.error }))
+        .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
+      return true;
+    }
+
+    if (message.type === MESSAGE_CLEAR_RAW_EVIDENCE) {
+      storageRepo
+        .clearRawEvidence(activeTransportStreams.size)
+        .then((result) => sendResponse({ success: result.success, result, error: result.error }))
+        .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
+      return true;
+    }
+
+    if (message.type === MESSAGE_CLEAR_ENTIRE_ARCHIVE) {
+      storageRepo
+        .clearEntireArchive(activeTransportStreams.size)
+        .then((res) => sendResponse({ success: res.success, durationMs: res.durationMs }))
+        .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
       return true;
     }
 

@@ -58,3 +58,28 @@ entrypoints/sidepanel/
 2. **Zero `innerHTML` / Zero `eval`:** Text and code formatting use safe text interpolation in Svelte 5. Code fences and paragraphs are parsed into structured tokens and bound through text nodes.
 3. **Local-First Storage:** All queries run against local IndexedDB (`StreamArchiveDB` v8). No external network requests are made.
 4. **Strict MV3 Permissions:** Operates strictly within `"storage"` and `"sidePanel"` permissions.
+
+---
+
+## 4. Storage Management & Safe Deletion UI (Milestone 2E.3)
+
+### 4.1 Single-Conversation Deletion Flow
+- Accessible directly from `ConversationView` header via the **Delete** button.
+- **2-Step Preview Modal (`#delete-conversation-modal`):**
+  - Displays conversation title, message and revision counts to be removed, and referenced raw stream records to be purged.
+  - Prominently offers a **"Download Safety Backup First"** button triggering an atomic `.streamarchive.jsonl.gz` export before irreversible deletion.
+  - Enforces active stream guards and concurrency stale barriers (`updatedAt`).
+
+### 4.2 Storage Observability & Persistence Panel (Settings Tab)
+- **Native Usage & Quota Bar:** Surfaces live disk usage and quota percentage from `navigator.storage.estimate()`. Rejects speculative byte breakdowns in favor of browser truth.
+- **Durable Persistence Status:** Visual indicator displaying whether the origin is granted durable storage or is best-effort. Includes a one-click **"Protect Local Archive"** button invoking `navigator.storage.persist()`.
+- **Archive Composition Breakdown:** Exact entity counts from IndexedDB:
+  - Canonical: Conversations, Messages, Revisions.
+  - Raw Evidence: Raw Streams, Raw Batches, Captured Characters.
+
+### 4.3 Retention Controls & Maintenance Modals
+- **Retention Radio Selector:** Configures raw stream age pruning (`forever` [default], `30`, `90`, `180` days) with immediate local saving.
+- **Clean Up Now (`#retention-cleanup-modal`):** Previews candidate stream keys and protected streams under the current policy, with confirmation action.
+- **Delete Raw Evidence (`#purge-raw-modal`):** Reclaims disk space by purging all raw streams and batches while preserving 100% of canonical conversations and pre-filter recoveries.
+- **Delete All Local Archive Data (`#clear-archive-modal`):** Wipes all 9 IndexedDB stores to return the extension to a clean baseline. Requires an explicit confirmation checkbox before the action button is enabled.
+- **Local Scope Notice:** Clearly reminds the user that local deletions do not alter conversations hosted on DeepSeek servers.

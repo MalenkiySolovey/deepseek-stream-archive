@@ -543,5 +543,48 @@ The automated regression corpus stands at **452 Vitest tests across 66 test file
    - Chromium MV3 browser test: generates Conversation Beta, exports backup, resets to Conversation Alpha, uploads Backup Beta, selects Merge mode, executes restore, and confirms both Conversation Alpha and Conversation Beta are present.
    - Performs a second merge upload of the exact same backup file, verifying complete idempotency and zero conflict errors.
 
+---
+
+## 11. Storage Observability, Retention & Safe Deletion Test Suite (Milestone 2E.3)
+
+1. **Pure Retention Policy Unit Suite (`tests/retention-policy.test.ts`):**
+   - 10 unit tests verifying deterministic evaluation of `evaluateRawStreamRetention` with clock injection:
+     - Policy disabled (`forever`) retains all streams.
+     - Active streams are shielded.
+     - Recovery provenance (`filtered` status, `RecoveryEvent`, `isLastGood`) is shielded indefinitely.
+     - Forensic anomalies (non-intact integrity, durability gaps, dropped characters, terminal errors, unmatched captures) are shielded.
+     - Non-shielded streams older than cutoff are marked eligible.
+     - Non-shielded streams younger than cutoff are marked too recent.
+
+2. **Single-Conversation Safe Deletion Engine (`tests/conversation-deletion.test.ts`):**
+   - 6 unit tests verifying cascade planning and atomic rollback:
+     - Preview plan accurately counts messages, revisions, recovery events, raw streams, batches, and checkpoints.
+     - Stale conversation barrier aborts deletion when `updatedAt` mismatches.
+     - Active stream guard aborts deletion when in-flight streams exist.
+     - Cascade deletion removes all related records across 7 stores.
+     - Other conversations, messages, and raw streams remain 100% intact.
+     - Rollback verification via simulated abort leaves pre-deletion state intact.
+
+3. **Archive Maintenance & Safe Cleanup Engine (`tests/archive-cleanup.test.ts`):**
+   - 7 unit tests verifying raw retention plans and multi-store cleanups:
+     - `buildRawRetentionPlan` correctly identifies eligible streams while shielding protected streams.
+     - `executeRawRetentionPlan` deletes candidate raw streams and batches in a single atomic transaction.
+     - `clearRawEvidence` purges all raw streams and batches while preserving 100% of canonical conversations, messages, revisions, and recovery events.
+     - `clearEntireArchive` clears all 9 IndexedDB stores and verifies 0 records remain.
+     - Rejects execution if active streams are present.
+
+4. **Retention Engine Performance & Scalability Benchmark (`tests/retention-benchmark.test.ts`):**
+   - Evaluates planning performance on an archive of 500 raw streams (300 expired eligible, 200 shielded/recent).
+   - Validates that parallel store reads and metadata batch count acceleration achieve sub-100ms planning time (~3ms actual).
+
+5. **Browser E2E Raw Retention & Storage Observability (`tests/browser/storage-retention.spec.ts`):**
+   - Chromium MV3 browser test: queries native storage usage via `navigator.storage.estimate()`, tests persistence toggle, configures 30-day retention, triggers Clean Up Now preview modal, confirms execution, and directly asserts IndexedDB store counts to verify only eligible streams were deleted.
+
+6. **Browser E2E Safe Conversation Deletion (`tests/browser/conversation-deletion.spec.ts`):**
+   - Chromium MV3 browser test: seeds two separate conversations with messages and raw streams, opens targeted conversation, opens deletion modal, verifies preview statistics, confirms deletion, and verifies that the second conversation and its raw streams remain completely intact.
+
+7. **Browser E2E Clear Entire Archive (`tests/browser/clear-archive.spec.ts`):**
+   - Chromium MV3 browser test: seeds all 9 IndexedDB stores with conversations, raw streams, checkpoints, and history staging data; navigates to Settings; tests required confirmation checkbox; executes Clear All Archive; and verifies all 9 stores are emptied while user settings in `chrome.storage.local` are preserved.
+
 > [!IMPORTANT]
 > Automated tests confirm structural and protocol compliance. For instructions on executing real-world manual acceptance testing against live `chat.deepseek.com`, see the [Live Acceptance Testing Guide](./LIVE_ACCEPTANCE.md) and [Live Acceptance Results Template](./LIVE_ACCEPTANCE_RESULTS_TEMPLATE.md).

@@ -167,5 +167,14 @@ export interface StorageRepository {
     activeStreamsCount: number
   ): Promise<import('../../restore/types').RestoreResult>;
   getCurrentStoreCounts(): Promise<import('../../backup/format').PortableBackupStoreCounts>;
+
+  // Retention, Cleanup & Safe Deletion (Milestone 2E.3)
+  buildConversationDeletionPlan(conversationId: string, activeStreamKeys: Set<string>): Promise<import('../../storage/retention').ConversationDeletionPlan>;
+  deleteConversationCascade(plan: import('../../storage/retention').ConversationDeletionPlan, activeStreamKeys: Set<string>): Promise<void>;
+  buildRawRetentionPlan(mode: import('../../storage/retention').RawRetentionMode, activeStreamKeys: Set<string>, now?: number): Promise<import('../../storage/retention').RawRetentionPlan>;
+  executeRawRetentionPlan(plan: import('../../storage/retention').RawRetentionPlan, activeStreamKeys: Set<string>): Promise<import('../../storage/retention').ArchiveCleanupResult>;
+  clearRawEvidence(activeStreamCount: number): Promise<import('../../storage/retention').ArchiveCleanupResult>;
+  clearEntireArchive(activeStreamCount: number): Promise<{ success: boolean; durationMs: number }>;
+  getStorageMaintenanceStatus(): Promise<import('../../storage/retention').StorageMaintenanceStatus>;
 }
 

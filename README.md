@@ -6,8 +6,8 @@
 
 ![Platform](https://img.shields.io/badge/platform-Chrome%20%7C%20Chromium%20MV3-4285F4?logo=googlechrome&logoColor=white)
 ![Framework](https://img.shields.io/badge/framework-WXT%20%2B%20Svelte%205-FF3E00?logo=svelte&logoColor=white)
-![Tests](https://img.shields.io/badge/unit%20tests-452%20passing-3DDC84)
-![E2E Tests](https://img.shields.io/badge/playwright%20e2e-14%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/unit%20tests-473%20passing-3DDC84)
+![E2E Tests](https://img.shields.io/badge/playwright%20e2e-17%20passing-brightgreen)
 ![Status](https://img.shields.io/badge/live%20compatibility-baseline%20accepted-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -96,6 +96,15 @@ Other frequent loss vectors include:
 - **Portable Full Backup:** Creates compressed, versioned full-archive backups (`.streamarchive.jsonl.gz`) via native `CompressionStream('gzip')` without external libraries or `chrome.downloads` permission.
 - **Safe Atomic Restore:** Fully validates imported backup archives with streaming decompression bomb protection (250 MiB ceiling), field schema validation, and pre-commit referential integrity checks (acyclic message trees, conversation scoping).
 - **Two Restore Modes:** Supports **Replace Archive** (atomic single-transaction replacement across all 9 stores with 100% rollback guarantee) and **Safe Merge Archive** (strict primary-key union with conflict and identity collision prevention).
+
+### 10. Storage Observability, Retention & Safe Deletion (Milestone 2E.3)
+- **Native Storage Observability:** Monitors browser storage usage and quota via `navigator.storage.estimate()` alongside exact entity counts directly from IndexedDB.
+- **Durable Persistence Request:** Protects local archive data from browser eviction via one-click `navigator.storage.persist()`.
+- **Configurable Raw Retention:** Automatic age-pruning for raw HTTP transport streams (`forever` [default], 30, 90, 180 days). Canonical conversation history is **never** deleted automatically.
+- **Protected Evidence Shield:** Pure policy engine indefinitely shields in-flight streams, pre-filter recovery provenance (`status === 'filtered'`, `RecoveryEvent`, `isLastGood`), and forensic capture anomalies.
+- **Safe Single-Conversation Deletion:** 2-step preview modal with active stream guards, concurrency stale barriers (`updatedAt`), and atomic multi-store rollback (`tx.abort()`).
+- **Archive Maintenance & Purge:** Fast maintenance actions to clean up expired raw streams, purge all raw evidence while preserving conversations, or reset the local archive.
+- **Local Storage Scope Notice:** All deletions operate strictly inside the local browser storage and never alter data on DeepSeek servers.
 
 ---
 
@@ -204,7 +213,7 @@ For manual live testing records and protocol details, see the [Live Acceptance T
 StreamArchive maintains an exhaustive multi-tier automated test suite covering chunk boundary fuzzing, protocol decoding, censorship interception, database migrations, and a headless Chromium MV3 compatibility harness:
 
 ```bash
-# Run unit and integration tests (66 test files, 452 tests)
+# Run unit and integration tests (70 test files, 473 tests)
 pnpm run test
 
 # Run TypeScript typecheck
@@ -213,7 +222,7 @@ pnpm run typecheck
 # Build unpacked Chrome MV3 extension
 pnpm run build
 
-# Run Playwright Chromium MV3 browser compatibility harness (13 specs, 14 tests, fail-closed network isolation)
+# Run Playwright Chromium MV3 browser compatibility harness (16 specs, 17 tests, fail-closed network isolation)
 pnpm run test:e2e
 
 # Start WXT development server with live-reloading

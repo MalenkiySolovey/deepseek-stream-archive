@@ -213,3 +213,28 @@ The Raw Journal acts as the forensic evidence foundation for the Canonical Model
 - **Degraded Streams:** Streams marked with `integrity: 'gap_detected'` remain securely stored in the Raw Journal for forensic inspection but are prevented from creating corrupted or partial canonical messages.
 - Detailed canonical model specifications are documented in [CANONICAL_MODEL.md](./CANONICAL_MODEL.md) and [ADR 0015](./ADR/0015-canonical-identity-and-passive-history-reconciliation.md).
 
+---
+
+## 7. Raw Evidence Retention & Safe Lifecycle Management (Milestone 2E.3)
+
+While the Raw Journal serves as an immutable forensic record during generation, unmanaged retention of raw chunks across thousands of streams can lead to storage pressure. Milestone 2E.3 provides governed lifecycle management:
+
+### 7.1 Retention Modes & Default Permanence
+Configured via `chrome.storage.local` under the `rawRetention` key:
+- `forever` (Default): All raw streams and batches are retained indefinitely.
+- `30`: Raw streams older than 30 days are eligible for pruning.
+- `90`: Raw streams older than 90 days are eligible for pruning.
+- `180`: Raw streams older than 180 days are eligible for pruning.
+
+### 7.2 Protected Evidence Shield
+Age alone never causes a raw stream to be pruned. The deterministic `evaluateRawStreamRetention` policy engine enforces the Protected Evidence Shield:
+1. **Active Stream Shield:** Active streams currently receiving batches are shielded.
+2. **Recovery Provenance Shield:** Any stream referenced by a message with `status === 'filtered'`, a `RecoveryEvent`, or a revision marked `isLastGood === true` is shielded indefinitely to preserve verifiable proof of recovered pre-filter text.
+3. **Forensic Anomaly Shield:** Any stream with non-intact integrity (`integrity !== 'intact'`), durability gaps, dropped characters, terminal error states (`aborted`, `error`, `degraded`), or unmatched captures is preserved for diagnostics.
+4. **Age Cutoff:** Eligible streams must have `openedAt <= now - days * 86,400,000` with zero shield violations.
+
+### 7.3 Decoupling from Canonical Records
+Pruning raw streams and batches (`raw_streams`, `raw_stream_batches`) has **zero effect** on canonical conversation history. Canonical messages, revisions, and recovery events remain 100% readable, searchable, and exportable in the Side Panel even after their underlying raw chunks have been pruned.
+
+For complete retention mechanics, see [RETENTION_AND_DELETION.md](./RETENTION_AND_DELETION.md) and [ADR 0025](./ADR/0025-retention-cleanup-and-safe-deletion.md).
+

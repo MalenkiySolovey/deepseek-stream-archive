@@ -4,13 +4,20 @@
     MESSAGE_GET_ARCHIVE_CONVERSATION,
     MESSAGE_GET_REVISION_CONTENT,
     MESSAGE_GET_CONVERSATION_EXPORT,
+    MESSAGE_PREVIEW_CONVERSATION_DELETE,
+    MESSAGE_DELETE_CONVERSATION,
     type GetArchiveConversationRequest,
     type GetArchiveConversationResponse,
     type GetRevisionContentRequest,
     type GetRevisionContentResponse,
     type GetConversationExportRequest,
     type GetConversationExportResponse,
+    type PreviewConversationDeleteRequest,
+    type PreviewConversationDeleteResponse,
+    type DeleteConversationRequest,
+    type DeleteConversationResponse,
   } from '../../../src/bridge/messages';
+  import type { ConversationDeletionPlan } from '../../../src/storage/retention';
   import type {
     ArchiveConversationDetail,
     ArchiveMessageSummary,
@@ -136,6 +143,90 @@
     } finally {
       isExporting = false;
     }
+  }
+
+  // Milestone 2E.3: Deletion State & Handlers
+  let showDeleteModal = $state(false);
+  let deletePlan = $state<ConversationDeletionPlan | null>(null);
+  let isDeleting = $state(false);
+  let deleteError = $state<string | null>(null);
+
+  async function handleOpenDeleteModal() {
+    if (!detail) return;
+    deleteError = null;
+    isDeleting = false;
+    try {
+      const res = await new Promise<PreviewConversationDeleteResponse>((resolve) => {
+        if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+          const req: PreviewConversationDeleteRequest = {
+            type: MESSAGE_PREVIEW_CONVERSATION_DELETE,
+            conversationId: detail!.conversation.id,
+          };
+          chrome.runtime.sendMessage(req, (r) => {
+            resolve(r || { success: false, error: 'No response from background worker' });
+          });
+        } else {
+          resolve({ success: false, error: 'Extension runtime unavailable' });
+        }
+      });
+      if (res && res.success && res.plan) {
+        deletePlan = res.plan;
+        showDeleteModal = true;
+      } else {
+        deleteError = res?.error || 'Failed to preview conversation deletion';
+        showDeleteModal = true;
+      }
+    } catch (err) {
+      deleteError = (err as Error).message;
+      showDeleteModal = true;
+    }
+  }
+
+  async function handleConfirmDelete() {
+    if (!deletePlan) return;
+    isDeleting = true;
+    deleteError = null;
+    try {
+      const res = await new Promise<DeleteConversationResponse>((resolve) => {
+        if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+          const req: DeleteConversationRequest = {
+            type: MESSAGE_DELETE_CONVERSATION,
+            plan: deletePlan!,
+          };
+          chrome.runtime.sendMessage(req, (r) => {
+            resolve(r || { success: false, error: 'No response from background worker' });
+          });
+        } else {
+          resolve({ success: false, error: 'Extension runtime unavailable' });
+        }
+      });
+
+      if (res && res.success) {
+        showDeleteModal = false;
+        onBack();
+      } else {
+        if (res?.error === 'delete_target_changed_since_preview') {
+          deleteError = t.deleteTargetChangedError;
+        } else if (res?.error === 'active_stream_in_progress') {
+          deleteError = t.deleteActiveStreamError;
+        } else {
+          deleteError = res?.error || 'Failed to delete conversation';
+        }
+      }
+    } catch (err) {
+      deleteError = (err as Error).message;
+    } finally {
+      isDeleting = false;
+    }
+  }
+
+  async function handleCreateSafetyBackupBeforeDelete() {
+    exportFormat = 'json';
+    exportBranches = 'all';
+    exportIncludeReasoning = true;
+    exportIncludeRevisions = true;
+    exportIncludeRecovery = true;
+    await performExport();
   }
 
   onMount(() => {
@@ -318,14 +409,25 @@
       </div>
     </div>
     {#if detail}
-      <button
-        class="export-header-btn"
-        type="button"
-        onclick={() => { showExportModal = true; exportStatusMessage = null; }}
-        title={t.exportConversation}
-      >
-        📤 {t.exportBtn}
-      </button>
+      <div class="header-actions">
+        <button
+          class="export-header-btn"
+          type="button"
+          onclick={() => { showExportModal = true; exportStatusMessage = null; }}
+          title={t.exportConversation}
+        >
+          📤 {t.exportBtn}
+        </button>
+        <button
+          class="delete-header-btn"
+          id="delete-conversation-btn"
+          type="button"
+          onclick={handleOpenDeleteModal}
+          title={t.deleteConversation}
+        >
+          🗑️ {t.deleteBtn}
+        </button>
+      </div>
     {/if}
   </div>
 
@@ -643,6 +745,103 @@
       </div>
     </div>
   {/if}
+
+  {#if showDeleteModal && deletePlan}
+    <div
+      class="modal-backdrop"
+      role="presentation"
+      onclick={() => (showDeleteModal = false)}
+      onkeydown={(e) => { if (e.key === 'Escape') showDeleteModal = false; }}
+    >
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <div
+        class="modal-card"
+        id="delete-conversation-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t.deleteModalTitle}
+        tabindex="-1"
+        onclick={(e) => e.stopPropagation()}
+      >
+        <div class="modal-header">
+          <h3 class="modal-title">🗑️ {t.deleteModalTitle}</h3>
+          <button class="modal-close" type="button" onclick={() => (showDeleteModal = false)}>✕</button>
+        </div>
+
+        <div class="modal-body">
+          <div class="delete-warning-banner">
+            <span class="warning-icon">⚠️</span>
+            <p>{t.deleteWarningNotice}</p>
+          </div>
+
+          <div class="delete-plan-summary">
+            <h4 class="convo-name">{deletePlan.title}</h4>
+            <div class="delete-counts-grid">
+              <div class="count-pill">
+                <span class="count-val">{deletePlan.messageCount}</span>
+                <span class="count-lbl">{t.deleteSummaryMsgs}</span>
+              </div>
+              <div class="count-pill">
+                <span class="count-val">{deletePlan.revisionCount}</span>
+                <span class="count-lbl">{t.deleteSummaryRevs}</span>
+              </div>
+              <div class="count-pill">
+                <span class="count-val">{deletePlan.recoveryEventCount}</span>
+                <span class="count-lbl">{t.deleteSummaryEvents}</span>
+              </div>
+              <div class="count-pill">
+                <span class="count-val">{deletePlan.rawStreamCount}</span>
+                <span class="count-lbl">{t.deleteSummaryStreams}</span>
+              </div>
+              <div class="count-pill">
+                <span class="count-val">{deletePlan.rawBatchCount}</span>
+                <span class="count-lbl">{t.deleteSummaryBatches}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="safety-backup-action" style="margin-top: 1rem;">
+            <button
+              class="modal-btn secondary"
+              type="button"
+              onclick={handleCreateSafetyBackupBeforeDelete}
+              disabled={isDeleting}
+            >
+              💾 {t.deleteSafetyBackupBtn}
+            </button>
+          </div>
+
+          {#if deleteError}
+            <div class="delete-error-banner" style="margin-top: 0.75rem; color: #f87171; font-size: 0.82rem; background: rgba(239, 68, 68, 0.1); padding: 0.5rem; border-radius: 4px;">
+              ⚠️ {deleteError}
+            </div>
+          {/if}
+        </div>
+
+        <div class="modal-footer">
+          <button
+            class="modal-btn secondary"
+            type="button"
+            onclick={() => (showDeleteModal = false)}
+            disabled={isDeleting}
+          >
+            {t.deleteCancelBtn}
+          </button>
+          <button
+            class="modal-btn danger"
+            id="confirm-delete-btn"
+            type="button"
+            disabled={isDeleting}
+            onclick={handleConfirmDelete}
+            style="background: #dc2626; color: white;"
+          >
+            {isDeleting ? t.deleteInProgress : t.deleteConfirmBtn}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -662,10 +861,16 @@
     z-index: 10;
   }
 
-  .export-header-btn {
+  .header-actions {
     position: absolute;
     right: 1rem;
     top: 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .export-header-btn {
     padding: 0.3rem 0.65rem;
     border-radius: 4px;
     background: #1e293b;
@@ -683,6 +888,81 @@
   .export-header-btn:hover {
     background: #334155;
     border-color: #475569;
+  }
+
+  .delete-header-btn {
+    padding: 0.3rem 0.65rem;
+    border-radius: 4px;
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    color: #f87171;
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    transition: background 0.15s, border-color 0.15s;
+  }
+
+  .delete-header-btn:hover {
+    background: rgba(239, 68, 68, 0.2);
+    border-color: #ef4444;
+  }
+
+  .delete-warning-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    background: rgba(239, 68, 68, 0.12);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    border-radius: 6px;
+    padding: 0.75rem;
+    margin-bottom: 1rem;
+    color: #fca5a5;
+    font-size: 0.82rem;
+    line-height: 1.4;
+  }
+
+  .delete-plan-summary {
+    background: #0f172a;
+    border: 1px solid #1e293b;
+    border-radius: 6px;
+    padding: 0.75rem;
+  }
+
+  .convo-name {
+    margin: 0 0 0.5rem 0;
+    font-size: 0.88rem;
+    color: #e2e8f0;
+    font-weight: 600;
+  }
+
+  .delete-counts-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+    gap: 0.5rem;
+  }
+
+  .count-pill {
+    background: #1e293b;
+    border-radius: 4px;
+    padding: 0.4rem;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .count-val {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: #38bdf8;
+  }
+
+  .count-lbl {
+    font-size: 0.7rem;
+    color: #94a3b8;
   }
 
   .modal-backdrop {

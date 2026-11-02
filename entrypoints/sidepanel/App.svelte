@@ -8,11 +8,32 @@
     MESSAGE_GET_STORAGE_USAGE_ESTIMATE,
     MESSAGE_RESTORE_PREVIEW,
     MESSAGE_EXECUTE_RESTORE,
+    MESSAGE_GET_STORAGE_MAINTENANCE_STATUS,
+    MESSAGE_REQUEST_STORAGE_PERSISTENCE,
+    MESSAGE_GET_RETENTION_SETTINGS,
+    MESSAGE_SET_RETENTION_SETTINGS,
+    MESSAGE_PREVIEW_RAW_RETENTION,
+    MESSAGE_EXECUTE_RAW_RETENTION,
+    MESSAGE_CLEAR_RAW_EVIDENCE,
+    MESSAGE_CLEAR_ENTIRE_ARCHIVE,
     type CreatePortableBackupSnapshotResponse,
     type GetStorageUsageEstimateResponse,
     type RestorePreviewResponse,
     type ExecuteRestoreResponse,
+    type GetStorageMaintenanceStatusResponse,
+    type RequestStoragePersistenceResponse,
+    type SetRetentionSettingsResponse,
+    type PreviewRawRetentionResponse,
+    type ExecuteRawRetentionResponse,
+    type ClearRawEvidenceResponse,
+    type ClearEntireArchiveResponse,
   } from '../../src/bridge/messages';
+  import type {
+    StorageMaintenanceStatus,
+    RawRetentionMode,
+    RawRetentionPlan,
+    ArchiveCleanupResult,
+  } from '../../src/storage/retention';
   import {
     buildCompressedBackup,
     PORTABLE_BACKUP_EXTENSION,
@@ -56,10 +77,179 @@
   let selectedBackupFileName = $state<string | null>(null);
   let cachedBackupBytes = $state<Uint8Array | null>(null);
 
+  // Milestone 2E.3: Storage & Retention State
+  let maintenanceStatus = $state<StorageMaintenanceStatus | null>(null);
+  let maintenanceLoading = $state<boolean>(false);
+  let maintenanceError = $state<string | null>(null);
+
+  // Retention cleanup preview modal
+  let showCleanupModal = $state<boolean>(false);
+  let cleanupPlan = $state<RawRetentionPlan | null>(null);
+  let cleanupLoading = $state<boolean>(false);
+  let cleanupFeedback = $state<string | null>(null);
+
+  // Purge raw evidence modal
+  let showPurgeRawModal = $state<boolean>(false);
+  let purgeRawLoading = $state<boolean>(false);
+  let purgeRawFeedback = $state<string | null>(null);
+
+  // Clear all archive modal
+  let showClearArchiveModal = $state<boolean>(false);
+  let clearArchiveConfirmed = $state<boolean>(false);
+  let clearArchiveLoading = $state<boolean>(false);
+  let clearArchiveFeedback = $state<string | null>(null);
+
   function switchTab(tab: ActiveTab) {
     activeTab = tab;
     if (tab === 'settings') {
       loadStorageEstimate();
+      loadMaintenanceStatus();
+    }
+  }
+
+  function loadMaintenanceStatus() {
+    maintenanceLoading = true;
+    maintenanceError = null;
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      chrome.runtime.sendMessage(
+        { type: MESSAGE_GET_STORAGE_MAINTENANCE_STATUS },
+        (res: GetStorageMaintenanceStatusResponse) => {
+          if (res && res.success && res.status) {
+            maintenanceStatus = res.status;
+            if (res.status.storageEstimate.usageBytes !== undefined) {
+              storageUsageBytes = res.status.storageEstimate.usageBytes;
+            }
+          } else {
+            maintenanceError = res?.error || 'Failed to load storage status';
+          }
+          maintenanceLoading = false;
+        }
+      );
+    } else {
+      maintenanceLoading = false;
+    }
+  }
+
+  function handleRetentionModeChange(newMode: RawRetentionMode) {
+    if (!maintenanceStatus) return;
+    maintenanceStatus.rawRetention = newMode;
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      chrome.runtime.sendMessage(
+        {
+          type: MESSAGE_SET_RETENTION_SETTINGS,
+          settings: { rawRetention: newMode },
+        },
+        (res: SetRetentionSettingsResponse) => {
+          if (res && res.success && res.settings && maintenanceStatus) {
+            maintenanceStatus.rawRetention = res.settings.rawRetention;
+          }
+        }
+      );
+    }
+  }
+
+  function handleRequestPersistence() {
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      chrome.runtime.sendMessage(
+        { type: MESSAGE_REQUEST_STORAGE_PERSISTENCE },
+        (res: RequestStoragePersistenceResponse) => {
+          if (res && res.success && maintenanceStatus) {
+            maintenanceStatus.persistenceStatus = res.persistenceStatus || (res.granted ? 'granted' : 'not_granted');
+          }
+        }
+      );
+    }
+  }
+
+  function handleOpenCleanupModal() {
+    cleanupLoading = true;
+    cleanupFeedback = null;
+    cleanupPlan = null;
+    showCleanupModal = true;
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      chrome.runtime.sendMessage(
+        {
+          type: MESSAGE_PREVIEW_RAW_RETENTION,
+          mode: maintenanceStatus?.rawRetention,
+        },
+        (res: PreviewRawRetentionResponse) => {
+          cleanupLoading = false;
+          if (res && res.success && res.plan) {
+            cleanupPlan = res.plan;
+          } else {
+            cleanupFeedback = res?.error || 'Failed to build retention plan';
+          }
+        }
+      );
+    } else {
+      cleanupLoading = false;
+    }
+  }
+
+  function handleExecuteCleanup() {
+    if (!cleanupPlan) return;
+    cleanupLoading = true;
+    cleanupFeedback = null;
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      chrome.runtime.sendMessage(
+        { type: MESSAGE_EXECUTE_RAW_RETENTION, plan: cleanupPlan },
+        (res: ExecuteRawRetentionResponse) => {
+          cleanupLoading = false;
+          if (res && res.success && res.result) {
+            cleanupFeedback = t.cleanupSuccess
+              .replace('{streams}', String(res.result.deletedStreamCount))
+              .replace('{batches}', String(res.result.deletedBatchCount));
+            loadMaintenanceStatus();
+          } else {
+            cleanupFeedback = res?.error || 'Failed to execute cleanup';
+          }
+        }
+      );
+    } else {
+      cleanupLoading = false;
+    }
+  }
+
+  function handleExecutePurgeRaw() {
+    purgeRawLoading = true;
+    purgeRawFeedback = null;
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      chrome.runtime.sendMessage(
+        { type: MESSAGE_CLEAR_RAW_EVIDENCE },
+        (res: ClearRawEvidenceResponse) => {
+          purgeRawLoading = false;
+          if (res && res.success) {
+            purgeRawFeedback = t.purgeRawSuccess;
+            loadMaintenanceStatus();
+          } else {
+            purgeRawFeedback = res?.error || 'Failed to purge raw evidence';
+          }
+        }
+      );
+    } else {
+      purgeRawLoading = false;
+    }
+  }
+
+  function handleExecuteClearArchive() {
+    if (!clearArchiveConfirmed) return;
+    clearArchiveLoading = true;
+    clearArchiveFeedback = null;
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      chrome.runtime.sendMessage(
+        { type: MESSAGE_CLEAR_ENTIRE_ARCHIVE },
+        (res: ClearEntireArchiveResponse) => {
+          clearArchiveLoading = false;
+          if (res && res.success) {
+            clearArchiveFeedback = t.clearArchiveSuccess;
+            loadMaintenanceStatus();
+          } else {
+            clearArchiveFeedback = res?.error || 'Failed to clear archive';
+          }
+        }
+      );
+    } else {
+      clearArchiveLoading = false;
     }
   }
 
@@ -669,6 +859,195 @@
           {/if}
         </div>
 
+        <!-- Milestone 2E.3: Storage & Retention Management -->
+        <div class="settings-card" id="storage-management-card">
+          <h3 class="card-subtitle">💾 {t.storageManagementTitle}</h3>
+          <p class="about-desc">{t.storageManagementDesc}</p>
+
+          {#if maintenanceStatus}
+            <!-- Storage Usage & Quota Bar -->
+            <div class="storage-stats-container">
+              <div class="stat-row">
+                <span class="stat-label">📊 {t.storageUsageLabel}:</span>
+                <span class="stat-value">
+                  {#if maintenanceStatus.storageEstimate.usageBytes !== undefined}
+                    ~{formatBytes(maintenanceStatus.storageEstimate.usageBytes)}
+                    {#if maintenanceStatus.storageEstimate.quotaBytes !== undefined}
+                      / {formatBytes(maintenanceStatus.storageEstimate.quotaBytes)}
+                    {/if}
+                    {#if maintenanceStatus.storageEstimate.percentage !== undefined}
+                      ({maintenanceStatus.storageEstimate.percentage}% {t.storageQuotaPercent})
+                    {/if}
+                  {:else}
+                    N/A
+                  {/if}
+                </span>
+              </div>
+
+              <!-- Persistence Status Badge -->
+              <div class="stat-row" style="margin-top: 0.5rem;">
+                <span class="stat-label">🛡️ {t.storagePersistenceLabel}:</span>
+                <div class="persistence-status-box">
+                  {#if maintenanceStatus.persistenceStatus === 'granted'}
+                    <span class="badge success">✓ {t.storagePersistenceGranted}</span>
+                  {:else if maintenanceStatus.persistenceStatus === 'not_granted'}
+                    <span class="badge warning">⚠️ {t.storagePersistenceNotGranted}</span>
+                    <button
+                      class="backup-btn secondary small"
+                      id="request-persistence-btn"
+                      type="button"
+                      onclick={handleRequestPersistence}
+                    >
+                      {t.storageRequestPersistenceBtn}
+                    </button>
+                  {:else}
+                    <span class="badge neutral">{t.storagePersistenceUnsupported}</span>
+                  {/if}
+                </div>
+              </div>
+
+              <div class="storage-approx-notice">
+                ℹ️ {t.storageApproximateNotice}
+              </div>
+
+              <!-- Composition Breakdown Grid -->
+              <div class="archive-composition-box">
+                <h4 class="comp-title">{t.storageCanonicalVsRawTitle}</h4>
+                <div class="comp-grid">
+                  <div class="comp-card canonical">
+                    <span class="comp-tag">{t.storageCanonicalRecords}</span>
+                    <div class="comp-item">
+                      <span>{t.backupSummaryConvs}:</span>
+                      <strong>{maintenanceStatus.counts.conversations}</strong>
+                    </div>
+                    <div class="comp-item">
+                      <span>{t.backupSummaryMsgs}:</span>
+                      <strong>{maintenanceStatus.counts.messages}</strong>
+                    </div>
+                    <div class="comp-item">
+                      <span>{t.backupSummaryRevs}:</span>
+                      <strong>{maintenanceStatus.counts.revisions}</strong>
+                    </div>
+                  </div>
+                  <div class="comp-card raw">
+                    <span class="comp-tag">{t.storageRawRecords}</span>
+                    <div class="comp-item">
+                      <span>{t.backupSummaryStreams}:</span>
+                      <strong>{maintenanceStatus.counts.raw_streams}</strong>
+                    </div>
+                    <div class="comp-item">
+                      <span>{t.backupSummaryBatches}:</span>
+                      <strong>{maintenanceStatus.counts.raw_stream_batches}</strong>
+                    </div>
+                    <div class="comp-item">
+                      <span>{t.storageTotalChars}:</span>
+                      <strong>{maintenanceStatus.totalRawCharacters.toLocaleString()}</strong>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Retention Policy Controls -->
+            <div class="retention-policy-box">
+              <h4 class="comp-title">{t.retentionSectionTitle}</h4>
+              <p class="about-desc">{t.retentionSectionDesc}</p>
+
+              <div class="retention-radio-group">
+                <label class="radio-label">
+                  <input
+                    type="radio"
+                    name="rawRetentionMode"
+                    value="forever"
+                    checked={maintenanceStatus.rawRetention === 'forever'}
+                    onchange={() => handleRetentionModeChange('forever')}
+                  />
+                  <span>{t.retentionModeForever}</span>
+                </label>
+                <label class="radio-label">
+                  <input
+                    type="radio"
+                    name="rawRetentionMode"
+                    value="30"
+                    checked={maintenanceStatus.rawRetention === '30'}
+                    onchange={() => handleRetentionModeChange('30')}
+                  />
+                  <span>{t.retentionMode30}</span>
+                </label>
+                <label class="radio-label">
+                  <input
+                    type="radio"
+                    name="rawRetentionMode"
+                    value="90"
+                    checked={maintenanceStatus.rawRetention === '90'}
+                    onchange={() => handleRetentionModeChange('90')}
+                  />
+                  <span>{t.retentionMode90}</span>
+                </label>
+                <label class="radio-label">
+                  <input
+                    type="radio"
+                    name="rawRetentionMode"
+                    value="180"
+                    checked={maintenanceStatus.rawRetention === '180'}
+                    onchange={() => handleRetentionModeChange('180')}
+                  />
+                  <span>{t.retentionMode180}</span>
+                </label>
+              </div>
+
+              <div class="retention-meta-row">
+                <span class="meta-label">
+                  🕒 {t.retentionLastCleanup}: {maintenanceStatus.lastAutomaticCleanupAt ? new Date(maintenanceStatus.lastAutomaticCleanupAt).toLocaleString() : t.retentionNeverCleaned}
+                </span>
+                {#if maintenanceStatus.rawRetention !== 'forever'}
+                  <button
+                    class="backup-btn secondary small"
+                    id="cleanup-now-btn"
+                    type="button"
+                    onclick={handleOpenCleanupModal}
+                  >
+                    🧹 {t.retentionCleanNowBtn}
+                  </button>
+                {/if}
+              </div>
+            </div>
+
+            <!-- Destructive Maintenance Actions -->
+            <div class="destructive-actions-box">
+              <div class="action-card">
+                <div>
+                  <strong>{t.purgeRawTitle}</strong>
+                  <p class="about-desc">{t.purgeRawDesc}</p>
+                </div>
+                <button
+                  class="backup-btn secondary warning-btn"
+                  id="delete-raw-evidence-btn"
+                  type="button"
+                  onclick={() => { showPurgeRawModal = true; purgeRawFeedback = null; }}
+                >
+                  🗑️ {t.purgeRawBtn}
+                </button>
+              </div>
+
+              <div class="action-card danger-card">
+                <div>
+                  <strong>{t.clearArchiveTitle}</strong>
+                  <p class="about-desc">{t.clearArchiveDesc}</p>
+                </div>
+                <button
+                  class="backup-btn danger"
+                  id="clear-all-archive-btn"
+                  type="button"
+                  onclick={() => { showClearArchiveModal = true; clearArchiveConfirmed = false; clearArchiveFeedback = null; }}
+                >
+                  ⚠️ {t.clearArchiveBtn}
+                </button>
+              </div>
+            </div>
+          {/if}
+        </div>
+
         <div class="settings-card">
           <h3 class="card-subtitle">{t.aboutTitle}</h3>
           <p class="about-desc">{t.aboutDesc}</p>
@@ -685,6 +1064,228 @@
               <span class="inv-bullet">✓</span>
               <span>{t.storageNotice}</span>
             </div>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    <!-- Milestone 2E.3: Maintenance Modals -->
+    {#if showCleanupModal}
+      <div
+        class="modal-backdrop"
+        role="presentation"
+        onclick={() => (showCleanupModal = false)}
+        onkeydown={(e) => { if (e.key === 'Escape') showCleanupModal = false; }}
+      >
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <div
+          class="modal-card"
+          id="retention-cleanup-modal"
+          role="dialog"
+          aria-modal="true"
+          tabindex="-1"
+          onclick={(e) => e.stopPropagation()}
+        >
+          <div class="modal-header">
+            <h3 class="modal-title">🧹 {t.cleanupModalTitle}</h3>
+            <button class="modal-close" type="button" onclick={() => (showCleanupModal = false)}>✕</button>
+          </div>
+          <div class="modal-body">
+            <p class="about-desc">{t.cleanupModalDesc}</p>
+
+            {#if cleanupLoading}
+              <div class="restore-progress-banner">⏳ Loading retention plan…</div>
+            {:else if cleanupPlan}
+              {#if cleanupPlan.candidateStreamKeys.length === 0}
+                <div class="cleanup-empty-notice">
+                  ℹ️ {t.cleanupNoCandidates}
+                </div>
+              {:else}
+                <div class="cleanup-plan-stats">
+                  <div class="stat-pill">
+                    <span class="pill-val">{cleanupPlan.candidateStreamKeys.length}</span>
+                    <span class="pill-lbl">{t.cleanupCandidatesCount}</span>
+                  </div>
+                  <div class="stat-pill">
+                    <span class="pill-val">{cleanupPlan.candidateBatchCount}</span>
+                    <span class="pill-lbl">{t.cleanupBatchesCount}</span>
+                  </div>
+                  <div class="stat-pill">
+                    <span class="pill-val">{cleanupPlan.protectedStreamCount}</span>
+                    <span class="pill-lbl">{t.cleanupProtectedCount}</span>
+                  </div>
+                </div>
+              {/if}
+            {/if}
+
+            {#if cleanupFeedback}
+              <div class="modal-feedback-banner">
+                {cleanupFeedback}
+              </div>
+            {/if}
+          </div>
+          <div class="modal-footer">
+            <button
+              class="backup-btn secondary"
+              type="button"
+              onclick={() => (showCleanupModal = false)}
+              disabled={cleanupLoading}
+            >
+              {t.exportCancel}
+            </button>
+            {#if cleanupPlan && cleanupPlan.candidateStreamKeys.length > 0}
+              <button
+                class="backup-btn primary"
+                id="confirm-cleanup-btn"
+                type="button"
+                onclick={handleExecuteCleanup}
+                disabled={cleanupLoading}
+              >
+                {t.cleanupConfirmBtn}
+              </button>
+            {/if}
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if showPurgeRawModal}
+      <div
+        class="modal-backdrop"
+        role="presentation"
+        onclick={() => (showPurgeRawModal = false)}
+        onkeydown={(e) => { if (e.key === 'Escape') showPurgeRawModal = false; }}
+      >
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <div
+          class="modal-card"
+          id="purge-raw-modal"
+          role="dialog"
+          aria-modal="true"
+          tabindex="-1"
+          onclick={(e) => e.stopPropagation()}
+        >
+          <div class="modal-header">
+            <h3 class="modal-title">🗑️ {t.purgeRawTitle}</h3>
+            <button class="modal-close" type="button" onclick={() => (showPurgeRawModal = false)}>✕</button>
+          </div>
+          <div class="modal-body">
+            <div class="modal-warning-banner">
+              ⚠️ {t.purgeRawWarning}
+            </div>
+
+            <div class="safety-backup-action" style="margin-top: 1rem;">
+              <button
+                class="backup-btn secondary"
+                type="button"
+                onclick={handleCreateBackup}
+                disabled={purgeRawLoading}
+              >
+                💾 {t.restoreCreateSafetyBackup}
+              </button>
+            </div>
+
+            {#if purgeRawFeedback}
+              <div class="modal-feedback-banner">
+                {purgeRawFeedback}
+              </div>
+            {/if}
+          </div>
+          <div class="modal-footer">
+            <button
+              class="backup-btn secondary"
+              type="button"
+              onclick={() => (showPurgeRawModal = false)}
+              disabled={purgeRawLoading}
+            >
+              {t.exportCancel}
+            </button>
+            <button
+              class="backup-btn danger"
+              id="confirm-purge-raw-btn"
+              type="button"
+              onclick={handleExecutePurgeRaw}
+              disabled={purgeRawLoading}
+            >
+              {t.purgeRawConfirmBtn}
+            </button>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if showClearArchiveModal}
+      <div
+        class="modal-backdrop"
+        role="presentation"
+        onclick={() => (showClearArchiveModal = false)}
+        onkeydown={(e) => { if (e.key === 'Escape') showClearArchiveModal = false; }}
+      >
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <div
+          class="modal-card"
+          id="clear-archive-modal"
+          role="dialog"
+          aria-modal="true"
+          tabindex="-1"
+          onclick={(e) => e.stopPropagation()}
+        >
+          <div class="modal-header">
+            <h3 class="modal-title">⚠️ {t.clearArchiveTitle}</h3>
+            <button class="modal-close" type="button" onclick={() => (showClearArchiveModal = false)}>✕</button>
+          </div>
+          <div class="modal-body">
+            <div class="modal-danger-banner">
+              🛑 {t.clearArchiveWarning}
+            </div>
+
+            <div class="safety-backup-action" style="margin-top: 1rem;">
+              <button
+                class="backup-btn secondary"
+                type="button"
+                onclick={handleCreateBackup}
+                disabled={clearArchiveLoading}
+              >
+                💾 {t.restoreCreateSafetyBackup}
+              </button>
+            </div>
+
+            <label class="confirm-checkbox-label" style="margin-top: 1rem;">
+              <input
+                type="checkbox"
+                id="confirm-clear-archive-checkbox"
+                bind:checked={clearArchiveConfirmed}
+              />
+              <span>{t.clearArchiveConfirmCheckbox}</span>
+            </label>
+
+            {#if clearArchiveFeedback}
+              <div class="modal-feedback-banner">
+                {clearArchiveFeedback}
+              </div>
+            {/if}
+          </div>
+          <div class="modal-footer">
+            <button
+              class="backup-btn secondary"
+              type="button"
+              onclick={() => (showClearArchiveModal = false)}
+              disabled={clearArchiveLoading}
+            >
+              {t.exportCancel}
+            </button>
+            <button
+              class="backup-btn danger"
+              id="confirm-clear-archive-btn"
+              type="button"
+              onclick={handleExecuteClearArchive}
+              disabled={!clearArchiveConfirmed || clearArchiveLoading}
+            >
+              {t.clearArchiveConfirmBtn}
+            </button>
           </div>
         </div>
       </div>
@@ -1217,5 +1818,331 @@
     font-size: 0.75rem;
     color: #a7f3d0;
     margin: 0 0 0.5rem 0;
+  }
+
+  /* Milestone 2E.3: Storage & Retention Management Styles */
+  .storage-stats-container {
+    background: #0f172a;
+    border: 1px solid #1e293b;
+    border-radius: 6px;
+    padding: 0.75rem;
+    margin-top: 0.75rem;
+  }
+
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.8125rem;
+  }
+
+  .stat-label {
+    color: #94a3b8;
+  }
+
+  .stat-value {
+    color: #e2e8f0;
+    font-weight: 600;
+  }
+
+  .persistence-status-box {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .badge {
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-weight: 600;
+  }
+
+  .badge.success {
+    background: rgba(34, 197, 94, 0.15);
+    color: #4ade80;
+    border: 1px solid rgba(34, 197, 94, 0.3);
+  }
+
+  .badge.warning {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    border: 1px solid rgba(245, 158, 11, 0.3);
+  }
+
+  .badge.neutral {
+    background: #1e293b;
+    color: #94a3b8;
+    border: 1px solid #334155;
+  }
+
+  .backup-btn.small {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.72rem;
+  }
+
+  .storage-approx-notice {
+    font-size: 0.7rem;
+    color: #64748b;
+    margin-top: 0.5rem;
+    line-height: 1.35;
+    border-top: 1px dashed #1e293b;
+    padding-top: 0.5rem;
+  }
+
+  .archive-composition-box {
+    margin-top: 0.75rem;
+  }
+
+  .comp-title {
+    font-size: 0.8125rem;
+    color: #cbd5e1;
+    margin: 0 0 0.5rem 0;
+  }
+
+  .comp-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+  }
+
+  .comp-card {
+    background: #131d31;
+    border: 1px solid #1e293b;
+    border-radius: 6px;
+    padding: 0.6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .comp-tag {
+    font-size: 0.6875rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #38bdf8;
+    margin-bottom: 0.2rem;
+  }
+
+  .comp-card.raw .comp-tag {
+    color: #a78bfa;
+  }
+
+  .comp-item {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: #94a3b8;
+  }
+
+  .comp-item strong {
+    color: #f1f5f9;
+  }
+
+  .retention-policy-box {
+    margin-top: 1rem;
+    background: #0f172a;
+    border: 1px solid #1e293b;
+    border-radius: 6px;
+    padding: 0.75rem;
+  }
+
+  .retention-radio-group {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+  }
+
+  .retention-meta-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 0.75rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid #1e293b;
+  }
+
+  .meta-label {
+    font-size: 0.72rem;
+    color: #94a3b8;
+  }
+
+  .destructive-actions-box {
+    margin-top: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .action-card {
+    background: #0f172a;
+    border: 1px solid #1e293b;
+    border-radius: 6px;
+    padding: 0.75rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .action-card.danger-card {
+    border-color: rgba(239, 68, 68, 0.3);
+  }
+
+  .backup-btn.warning-btn {
+    color: #fbbf24;
+    border-color: rgba(245, 158, 11, 0.4);
+    background: rgba(245, 158, 11, 0.1);
+  }
+
+  .backup-btn.warning-btn:hover {
+    background: rgba(245, 158, 11, 0.2);
+  }
+
+  .backup-btn.danger {
+    background: #dc2626;
+    color: white;
+    border: 1px solid #b91c1c;
+  }
+
+  .backup-btn.danger:hover:not(:disabled) {
+    background: #b91c1c;
+  }
+
+  .backup-btn.danger:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  /* Modals */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.75);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    padding: 1rem;
+  }
+
+  .modal-card {
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    width: 100%;
+    max-width: 440px;
+    overflow: hidden;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+  }
+
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #1e293b;
+    background: #090d16;
+  }
+
+  .modal-title {
+    font-size: 0.9rem;
+    margin: 0;
+    color: #f1f5f9;
+  }
+
+  .modal-close {
+    background: transparent;
+    border: none;
+    color: #94a3b8;
+    font-size: 1.1rem;
+    cursor: pointer;
+  }
+
+  .modal-body {
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    border-top: 1px solid #1e293b;
+    background: #090d16;
+  }
+
+  .modal-warning-banner {
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: 6px;
+    padding: 0.75rem;
+    color: #fde68a;
+    font-size: 0.8125rem;
+    line-height: 1.4;
+  }
+
+  .modal-danger-banner {
+    background: rgba(239, 68, 68, 0.15);
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    border-radius: 6px;
+    padding: 0.75rem;
+    color: #fca5a5;
+    font-size: 0.8125rem;
+    line-height: 1.4;
+    font-weight: 500;
+  }
+
+  .modal-feedback-banner {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 4px;
+    padding: 0.5rem;
+    color: #38bdf8;
+    font-size: 0.8rem;
+  }
+
+  .cleanup-empty-notice {
+    background: #1e293b;
+    border-radius: 6px;
+    padding: 0.75rem;
+    color: #94a3b8;
+    font-size: 0.8125rem;
+    text-align: center;
+  }
+
+  .cleanup-plan-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 0.5rem;
+  }
+
+  .stat-pill {
+    background: #131d31;
+    border: 1px solid #1e293b;
+    border-radius: 6px;
+    padding: 0.5rem;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .pill-val {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #38bdf8;
+  }
+
+  .pill-lbl {
+    font-size: 0.6875rem;
+    color: #94a3b8;
   }
 </style>

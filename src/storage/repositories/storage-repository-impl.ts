@@ -51,6 +51,21 @@ import {
 } from '../../restore';
 import type { MaterializedPortableBackup } from '../../backup/reader';
 import type { PortableBackupStoreCounts } from '../../backup/format';
+import {
+  buildConversationDeletionPlan as buildConversationDeletionPlanInternal,
+  deleteConversationCascade as deleteConversationCascadeInternal,
+  buildRawRetentionPlan as buildRawRetentionPlanInternal,
+  executeRawRetentionPlan as executeRawRetentionPlanInternal,
+  clearRawEvidence as clearRawEvidenceInternal,
+  clearEntireArchive as clearEntireArchiveInternal,
+  getStorageObservability,
+  getRetentionSettings,
+  type ConversationDeletionPlan,
+  type RawRetentionPlan,
+  type RawRetentionMode,
+  type ArchiveCleanupResult,
+  type StorageMaintenanceStatus,
+} from '../retention';
 
 export class IndexedDbStorageRepository implements StorageRepository {
   constructor(private readonly idbFactory?: IDBFactory) {}
@@ -1726,6 +1741,74 @@ export class IndexedDbStorageRepository implements StorageRepository {
   async getCurrentStoreCounts(): Promise<PortableBackupStoreCounts> {
     const db = await this.getDb();
     return getCurrentStoreCountsInternal(db);
+  }
+
+  // ── Milestone 2E.3: Retention, Cleanup & Safe Deletion Methods ──
+
+  async buildConversationDeletionPlan(conversationId: string, activeStreamKeys: Set<string>): Promise<ConversationDeletionPlan> {
+    const db = await this.getDb();
+    return buildConversationDeletionPlanInternal(db, conversationId, activeStreamKeys);
+  }
+
+  async deleteConversationCascade(plan: ConversationDeletionPlan, activeStreamKeys: Set<string>): Promise<void> {
+    const db = await this.getDb();
+    return deleteConversationCascadeInternal(db, plan, activeStreamKeys);
+  }
+
+  async buildRawRetentionPlan(mode: RawRetentionMode, activeStreamKeys: Set<string>, now?: number): Promise<RawRetentionPlan> {
+    const db = await this.getDb();
+    return buildRawRetentionPlanInternal(db, mode, activeStreamKeys, now);
+  }
+
+  async executeRawRetentionPlan(plan: RawRetentionPlan, activeStreamKeys: Set<string>): Promise<ArchiveCleanupResult> {
+    const db = await this.getDb();
+    return executeRawRetentionPlanInternal(db, plan, activeStreamKeys);
+  }
+
+  async clearRawEvidence(activeStreamCount: number): Promise<ArchiveCleanupResult> {
+    const db = await this.getDb();
+    return clearRawEvidenceInternal(db, activeStreamCount);
+  }
+
+  async clearEntireArchive(activeStreamCount: number): Promise<{ success: boolean; durationMs: number }> {
+    const db = await this.getDb();
+    return clearEntireArchiveInternal(db, activeStreamCount);
+  }
+
+  async getStorageMaintenanceStatus(): Promise<StorageMaintenanceStatus> {
+    const db = await this.getDb();
+    const counts = await this.getCurrentStoreCounts();
+    const observability = await getStorageObservability();
+    const settings = await getRetentionSettings();
+
+    let totalRawCharacters = 0;
+    try {
+      const tx = db.transaction(['raw_streams'], 'readonly');
+      const req = tx.objectStore('raw_streams').getAll();
+      const streams = await new Promise<any[]>((resolve) => {
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => resolve([]);
+      });
+      for (const s of streams) {
+        totalRawCharacters += s.totalChars || 0;
+      }
+    } catch {
+      // ignore
+    }
+
+    return {
+      storageEstimate: {
+        usageBytes: observability.usageBytes,
+        quotaBytes: observability.quotaBytes,
+        percentage: observability.percentage,
+      },
+      persistenceStatus: observability.persistenceStatus,
+      counts,
+      totalCanonicalMessages: counts.messages,
+      totalRawCharacters,
+      rawRetention: settings.rawRetention,
+      lastAutomaticCleanupAt: settings.lastAutomaticCleanupAt,
+    };
   }
 }
 

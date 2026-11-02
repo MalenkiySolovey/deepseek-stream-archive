@@ -1025,6 +1025,92 @@ export function validateExecuteRestoreRequest(
   };
 }
 
+export function validatePreviewConversationDeleteRequest(
+  raw: unknown
+): import('./messages').PreviewConversationDeleteRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_PREVIEW_CONVERSATION_DELETE') return null;
+  if (typeof raw.conversationId !== 'string' || raw.conversationId.trim().length === 0) {
+    return null;
+  }
+  return {
+    type: 'STREAMARCHIVE_PREVIEW_CONVERSATION_DELETE',
+    conversationId: raw.conversationId.trim(),
+  };
+}
+
+export function validateDeleteConversationRequest(
+  raw: unknown
+): import('./messages').DeleteConversationRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_DELETE_CONVERSATION') return null;
+  if (!isRecord(raw.plan)) return null;
+  const plan = raw.plan;
+  if (typeof plan.conversationId !== 'string' || typeof plan.updatedAt !== 'number') {
+    return null;
+  }
+  if (!Array.isArray(plan.rawStreamKeys)) return null;
+
+  return {
+    type: 'STREAMARCHIVE_DELETE_CONVERSATION',
+    plan: plan as unknown as import('../storage/retention').ConversationDeletionPlan,
+  };
+}
+
+export function validatePreviewRawRetentionRequest(
+  raw: unknown
+): import('./messages').PreviewRawRetentionRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_PREVIEW_RAW_RETENTION') return null;
+  const validModes = ['forever', '30', '90', '180'];
+  const mode =
+    typeof raw.mode === 'string' && validModes.includes(raw.mode)
+      ? (raw.mode as import('../storage/retention').RawRetentionMode)
+      : undefined;
+
+  return {
+    type: 'STREAMARCHIVE_PREVIEW_RAW_RETENTION',
+    mode,
+  };
+}
+
+export function validateExecuteRawRetentionRequest(
+  raw: unknown
+): import('./messages').ExecuteRawRetentionRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_EXECUTE_RAW_RETENTION') return null;
+  if (!isRecord(raw.plan)) return null;
+  if (!Array.isArray(raw.plan.candidateStreamKeys)) return null;
+
+  return {
+    type: 'STREAMARCHIVE_EXECUTE_RAW_RETENTION',
+    plan: raw.plan as unknown as import('../storage/retention').RawRetentionPlan,
+  };
+}
+
+export function validateSetRetentionSettingsRequest(
+  raw: unknown
+): import('./messages').SetRetentionSettingsRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_SET_RETENTION_SETTINGS') return null;
+  if (!isRecord(raw.settings)) return null;
+
+  const validModes = ['forever', '30', '90', '180'];
+  const settings: Partial<import('../storage/retention').RetentionSettings> = {};
+  if (typeof raw.settings.rawRetention === 'string' && validModes.includes(raw.settings.rawRetention)) {
+    settings.rawRetention = raw.settings.rawRetention as import('../storage/retention').RawRetentionMode;
+  }
+  if (typeof raw.settings.lastAutomaticCleanupAt === 'number') {
+    settings.lastAutomaticCleanupAt = raw.settings.lastAutomaticCleanupAt;
+  }
+
+  return {
+    type: 'STREAMARCHIVE_SET_RETENTION_SETTINGS',
+    settings,
+  };
+}
+
+
 
 
 

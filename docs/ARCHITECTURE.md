@@ -311,6 +311,18 @@ export interface RecoveryEvent {
 - **Strict Durability Hint:** `createRawWriteTransaction` requests `strict` durability hint with fallback.
 - **Scalable Queries:** `listStreams` uses cursor traversal on `openedAt` index (`'prev'`); `getJournalMetadata()` queries exclusively from `raw_streams` records and incorporates storage quota estimates.
 
+### Storage Observability, Retention & Safe Deletion Architecture (Milestone 2E.3)
+- **Native Observability:** Queries browser storage usage and quota via `navigator.storage.estimate()` and persistence status via `navigator.storage.persisted()`. Rejects speculative per-message byte allocations; surfaces exact entity counts directly from IndexedDB.
+- **Configurable Raw Retention:** Opt-in age pruning (`forever` [default], `30`, `90`, `180` days) for HTTP transport streams and batches. Canonical conversation history is strictly decoupled and never pruned automatically.
+- **Protected Evidence Shield:** Pure deterministic policy engine (`evaluateRawStreamRetention`) protecting:
+  - Active capture streams.
+  - Pre-filter recovery provenance (`filtered` status, `RecoveryEvent`, `isLastGood` revisions).
+  - Forensic anomalies (non-intact integrity, durability gaps, dropped characters, terminal errors/aborts, unmatched captures).
+- **Safe Single-Conversation Deletion:** 2-step preview flow with active stream guard, concurrency stale barrier (`updatedAt`), and atomic cascade rollback (`tx.abort()`) across `conversations`, `messages`, `revisions`, `recovery_events`, referenced `raw_streams`, `raw_stream_batches`, and `canonical_checkpoints`.
+- **Maintenance Actions:** UI provides three deliberate operations: `Clean Up Now` (prune expired eligible raw streams), `Delete Raw Evidence` (purge all raw streams/batches while preserving 100% of canonical history), and `Delete All Local Archive Data` (reset all 9 IndexedDB stores with explicit confirmation checkbox).
+- **Opportunistic Scheduling:** Cleanup runs opportunistically on service worker start and after stream finalization, throttled to at most once per 24 hours. Zero new permissions (`alarms` rejected, zero background polling loops).
+- **Local Storage Boundary:** All deletions operate strictly inside browser IndexedDB and do not affect server data on `chat.deepseek.com`.
+
 
 ---
 
@@ -426,7 +438,8 @@ Manifest V3 Specification:
 - **Durable Checkpoint Delivery & Staging Store:** Sealed immutable canonical checkpoints with terminal backoff retry surviving coordinator disposal, monotonic lost-ACK handling, pre-transaction Web Crypto SHA-256 fingerprint validation, terminal checkpoint locking, and bounded multi-batch history staging with completeness manifests and session remoteId validation (schema v8 `STORE_HISTORY_STAGING`, `STORE_HISTORY_STAGING_MANIFESTS`, projection state indexing).
 - **Transport Retry Identity Stabilization:** Strict separation of raw transport attempts from canonical conversation tree (`attempt_only` vs `logical`), preventing phantom branch creation during automatic client-side transport retries.
 - **Human Export, Portable Backup & Atomic Restore:** Two distinct export products: human-readable Markdown (`.md`) / canonical JSON (`.json`, format `deepseek-streamarchive-conversation` v1) with branch awareness and pre-filter recovery provenance, and portable full-archive backup (`.streamarchive.jsonl.gz`) with native gzip compression and deterministic multi-store readonly snapshotting. Safe, validated atomic restore (Milestone 2E.2) with streaming decompression bomb protection (250 MiB ceiling), pre-commit relational integrity verification (DAG acyclicity, conversation scoping, pre-filter recovery pointers), active stream generation barrier, and two commit modes: Replace Archive (atomic single-transaction replacement across all 9 stores with guaranteed rollback) and Safe Merge Archive (strict primary-key union with collision fail-closed abort).
-- **Browser Compatibility Gate:** Playwright Chromium MV3 end-to-end regression harness verifying all streaming, recovery overlay, reconciliation, and export/backup invariants against synthetic offline fixtures without external network traffic.
+- **Storage Observability, Retention & Safe Deletion (Milestone 2E.3):** Browser storage estimation (`navigator.storage.estimate()`) and durable persistence (`navigator.storage.persist()`); age-based raw stream pruning (`forever` [default], 30, 90, 180 days) with Protected Evidence Shield (active streams, pre-filter recovery provenance, forensic anomalies shielded indefinitely); safe 2-step single-conversation deletion with active guards, stale state barriers, and atomic rollback; multi-store archive maintenance actions; opportunistic rate-limited scheduling without background alarms.
+- **Browser Compatibility Gate:** Playwright Chromium MV3 end-to-end regression harness verifying all streaming, recovery overlay, reconciliation, export/backup, and retention/deletion invariants against synthetic offline fixtures without external network traffic.
 
 ### Scope Boundaries:
 1. **Zero DOM Pollution by Default:** Clean passive observation without modifying page responses.

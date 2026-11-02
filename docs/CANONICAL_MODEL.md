@@ -248,3 +248,21 @@ The canonical data model provides deterministic, read-only projections for exter
 - Records within each store are sorted deterministically by primary key `id` ascending.
 - Enforces memory ceiling (`MAX_IN_MEMORY_PORTABLE_BACKUP_SOURCE_BYTES = 100 MiB`) to prevent service worker OOM in large archives.
 - Serialized into compressed newline-delimited JSON (`.streamarchive.jsonl.gz`) with strict format manifest and record count footer.
+
+---
+
+## 8. Retention Independence & Safe Cascade Deletion (Milestone 2E.3)
+
+### 8.1 Independence from Raw Evidence Pruning
+Canonical domain entities (`conversations`, `messages`, `revisions`, `recovery_events`) are strictly decoupled from raw transport streams (`raw_streams`, `raw_stream_batches`):
+- **Zero Automatic Canonical Deletion:** Automatic retention pruning operates exclusively on raw streams and batches. Canonical messages and revisions are **never** deleted by retention policies.
+- **Permanent Reading & Exportability:** A conversation whose underlying raw streams have been pruned remains 100% accessible in the Side Panel, searchable, and exportable to Markdown or JSON.
+
+### 8.2 Safe Single-Conversation Cascade Deletion
+When a user explicitly deletes an individual conversation via the Side Panel interface:
+- **Active Stream Guard:** Deletion is rejected immediately if any in-flight stream is currently recording into the conversation.
+- **Stale State Barrier:** Deletion validates `conversation.updatedAt === clientProvidedUpdatedAt`. Concurrent background writes abort the deletion with `StaleConversationError`.
+- **Atomic Multi-Store Transaction:** Deletion executes in **ONE readwrite IndexedDB transaction** covering `conversations`, `messages`, `revisions`, `recovery_events`, referenced `raw_streams`, `raw_stream_batches`, and `canonical_checkpoints`.
+- **Atomic Rollback:** If any store operation encounters an error or quota failure, `tx.abort()` is called immediately, leaving the database completely unmodified.
+
+For full architectural details, see [RETENTION_AND_DELETION.md](./RETENTION_AND_DELETION.md) and [ADR 0025](./ADR/0025-retention-cleanup-and-safe-deletion.md).

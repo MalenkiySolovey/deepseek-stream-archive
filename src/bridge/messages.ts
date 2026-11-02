@@ -42,6 +42,17 @@ export const MESSAGE_GET_STORAGE_USAGE_ESTIMATE = 'STREAMARCHIVE_GET_STORAGE_USA
 export const MESSAGE_RESTORE_PREVIEW = 'STREAMARCHIVE_RESTORE_PREVIEW' as const;
 export const MESSAGE_EXECUTE_RESTORE = 'STREAMARCHIVE_EXECUTE_RESTORE' as const;
 
+export const MESSAGE_GET_STORAGE_MAINTENANCE_STATUS = 'STREAMARCHIVE_GET_STORAGE_MAINTENANCE_STATUS' as const;
+export const MESSAGE_REQUEST_STORAGE_PERSISTENCE = 'STREAMARCHIVE_REQUEST_STORAGE_PERSISTENCE' as const;
+export const MESSAGE_GET_RETENTION_SETTINGS = 'STREAMARCHIVE_GET_RETENTION_SETTINGS' as const;
+export const MESSAGE_SET_RETENTION_SETTINGS = 'STREAMARCHIVE_SET_RETENTION_SETTINGS' as const;
+export const MESSAGE_PREVIEW_CONVERSATION_DELETE = 'STREAMARCHIVE_PREVIEW_CONVERSATION_DELETE' as const;
+export const MESSAGE_DELETE_CONVERSATION = 'STREAMARCHIVE_DELETE_CONVERSATION' as const;
+export const MESSAGE_PREVIEW_RAW_RETENTION = 'STREAMARCHIVE_PREVIEW_RAW_RETENTION' as const;
+export const MESSAGE_EXECUTE_RAW_RETENTION = 'STREAMARCHIVE_EXECUTE_RAW_RETENTION' as const;
+export const MESSAGE_CLEAR_RAW_EVIDENCE = 'STREAMARCHIVE_CLEAR_RAW_EVIDENCE' as const;
+export const MESSAGE_CLEAR_ENTIRE_ARCHIVE = 'STREAMARCHIVE_CLEAR_ENTIRE_ARCHIVE' as const;
+
 
 export type ObservationState = 'not_observed' | 'observed' | 'failed' | 'unsupported';
 
@@ -465,6 +476,113 @@ export interface ExecuteRestoreResponse {
   error?: string;
 }
 
+// Milestone 2E.3: Retention, Cleanup & Safe Deletion Messages
+
+export interface GetStorageMaintenanceStatusRequest {
+  type: typeof MESSAGE_GET_STORAGE_MAINTENANCE_STATUS;
+}
+
+export interface GetStorageMaintenanceStatusResponse {
+  success: boolean;
+  status?: import('../storage/retention').StorageMaintenanceStatus;
+  error?: string;
+}
+
+export interface RequestStoragePersistenceRequest {
+  type: typeof MESSAGE_REQUEST_STORAGE_PERSISTENCE;
+}
+
+export interface RequestStoragePersistenceResponse {
+  success: boolean;
+  granted?: boolean;
+  persistenceStatus?: import('../storage/retention').StoragePersistenceStatus;
+  error?: string;
+}
+
+export interface GetRetentionSettingsRequest {
+  type: typeof MESSAGE_GET_RETENTION_SETTINGS;
+}
+
+export interface GetRetentionSettingsResponse {
+  success: boolean;
+  settings?: import('../storage/retention').RetentionSettings;
+  error?: string;
+}
+
+export interface SetRetentionSettingsRequest {
+  type: typeof MESSAGE_SET_RETENTION_SETTINGS;
+  settings: Partial<import('../storage/retention').RetentionSettings>;
+}
+
+export interface SetRetentionSettingsResponse {
+  success: boolean;
+  settings?: import('../storage/retention').RetentionSettings;
+  error?: string;
+}
+
+export interface PreviewConversationDeleteRequest {
+  type: typeof MESSAGE_PREVIEW_CONVERSATION_DELETE;
+  conversationId: string;
+}
+
+export interface PreviewConversationDeleteResponse {
+  success: boolean;
+  plan?: import('../storage/retention').ConversationDeletionPlan;
+  error?: string;
+}
+
+export interface DeleteConversationRequest {
+  type: typeof MESSAGE_DELETE_CONVERSATION;
+  plan: import('../storage/retention').ConversationDeletionPlan;
+}
+
+export interface DeleteConversationResponse {
+  success: boolean;
+  error?: string;
+}
+
+export interface PreviewRawRetentionRequest {
+  type: typeof MESSAGE_PREVIEW_RAW_RETENTION;
+  mode?: import('../storage/retention').RawRetentionMode;
+}
+
+export interface PreviewRawRetentionResponse {
+  success: boolean;
+  plan?: import('../storage/retention').RawRetentionPlan;
+  error?: string;
+}
+
+export interface ExecuteRawRetentionRequest {
+  type: typeof MESSAGE_EXECUTE_RAW_RETENTION;
+  plan: import('../storage/retention').RawRetentionPlan;
+}
+
+export interface ExecuteRawRetentionResponse {
+  success: boolean;
+  result?: import('../storage/retention').ArchiveCleanupResult;
+  error?: string;
+}
+
+export interface ClearRawEvidenceRequest {
+  type: typeof MESSAGE_CLEAR_RAW_EVIDENCE;
+}
+
+export interface ClearRawEvidenceResponse {
+  success: boolean;
+  result?: import('../storage/retention').ArchiveCleanupResult;
+  error?: string;
+}
+
+export interface ClearEntireArchiveRequest {
+  type: typeof MESSAGE_CLEAR_ENTIRE_ARCHIVE;
+}
+
+export interface ClearEntireArchiveResponse {
+  success: boolean;
+  durationMs?: number;
+  error?: string;
+}
+
 export type ExtensionInternalMessage =
   | SaveSyntheticBatchRequest
   | GetFoundationStatusRequest
@@ -494,6 +612,16 @@ export type ExtensionInternalMessage =
   | CreatePortableBackupSnapshotRequest
   | GetStorageUsageEstimateRequest
   | RestorePreviewRequest
-  | ExecuteRestoreRequest;
+  | ExecuteRestoreRequest
+  | GetStorageMaintenanceStatusRequest
+  | RequestStoragePersistenceRequest
+  | GetRetentionSettingsRequest
+  | SetRetentionSettingsRequest
+  | PreviewConversationDeleteRequest
+  | DeleteConversationRequest
+  | PreviewRawRetentionRequest
+  | ExecuteRawRetentionRequest
+  | ClearRawEvidenceRequest
+  | ClearEntireArchiveRequest;
 
 

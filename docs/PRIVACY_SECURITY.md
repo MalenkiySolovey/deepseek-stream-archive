@@ -221,3 +221,24 @@ StreamArchive requests **zero unnecessary permissions** (e.g. no `scripting`, no
 5. **Zero New Permissions:**
    - Restore operates entirely through standard file input (`<input type="file">`) and local IndexedDB operations without external network requests or supplementary permissions.
 
+---
+
+## 11. Retention & Deletion Privacy Boundaries (Milestone 2E.3)
+
+1. **Local-Only Deletion Scope:**
+   - Deletion of conversations, raw streams, or the entire archive operates **exclusively within local browser storage** (IndexedDB and `chrome.storage.local`).
+   - The extension makes zero API requests to delete, synchronize, or report deletions to DeepSeek servers (`https://chat.deepseek.com`). DeepSeek server-side conversation logs remain under the user's manual control on the DeepSeek platform.
+
+2. **Zero Extra Permissions & Passive Opportunistic Execution:**
+   - Automatic retention scheduling does not request the `alarms` permission, nor does it run long-polling background timers.
+   - It executes opportunistically only on service worker initialization and stream finalization, capped at once per 24 hours.
+   - Deletion operations do not require `chrome.browsingData` or `unlimitedStorage` permissions.
+
+3. **Protection of Pre-Filter Evidence:**
+   - The retention engine's Protected Evidence Shield ensures that pre-filter text and censorship proof (`RecoveryEvent`, `isLastGood`) are never purged automatically by age.
+   - Users retain full sovereign control to purge raw evidence manually (`Delete Raw Evidence`) while preserving 100% of canonical conversations and pre-filter recoveries.
+
+4. **Atomic Rollback & Failure Isolation:**
+   - Single-conversation cascade deletions and whole-archive purges execute in single atomic transactions. If browser storage or transaction failure occurs, all changes roll back immediately via `tx.abort()`, preventing corrupted or partially deleted relational states.
+
+
