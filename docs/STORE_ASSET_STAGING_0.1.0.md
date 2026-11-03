@@ -24,10 +24,10 @@
 
 | File | Resolution | Type | SHA-256 Checksum | Store Usage |
 | :--- | :--- | :--- | :--- | :--- |
-| `workbench/public/icons/icon-128.png` | 128 × 128 | PNG | `2ba7b8cfd6f83ec542845ff296e8d2e8e3aeb5c7eb391a27e7fa69bfe9d2bfda` | **Chrome Web Store Listing Icon** (Mandatory) |
-| `workbench/public/icons/icon-48.png` | 48 × 48 | PNG | `553e1a14ebcbdb22ff6116ca8a05c31278ffbc401b171f19df2d63428d0eb4b7` | Chrome Extensions Management (`chrome://extensions`) |
-| `workbench/public/icons/icon-32.png` | 32 × 32 | PNG | `ffb8733b8fb3c25ba4809bc3932fa5a7e106990ae0eb8f37803a646c0caae048` | Windows High-DPI Browser Action |
-| `workbench/public/icons/icon-16.png` | 16 × 16 | PNG | `9ca0529e3a6c9d81d279b94ee09dbfe59a2df9787e2f5b619e99a4e8d3876e93` | Chrome Toolbar Browser Action Icon |
+| `workbench/public/icons/icon-128.png` | 128 × 128 | PNG | `a7e5ce3ac740cb46d0389dd001f91938a68f4ace8f0092f2346e58311654ae75` | **Chrome Web Store Listing Icon** (Mandatory) |
+| `workbench/public/icons/icon-48.png` | 48 × 48 | PNG | `0c1ce08aca79946d3d4b6d96fbf1f8a567555cc1686d964b206cedef653aa886` | Chrome Extensions Management (`chrome://extensions`) |
+| `workbench/public/icons/icon-32.png` | 32 × 32 | PNG | `69f9b21f57ea96a81aaba940a2034fe4398ff09ea9c598f8ff2f9d7706ef9323` | Windows High-DPI Browser Action |
+| `workbench/public/icons/icon-16.png` | 16 × 16 | PNG | `86adc77e4ab9f0ffa0262e5d9bed70aadd991f544f859d53088d25aabfb8e3b2` | Chrome Toolbar Browser Action Icon |
 
 ---
 
