@@ -26,6 +26,7 @@ import {
   STORE_CANONICAL_CHECKPOINTS,
   STORE_HISTORY_STAGING,
   STORE_HISTORY_STAGING_MANIFESTS,
+  STORE_CONTEXT_CONTINUITY_RECEIPTS,
   type CanonicalStreamCheckpointRecord,
   type HistoryStagingBatchRecord,
   type HistoryStagingManifestRecord,
@@ -57,6 +58,7 @@ import type {
   ContextContinuityPlan,
   ContextContinuitySettings,
   ContextContinuityLimits,
+  ContextContinuityReceipt,
 } from '../../context-continuity/types';
 
 import {
@@ -1819,7 +1821,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
     };
   }
 
-  // ── Milestone 2D.5A: Context Continuity Planner ──
+  // ── Milestone 2D.5A & 2D.5B: Context Continuity Planner & Delivery Receipts ──
 
   async buildContextContinuityPlan(
     conversationId: string,
@@ -1828,12 +1830,15 @@ export class IndexedDbStorageRepository implements StorageRepository {
       branchSelections?: Record<string, number>;
       settings?: ContextContinuitySettings;
       limits?: Partial<ContextContinuityLimits>;
+      alreadyBridgedIds?: Set<string>;
     }
   ): Promise<ContextContinuityPlan | null> {
     const conversation = await this.getConversation(conversationId);
     if (!conversation) return null;
 
     const settings = options?.settings ?? (await getContextContinuitySettings());
+    const alreadyBridgedIds =
+      options?.alreadyBridgedIds ?? (await this.getBridgedMessageIdsForConversation(conversationId));
     const db = await this.getDb();
 
     return new Promise((resolve, reject) => {
@@ -1858,6 +1863,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
             revisionsMap: new Map(),
             settings,
             limits: options?.limits,
+            alreadyBridgedIds,
           });
           resolve(plan);
           return;
@@ -1881,6 +1887,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
               },
               settings,
               limits: options?.limits,
+              alreadyBridgedIds,
             });
             resolve(plan);
           }
@@ -1905,5 +1912,80 @@ export class IndexedDbStorageRepository implements StorageRepository {
         }
       };
     });
+  }
+
+  async recordContinuityReceipt(receipt: ContextContinuityReceipt): Promise<void> {
+    const db = await this.getDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_CONTEXT_CONTINUITY_RECEIPTS, 'readwrite');
+      const store = tx.objectStore(STORE_CONTEXT_CONTINUITY_RECEIPTS);
+      const req = store.put(receipt);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error || new Error('Failed to record continuity receipt'));
+    });
+  }
+
+  async updateContinuityReceipt(id: string, updates: Partial<ContextContinuityReceipt>): Promise<void> {
+    const db = await this.getDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_CONTEXT_CONTINUITY_RECEIPTS, 'readwrite');
+      const store = tx.objectStore(STORE_CONTEXT_CONTINUITY_RECEIPTS);
+      const getReq = store.get(id);
+      getReq.onerror = () => reject(getReq.error || new Error(`Failed to find continuity receipt ${id}`));
+      getReq.onsuccess = () => {
+        const existing = getReq.result as ContextContinuityReceipt | undefined;
+        if (!existing) {
+          return reject(new Error(`Continuity receipt ${id} not found`));
+        }
+        const merged: ContextContinuityReceipt = {
+          ...existing,
+          ...updates,
+          updatedAt: Date.now(),
+        };
+        const putReq = store.put(merged);
+        putReq.onsuccess = () => resolve();
+        putReq.onerror = () => reject(putReq.error || new Error(`Failed to update continuity receipt ${id}`));
+      };
+    });
+  }
+
+  async getContinuityReceipt(id: string): Promise<ContextContinuityReceipt | null> {
+    const db = await this.getDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_CONTEXT_CONTINUITY_RECEIPTS, 'readonly');
+      const store = tx.objectStore(STORE_CONTEXT_CONTINUITY_RECEIPTS);
+      const req = store.get(id);
+      req.onsuccess = () => resolve((req.result as ContextContinuityReceipt) || null);
+      req.onerror = () => reject(req.error || new Error(`Failed to get continuity receipt ${id}`));
+    });
+  }
+
+  async getContinuityReceiptsForConversation(conversationId: string): Promise<ContextContinuityReceipt[]> {
+    const db = await this.getDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_CONTEXT_CONTINUITY_RECEIPTS, 'readonly');
+      const store = tx.objectStore(STORE_CONTEXT_CONTINUITY_RECEIPTS);
+      const index = store.index('conversationId');
+      const req = index.getAll(conversationId);
+      req.onsuccess = () => {
+        const list = (req.result as ContextContinuityReceipt[]) || [];
+        list.sort((a, b) => a.createdAt - b.createdAt);
+        resolve(list);
+      };
+      req.onerror = () => reject(req.error || new Error(`Failed to list continuity receipts for conversation ${conversationId}`));
+    });
+  }
+
+  async getBridgedMessageIdsForConversation(conversationId: string): Promise<Set<string>> {
+    const receipts = await this.getContinuityReceiptsForConversation(conversationId);
+    const bridgedIds = new Set<string>();
+    for (const r of receipts) {
+      if (r.state === 'bridged' && Array.isArray(r.sourceMessageIds)) {
+        for (const msgId of r.sourceMessageIds) {
+          bridgedIds.add(msgId);
+        }
+      }
+    }
+    return bridgedIds;
   }
 }

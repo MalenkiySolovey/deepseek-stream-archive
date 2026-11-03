@@ -185,6 +185,14 @@ export interface StorageRepository {
       branchSelections?: Record<string, number>;
       settings?: import('../../context-continuity/types').ContextContinuitySettings;
       limits?: Partial<import('../../context-continuity/types').ContextContinuityLimits>;
+      alreadyBridgedIds?: Set<string>;
     }
   ): Promise<import('../../context-continuity/types').ContextContinuityPlan | null>;
+
+  // Context Continuity Delivery Receipts (Milestone 2D.5B)
+  recordContinuityReceipt(receipt: import('../../context-continuity/types').ContextContinuityReceipt): Promise<void>;
+  updateContinuityReceipt(id: string, updates: Partial<import('../../context-continuity/types').ContextContinuityReceipt>): Promise<void>;
+  getContinuityReceipt(id: string): Promise<import('../../context-continuity/types').ContextContinuityReceipt | null>;
+  getContinuityReceiptsForConversation(conversationId: string): Promise<import('../../context-continuity/types').ContextContinuityReceipt[]>;
+  getBridgedMessageIdsForConversation(conversationId: string): Promise<Set<string>>;
 }

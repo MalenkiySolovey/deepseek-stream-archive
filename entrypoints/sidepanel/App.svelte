@@ -161,6 +161,11 @@
     await saveContextContinuitySettings(continuitySettings);
   }
 
+  async function handleContinuityDeliveryModeChange(deliveryMode: 'automatic' | 'manual_next') {
+    continuitySettings = { ...continuitySettings, deliveryMode };
+    await saveContextContinuitySettings(continuitySettings);
+  }
+
   function switchTab(tab: ActiveTab) {
     activeTab = tab;
     if (tab === 'settings') {
@@ -700,6 +705,37 @@
           </div>
 
           {#if continuitySettings.enabled}
+            <div class="delivery-mode-selection">
+              <span class="delivery-mode-title">⚙️ {t.contextContinuityDeliveryMode}</span>
+              <label class="radio-label">
+                <input
+                  type="radio"
+                  name="continuity-delivery-mode"
+                  value="manual_next"
+                  checked={continuitySettings.deliveryMode === 'manual_next'}
+                  onchange={() => handleContinuityDeliveryModeChange('manual_next')}
+                />
+                <span class="radio-text">
+                  <strong>{t.deliveryModeManualNext}</strong>
+                  <span class="setting-hint">{t.deliveryModeManualNextDesc}</span>
+                </span>
+              </label>
+
+              <label class="radio-label">
+                <input
+                  type="radio"
+                  name="continuity-delivery-mode"
+                  value="automatic"
+                  checked={continuitySettings.deliveryMode === 'automatic'}
+                  onchange={() => handleContinuityDeliveryModeChange('automatic')}
+                />
+                <span class="radio-text">
+                  <strong>{t.deliveryModeAutomatic}</strong>
+                  <span class="setting-hint">{t.deliveryModeAutomaticDesc}</span>
+                </span>
+              </label>
+            </div>
+
             <div class="setting-checkbox-item continuity-suboption">
               <label class="checkbox-label" for="toggle-include-thinking">
                 <input
@@ -2090,6 +2126,23 @@
   .continuity-suboption {
     margin-left: 1.5rem;
     padding-top: 0.25rem;
+  }
+
+  .delivery-mode-selection {
+    margin-left: 1.5rem;
+    margin-top: 0.5rem;
+    margin-bottom: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .delivery-mode-title {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
   }
 
   /* Milestone 2E.3: Storage & Retention Management Styles */

@@ -20,6 +20,7 @@ export interface FetchCaptureOptions {
   onHistoryObservation?: (observation: { url: string; status: number; body: string }) => void;
   onHistoryStreamEvent?: (event: HistoryStreamCaptureEvent) => void;
   isHistoryCandidate?: (url: string) => boolean;
+  onRequest?: (input: RequestInfo | URL, init?: RequestInit) => { input?: RequestInfo | URL; init?: RequestInit } | undefined;
 }
 
 const DEFAULT_MAX_CHUNK_CHARS = 64 * 1024; // 64K characters safeguard limit
@@ -58,6 +59,18 @@ export function installFetchCapture(options: FetchCaptureOptions): () => void {
     this: any,
     ...args: any[]
   ): Promise<Response> {
+    if (options.onRequest) {
+      try {
+        const transformed = options.onRequest(args[0], args[1]);
+        if (transformed) {
+          if (transformed.input !== undefined) args[0] = transformed.input;
+          if (transformed.init !== undefined) args[1] = transformed.init;
+        }
+      } catch {
+        // Fail-open
+      }
+    }
+
     // Invoke original fetch preserving this and arguments
     const response = await (originalFetch as Function).apply(this, args);
     const input = args[0];

@@ -23,6 +23,8 @@ const ALLOWED_TYPES = new Set<BridgeEventType>([
   'history.chunk',
   'history.complete',
   'history.abort',
+  'continuity.dispatched',
+  'continuity.skipped',
 ]);
 
 const VALID_TRANSPORTS = new Set<TransportKind>(['fetch', 'xhr']);
@@ -1195,6 +1197,132 @@ export function validateGetContextContinuityStatusRequest(
   return {
     type: 'STREAMARCHIVE_GET_CONTEXT_CONTINUITY_STATUS',
     conversationId,
+  };
+}
+
+export function validateContinuityDispatchedPayload(
+  raw: unknown
+): import('./protocol').ContinuityDispatchedPayload | null {
+  if (!isRecord(raw)) return null;
+
+  if (typeof raw.deliveryId !== 'string' || raw.deliveryId.trim().length === 0) return null;
+  if (typeof raw.conversationId !== 'string' || raw.conversationId.trim().length === 0) return null;
+  if (typeof raw.remoteConversationId !== 'string') return null;
+  if (raw.parentMessageId !== null && typeof raw.parentMessageId !== 'string') return null;
+  if (!Array.isArray(raw.sourceMessageIds)) return null;
+  if (!Array.isArray(raw.sourceRevisionIds)) return null;
+  if (raw.deliveryMode !== 'automatic' && raw.deliveryMode !== 'manual_next') return null;
+  if (raw.transport !== 'fetch' && raw.transport !== 'xhr') return null;
+  if (typeof raw.timestamp !== 'number' || !Number.isFinite(raw.timestamp) || raw.timestamp <= 0) return null;
+
+  return {
+    deliveryId: raw.deliveryId,
+    conversationId: raw.conversationId,
+    remoteConversationId: raw.remoteConversationId,
+    parentMessageId: raw.parentMessageId,
+    sourceMessageIds: raw.sourceMessageIds.map(String),
+    sourceRevisionIds: raw.sourceRevisionIds.map(String),
+    deliveryMode: raw.deliveryMode,
+    transport: raw.transport,
+    timestamp: raw.timestamp,
+  };
+}
+
+export function validateContinuitySkippedPayload(
+  raw: unknown
+): import('./protocol').ContinuitySkippedPayload | null {
+  if (!isRecord(raw)) return null;
+
+  if (typeof raw.reason !== 'string' || raw.reason.trim().length === 0) return null;
+  if (typeof raw.url !== 'string') return null;
+  if (typeof raw.timestamp !== 'number' || !Number.isFinite(raw.timestamp) || raw.timestamp <= 0) return null;
+
+  const deliveryId = typeof raw.deliveryId === 'string' ? raw.deliveryId : undefined;
+
+  return {
+    deliveryId,
+    reason: raw.reason,
+    url: raw.url,
+    timestamp: raw.timestamp,
+  };
+}
+
+export function validateRecordContinuityReceiptRequest(
+  raw: unknown
+): import('./messages').RecordContinuityReceiptRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_RECORD_CONTINUITY_RECEIPT') return null;
+  if (!isRecord(raw.receipt)) return null;
+
+  const receipt = raw.receipt;
+  if (typeof receipt.id !== 'string' || receipt.id.trim().length === 0) return null;
+  if (typeof receipt.conversationId !== 'string' || receipt.conversationId.trim().length === 0) return null;
+  if (typeof receipt.remoteConversationId !== 'string') return null;
+  if (receipt.parentMessageId !== null && typeof receipt.parentMessageId !== 'string') return null;
+  if (!Array.isArray(receipt.sourceMessageIds)) return null;
+  if (!Array.isArray(receipt.sourceRevisionIds)) return null;
+  if (receipt.deliveryMode !== 'automatic' && receipt.deliveryMode !== 'manual_next') return null;
+  if (
+    receipt.state !== 'dispatched' &&
+    receipt.state !== 'response_observed' &&
+    receipt.state !== 'bridged' &&
+    receipt.state !== 'failed'
+  ) {
+    return null;
+  }
+  if (typeof receipt.createdAt !== 'number' || receipt.createdAt <= 0) return null;
+  if (typeof receipt.updatedAt !== 'number' || receipt.updatedAt <= 0) return null;
+
+  return {
+    type: 'STREAMARCHIVE_RECORD_CONTINUITY_RECEIPT',
+    receipt: receipt as unknown as import('../context-continuity/types').ContextContinuityReceipt,
+  };
+}
+
+export function validateGetContinuityReceiptsRequest(
+  raw: unknown
+): import('./messages').GetContinuityReceiptsRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_GET_CONTINUITY_RECEIPTS') return null;
+  if (typeof raw.conversationId !== 'string' || raw.conversationId.trim().length === 0) return null;
+
+  return {
+    type: 'STREAMARCHIVE_GET_CONTINUITY_RECEIPTS',
+    conversationId: raw.conversationId.trim(),
+  };
+}
+
+export function validateArmContinuityDeliveryRequest(
+  raw: unknown
+): import('./messages').ArmContinuityDeliveryRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_ARM_CONTINUITY_DELIVERY') return null;
+  if (typeof raw.conversationId !== 'string' || raw.conversationId.trim().length === 0) return null;
+
+  const leafMessageId = typeof raw.leafMessageId === 'string' ? raw.leafMessageId.trim() : undefined;
+  const branchSelections = isRecord(raw.branchSelections)
+    ? (raw.branchSelections as Record<string, number>)
+    : undefined;
+
+  return {
+    type: 'STREAMARCHIVE_ARM_CONTINUITY_DELIVERY',
+    conversationId: raw.conversationId.trim(),
+    leafMessageId,
+    branchSelections,
+  };
+}
+
+export function validateRevokeContinuityDeliveryRequest(
+  raw: unknown
+): import('./messages').RevokeContinuityDeliveryRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_REVOKE_CONTINUITY_DELIVERY') return null;
+
+  const reason = typeof raw.reason === 'string' ? raw.reason.trim() : undefined;
+
+  return {
+    type: 'STREAMARCHIVE_REVOKE_CONTINUITY_DELIVERY',
+    reason,
   };
 }
 

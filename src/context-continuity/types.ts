@@ -80,6 +80,29 @@ export interface ContextContinuityPlan {
   createdAt: number;
 }
 
+export type ContinuityDeliveryMode = 'automatic' | 'manual_next';
+
+export type ContinuityReceiptState = 'dispatched' | 'response_observed' | 'bridged' | 'failed';
+
+/**
+ * Operational ledger record tracking the lifecycle of an explicit context delivery.
+ */
+export interface ContextContinuityReceipt {
+  id: string; // deliveryId
+  conversationId: string;
+  remoteConversationId: string;
+  parentMessageId: string | null;
+  sourceMessageIds: string[];
+  sourceRevisionIds: string[];
+  deliveryMode: ContinuityDeliveryMode;
+  state: ContinuityReceiptState;
+  createdAt: number;
+  updatedAt: number;
+  rawStreamKey?: string;
+  resultingMessageId?: string;
+  error?: string;
+}
+
 /**
  * User-configurable settings for Context Continuity.
  * Defaults strictly to OFF.
@@ -87,11 +110,13 @@ export interface ContextContinuityPlan {
 export interface ContextContinuitySettings {
   enabled: boolean;
   includeThinking: boolean;
+  deliveryMode: ContinuityDeliveryMode;
 }
 
 export const DEFAULT_CONTEXT_CONTINUITY_SETTINGS: ContextContinuitySettings = {
   enabled: false,
   includeThinking: false,
+  deliveryMode: 'manual_next',
 };
 
 /**

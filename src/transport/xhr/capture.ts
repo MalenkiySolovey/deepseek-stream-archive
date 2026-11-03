@@ -11,6 +11,7 @@ export interface XhrCaptureOptions {
   isCandidate?: (metadata: RequestCandidateMetadata) => boolean;
   onHistoryObservation?: (observation: { url: string; status: number; body: string }) => void;
   isHistoryCandidate?: (url: string) => boolean;
+  onRequest?: (context: { method: string; url: string; body: unknown; xhr: XMLHttpRequest }) => { body?: unknown } | undefined;
 }
 
 interface XhrCaptureState {
@@ -277,7 +278,24 @@ export function installXhrCapture(options: XhrCaptureOptions): () => void {
       }
     }
 
-    return Reflect.apply(originalSend, this, args);
+    let sendArgs = args;
+    if (options.onRequest) {
+      try {
+        const transformed = options.onRequest({
+          method: state.metadata?.method || 'GET',
+          url: state.rawUrl || state.metadata?.url || '',
+          body: args[0],
+          xhr,
+        });
+        if (transformed && transformed.body !== undefined) {
+          sendArgs = [transformed.body];
+        }
+      } catch {
+        // Fail-open
+      }
+    }
+
+    return Reflect.apply(originalSend, this, sendArgs);
   };
 
   return () => {

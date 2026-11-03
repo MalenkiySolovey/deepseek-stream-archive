@@ -9,7 +9,7 @@ test.describe('E2E Browser Compatibility: Clear Entire Archive & Safe Deletion',
     // 1. Seed database with conversation, message, revision, raw stream, and staging record
     await sidepanel.evaluate(async () => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
-        const req = indexedDB.open('StreamArchiveDB', 8);
+        const req = indexedDB.open('StreamArchiveDB');
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });
@@ -115,7 +115,7 @@ test.describe('E2E Browser Compatibility: Clear Entire Archive & Safe Deletion',
     // 8. Verify all 9 IndexedDB stores are 0
     const allCounts = await sidepanel.evaluate(async () => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
-        const req = indexedDB.open('StreamArchiveDB', 8);
+        const req = indexedDB.open('StreamArchiveDB');
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });

@@ -7,6 +7,8 @@
     MESSAGE_PREVIEW_CONVERSATION_DELETE,
     MESSAGE_DELETE_CONVERSATION,
     MESSAGE_BUILD_CONTEXT_CONTINUITY_PLAN,
+    MESSAGE_ARM_CONTINUITY_DELIVERY,
+    MESSAGE_REVOKE_CONTINUITY_DELIVERY,
     type GetArchiveConversationRequest,
 
     type GetArchiveConversationResponse,
@@ -235,16 +237,97 @@
     await performExport();
   }
 
-  // Milestone 2D.5A: Context Continuity Preview State
+  // Milestone 2D.5A & 2D.5B: Context Continuity Preview & Delivery State
   let showContinuityModal = $state(false);
   let continuityPlan = $state<ContextContinuityPlan | null>(null);
   let isBuildingContinuityPlan = $state(false);
   let continuityError = $state<string | null>(null);
   let continuitySettings = $state<ContextContinuitySettings | null>(null);
+  let isArmed = $state(false);
+
+  function getActiveLeafId(): string | undefined {
+    const list = visibleMessages();
+    return list[list.length - 1]?.id;
+  }
+
+  async function refreshContinuityPlan() {
+    if (!detail || !continuitySettings?.enabled) return;
+    try {
+      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+        const res = await new Promise<any>((resolve) => {
+          chrome.runtime.sendMessage(
+            {
+              type: MESSAGE_BUILD_CONTEXT_CONTINUITY_PLAN,
+              conversationId: detail!.conversation.id,
+              branchSelections,
+            },
+            (r) => resolve(r || { success: false })
+          );
+        });
+        if (res && res.success && res.plan) {
+          continuityPlan = res.plan;
+          if (continuitySettings.deliveryMode === 'automatic' && res.plan.eligibleBlockCount > 0 && !isArmed) {
+            handleArmToggle(true);
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function handleArmToggle(forceArm = false) {
+    if (!detail) return;
+    if (isArmed && !forceArm) {
+      isArmed = false;
+      try {
+        chrome.runtime.sendMessage({ type: MESSAGE_REVOKE_CONTINUITY_DELIVERY }).catch(() => {});
+      } catch {
+        // ignore
+      }
+    } else {
+      try {
+        const activeLeafId = getActiveLeafId();
+        const res = await new Promise<any>((resolve) => {
+          chrome.runtime.sendMessage(
+            {
+              type: MESSAGE_ARM_CONTINUITY_DELIVERY,
+              conversationId: detail!.conversation.id,
+              leafMessageId: activeLeafId,
+              branchSelections,
+            },
+            (r) => resolve(r || { success: false })
+          );
+        });
+
+        if (res && res.success && res.envelope) {
+          isArmed = true;
+          try {
+            const tabs = await chrome.tabs.query({ url: '*://chat.deepseek.com/*' });
+            for (const tab of tabs || []) {
+              if (tab.id) {
+                chrome.tabs.sendMessage(tab.id, {
+                  type: 'STREAMARCHIVE_DISPATCH_ARM_TO_MAIN',
+                  envelope: res.envelope,
+                }).catch(() => {});
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to arm continuity delivery', err);
+      }
+    }
+  }
 
   async function checkContinuitySettings() {
     try {
       continuitySettings = await getContextContinuitySettings();
+      if (detail && continuitySettings?.enabled) {
+        refreshContinuityPlan();
+      }
     } catch {
       continuitySettings = null;
     }
@@ -303,6 +386,7 @@
         >(req);
         if (res && res.success && res.data) {
           detail = res.data;
+          refreshContinuityPlan();
         } else {
           error = res?.error || 'Failed to load conversation details';
         }
@@ -466,6 +550,18 @@
     {#if detail}
       <div class="header-actions">
         {#if continuitySettings?.enabled}
+          {#if continuityPlan && continuityPlan.eligibleBlockCount > 0 && continuitySettings.deliveryMode === 'manual_next'}
+            <button
+              class="continuity-arm-btn"
+              class:armed={isArmed}
+              id="arm-continuity-btn"
+              type="button"
+              onclick={() => handleArmToggle(false)}
+              title={isArmed ? t.revokeContinuityBtn : t.armContinuityNextBtn}
+            >
+              {isArmed ? '✅ ' + t.armedContinuityStatus : '⚡ ' + t.armContinuityNextBtn}
+            </button>
+          {/if}
           <button
             class="continuity-header-btn"
             id="preview-continuity-btn"
@@ -525,6 +621,11 @@
               <span class="role-badge" class:asst={isAssistant} class:usr={!isAssistant}>
                 {isAssistant ? t.roleAssistant : t.roleUser}
               </span>
+              {#if !isAssistant && msg.contextContinuityDeliveryId}
+                <span class="continuity-attached-badge" title="Delivery ID: {msg.contextContinuityDeliveryId}">
+                  {t.continuityAttachedBadge}
+                </span>
+              {/if}
               {#if isAssistant}
                 <span class="status-pill status-{msg.status}">
                   {msg.status}
@@ -945,6 +1046,49 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
+  }
+
+  .continuity-arm-btn {
+    padding: 0.3rem 0.65rem;
+    border-radius: 4px;
+    background: #0284c7;
+    border: 1px solid #38bdf8;
+    color: #ffffff;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    transition: background 0.15s, border-color 0.15s;
+  }
+
+  .continuity-arm-btn:hover {
+    background: #0369a1;
+    border-color: #7dd3fc;
+  }
+
+  .continuity-arm-btn.armed {
+    background: #059669;
+    border-color: #34d399;
+    color: #ecfdf5;
+  }
+
+  .continuity-arm-btn.armed:hover {
+    background: #047857;
+  }
+
+  .continuity-attached-badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: #38bdf8;
+    background: rgba(14, 165, 233, 0.12);
+    border: 1px solid rgba(56, 189, 248, 0.3);
+    padding: 0.1rem 0.4rem;
+    border-radius: 4px;
+    margin-left: 0.4rem;
   }
 
   .continuity-header-btn {

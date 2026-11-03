@@ -15,6 +15,7 @@ describe('Context Continuity Planner', () => {
   const defaultEnabledSettings: ContextContinuitySettings = {
     enabled: true,
     includeThinking: false,
+    deliveryMode: 'manual_next',
   };
 
   function createMsg(id: string, parentId: string | undefined, role: 'user' | 'assistant', createdAt: number): Message {
@@ -79,7 +80,7 @@ describe('Context Continuity Planner', () => {
         conversationId,
         messages: [u1, a1],
         revisionsMap: new Map([['a1', [rev1]]]),
-        settings: { enabled: false, includeThinking: false },
+        settings: { enabled: false, includeThinking: false, deliveryMode: 'manual_next' },
       });
 
       expect(plan.eligibleBlocks).toHaveLength(0);
@@ -164,7 +165,7 @@ describe('Context Continuity Planner', () => {
         conversationId,
         messages: [u1, a1],
         revisionsMap: new Map([['a1', [rev1]]]),
-        settings: { enabled: true, includeThinking: false },
+        settings: { enabled: true, includeThinking: false, deliveryMode: 'manual_next' },
       });
       expect(planNoThinking.totalThinkingChars).toBe(0);
       expect(planNoThinking.formattedPreview).not.toContain('Recovered DeepThink:');
@@ -175,7 +176,7 @@ describe('Context Continuity Planner', () => {
         conversationId,
         messages: [u1, a1],
         revisionsMap: new Map([['a1', [rev1]]]),
-        settings: { enabled: true, includeThinking: true },
+        settings: { enabled: true, includeThinking: true, deliveryMode: 'manual_next' },
       });
       expect(planWithThinking.totalThinkingChars).toBeGreaterThan(0);
       expect(planWithThinking.formattedPreview).toContain('Recovered DeepThink:');

@@ -1,6 +1,8 @@
 export const BRIDGE_SOURCE_TAG = 'deepseek-streamarchive' as const;
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
 export const STREAMARCHIVE_BRIDGE_EVENT = 'streamarchive:bridge-event' as const;
+export const STREAMARCHIVE_CONTINUITY_ARM_EVENT = 'streamarchive:continuity:arm' as const;
+export const STREAMARCHIVE_CONTINUITY_REVOKE_EVENT = 'streamarchive:continuity:revoke' as const;
 
 export type BridgeEventType =
   | 'bridge.ready'
@@ -13,7 +15,9 @@ export type BridgeEventType =
   | 'history.open'
   | 'history.chunk'
   | 'history.complete'
-  | 'history.abort';
+  | 'history.abort'
+  | 'continuity.dispatched'
+  | 'continuity.skipped';
 
 export interface StreamArchiveBridgeEnvelope<T = unknown> {
   source: typeof BRIDGE_SOURCE_TAG;
@@ -64,4 +68,23 @@ export interface HistoryStreamCompletePayload {
 export interface HistoryStreamAbortPayload {
   historyId: string;
   reason?: string;
+}
+
+export interface ContinuityDispatchedPayload {
+  deliveryId: string;
+  conversationId: string;
+  remoteConversationId: string;
+  parentMessageId: string | null;
+  sourceMessageIds: string[];
+  sourceRevisionIds: string[];
+  deliveryMode: 'automatic' | 'manual_next';
+  transport: 'fetch' | 'xhr';
+  timestamp: number;
+}
+
+export interface ContinuitySkippedPayload {
+  deliveryId?: string;
+  reason: string;
+  url: string;
+  timestamp: number;
 }

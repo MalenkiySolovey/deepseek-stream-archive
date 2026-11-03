@@ -29,13 +29,14 @@ test.describe('E2E Browser Compatibility: Context Continuity Planner & Transpare
     expect(storedSettings).toEqual({
       enabled: true,
       includeThinking: true,
+      deliveryMode: 'manual_next',
     });
 
     // 3. Seed IndexedDB with conversation, filtered turn, sibling branch, and server-history turn
     const convId = 'conv-e2e-continuity';
     await sidepanel.evaluate(async (conversationId) => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
-        const req = indexedDB.open('StreamArchiveDB', 8);
+        const req = indexedDB.open('StreamArchiveDB');
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });

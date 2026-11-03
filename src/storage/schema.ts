@@ -1,5 +1,5 @@
 export const DB_NAME = 'StreamArchiveDB' as const;
-export const DB_VERSION = 8 as const;
+export const DB_VERSION = 9 as const;
 
 export const STORE_CONVERSATIONS = 'conversations' as const;
 export const STORE_MESSAGES = 'messages' as const;
@@ -10,6 +10,7 @@ export const STORE_RAW_STREAM_BATCHES = 'raw_stream_batches' as const;
 export const STORE_CANONICAL_CHECKPOINTS = 'canonical_checkpoints' as const;
 export const STORE_HISTORY_STAGING = 'history_staging' as const;
 export const STORE_HISTORY_STAGING_MANIFESTS = 'history_staging_manifests' as const;
+export const STORE_CONTEXT_CONTINUITY_RECEIPTS = 'context_continuity_receipts' as const;
 
 export interface CanonicalStreamCheckpointRecord {
   streamKey: string;
@@ -121,5 +122,14 @@ export function configureDatabaseSchema(db: IDBDatabase, tx?: IDBTransaction | n
     manifestStore.createIndex('sessionId', 'sessionId', { unique: false });
     manifestStore.createIndex('state', 'state', { unique: false });
     manifestStore.createIndex('createdAt', 'createdAt', { unique: false });
+  }
+
+  // Store: context_continuity_receipts (v9)
+  if (!db.objectStoreNames.contains(STORE_CONTEXT_CONTINUITY_RECEIPTS)) {
+    const receiptStore = db.createObjectStore(STORE_CONTEXT_CONTINUITY_RECEIPTS, { keyPath: 'id' });
+    receiptStore.createIndex('conversationId', 'conversationId', { unique: false });
+    receiptStore.createIndex('state', 'state', { unique: false });
+    receiptStore.createIndex('createdAt', 'createdAt', { unique: false });
+    receiptStore.createIndex('rawStreamKey', 'rawStreamKey', { unique: false });
   }
 }

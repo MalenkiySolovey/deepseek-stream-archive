@@ -118,6 +118,9 @@ export class HistoryReconciler {
         // For user messages, preserve prompt text in content
         if (hm.role === 'user' && hm.text.length > 0 && !updatedMsg.content) {
           updatedMsg.content = hm.text;
+          if (hm.continuityDeliveryId && !updatedMsg.contextContinuityDeliveryId) {
+            updatedMsg.contextContinuityDeliveryId = hm.continuityDeliveryId;
+          }
           modified = true;
         }
 
@@ -180,6 +183,7 @@ export class HistoryReconciler {
           role: hm.role,
           status: hm.status,
           content: hm.role === 'user' ? hm.text : undefined,
+          contextContinuityDeliveryId: hm.continuityDeliveryId,
           createdAt: hm.createdAt || now,
           updatedAt: hm.createdAt || now,
         };

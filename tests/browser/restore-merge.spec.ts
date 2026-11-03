@@ -74,7 +74,7 @@ test.describe('E2E Browser Compatibility: Conservative Safe Restore (Merge Mode)
 
     // 4. Reset IndexedDB directly in browser so we can create local Conversation Alpha
     await sidepanel.evaluate(async () => {
-      const dbReq = indexedDB.open('StreamArchiveDB', 8);
+      const dbReq = indexedDB.open('StreamArchiveDB');
       await new Promise<void>((resolve, reject) => {
         dbReq.onsuccess = () => {
           const db = dbReq.result;

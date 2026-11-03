@@ -9,7 +9,7 @@ test.describe('E2E Browser Compatibility: Raw Evidence Retention & Storage Obser
     // 1. Seed database with old healthy stream, recent stream, and protected recovery stream
     await sidepanel.evaluate(async () => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
-        const req = indexedDB.open('StreamArchiveDB', 8);
+        const req = indexedDB.open('StreamArchiveDB');
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });
@@ -198,7 +198,7 @@ test.describe('E2E Browser Compatibility: Raw Evidence Retention & Storage Obser
     // 9. Inspect IndexedDB directly to verify only old healthy stream was pruned
     const counts = await sidepanel.evaluate(async () => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
-        const req = indexedDB.open('StreamArchiveDB', 8);
+        const req = indexedDB.open('StreamArchiveDB');
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });

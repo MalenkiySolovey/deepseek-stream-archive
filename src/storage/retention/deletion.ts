@@ -21,6 +21,7 @@ import {
   STORE_RECOVERY_EVENTS,
   STORE_RAW_STREAMS,
   STORE_RAW_STREAM_BATCHES,
+  STORE_CONTEXT_CONTINUITY_RECEIPTS,
 } from '../schema';
 import type { Conversation, Message, ResponseRevision, RecoveryEvent } from '../../core/models';
 import type { RawStreamRecord } from '../raw-journal/types';
@@ -37,6 +38,7 @@ const CASCADE_STORES = [
   STORE_RECOVERY_EVENTS,
   STORE_RAW_STREAMS,
   STORE_RAW_STREAM_BATCHES,
+  STORE_CONTEXT_CONTINUITY_RECEIPTS,
 ] as const;
 
 /**
@@ -322,6 +324,20 @@ export async function deleteConversationCascade(
             if (bCursor) {
               bCursor.delete();
               bCursor.continue();
+            }
+          };
+        }
+
+        // 4. Cascade delete context continuity receipts for this conversation
+        if (tx.objectStoreNames.contains(STORE_CONTEXT_CONTINUITY_RECEIPTS)) {
+          const receiptStore = tx.objectStore(STORE_CONTEXT_CONTINUITY_RECEIPTS);
+          const rIndex = receiptStore.index('conversationId');
+          const rCursorReq = rIndex.openCursor(makeKeyRange(plan.conversationId));
+          rCursorReq.onsuccess = () => {
+            const rCursor = rCursorReq.result;
+            if (rCursor) {
+              rCursor.delete();
+              rCursor.continue();
             }
           };
         }

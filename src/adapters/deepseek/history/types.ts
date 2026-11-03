@@ -92,6 +92,7 @@ export interface NormalizedHistoryMessage {
   isFiltered: boolean;
   templateResponse?: string;
   fragmentsCount: number;
+  continuityDeliveryId?: string;
 }
 
 export interface DeepSeekParsedHistory {

@@ -3,6 +3,7 @@ import 'fake-indexeddb/auto';
 import { IndexedDbStorageRepository } from '../src/storage/repositories/storage-repository-impl';
 import { RawStreamRepository } from '../src/storage/raw-journal/repository';
 import { openExtensionDatabase } from '../src/storage/db';
+import { DB_VERSION } from '../src/storage/schema';
 import {
   createPortableBackupSnapshot,
   buildCompressedBackup,
@@ -181,7 +182,7 @@ describe('Portable Full-Archive Backup v1 (Snapshot, Native Gzip, Validation)', 
     expect(snapshot.manifest.format).toBe(PORTABLE_BACKUP_FORMAT);
     expect(snapshot.manifest.formatVersion).toBe(PORTABLE_BACKUP_FORMAT_VERSION);
     expect(snapshot.manifest.sourceDatabase).toBe('StreamArchiveDB');
-    expect(snapshot.manifest.sourceDatabaseVersion).toBe(8);
+    expect(snapshot.manifest.sourceDatabaseVersion).toBe(DB_VERSION);
     expect(snapshot.manifest.compression).toBe('gzip');
 
     // Verify store counts in footer

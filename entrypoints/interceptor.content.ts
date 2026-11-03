@@ -3,8 +3,12 @@ import {
   BRIDGE_SOURCE_TAG,
   BRIDGE_PROTOCOL_VERSION,
   STREAMARCHIVE_BRIDGE_EVENT,
+  STREAMARCHIVE_CONTINUITY_ARM_EVENT,
+  STREAMARCHIVE_CONTINUITY_REVOKE_EVENT,
   type StreamArchiveBridgeEnvelope,
   type SyntheticTestPayload,
+  type ContinuityDispatchedPayload,
+  type ContinuitySkippedPayload,
 } from '../src/bridge/protocol';
 import type { TransportEvent } from '../src/transport/types';
 import { installFetchCapture } from '../src/transport/fetch/capture';
@@ -15,6 +19,8 @@ import {
   extractHistorySessionId,
 } from '../src/adapters/deepseek/history/capture-policy';
 import type { HistoryObservationPayload } from '../src/bridge/protocol';
+import { augmentDeepSeekRequest } from '../src/adapters/deepseek/request/augment';
+import type { ContextDeliveryEnvelope } from '../src/adapters/deepseek/request/types';
 import { logger } from '../src/shared/logger';
 
 const TRANSPORT_HOOK_KEY = Symbol.for('__STREAMARCHIVE_MAIN_HOOK__');
@@ -186,6 +192,82 @@ export default defineContentScript({
       }
     };
 
+    // ── Milestone 2D.5B: Context Continuity Delivery Envelope (MAIN world) ──
+    let activeEnvelope: ContextDeliveryEnvelope | null = null;
+
+    window.addEventListener(STREAMARCHIVE_CONTINUITY_ARM_EVENT, (event: any) => {
+      try {
+        const detail = typeof event.detail === 'string' ? JSON.parse(event.detail) : event.detail;
+        if (detail && detail.deliveryId && detail.formattedContext) {
+          activeEnvelope = detail as ContextDeliveryEnvelope;
+          logger.info(`[StreamArchive] MAIN: Armed continuity delivery envelope ${detail.deliveryId}`);
+        }
+      } catch (err) {
+        logger.warn('[StreamArchive] MAIN: Failed to parse continuity arm event', err);
+      }
+    });
+
+    window.addEventListener(STREAMARCHIVE_CONTINUITY_REVOKE_EVENT, () => {
+      if (activeEnvelope) {
+        logger.info(`[StreamArchive] MAIN: Revoked continuity delivery envelope ${activeEnvelope.deliveryId}`);
+        activeEnvelope = null;
+      }
+    });
+
+    const handleOutgoingRequest = (
+      url: string,
+      method: string,
+      body: unknown,
+      transport: 'fetch' | 'xhr'
+    ): { body?: unknown } | undefined => {
+      if (!activeEnvelope) {
+        return undefined;
+      }
+
+      const augResult = augmentDeepSeekRequest({
+        url,
+        method,
+        body,
+        envelope: activeEnvelope,
+      });
+
+      if (augResult.augmented) {
+        const env = activeEnvelope;
+        // In manual_next mode, single delivery disarms the envelope immediately
+        if (env.deliveryMode === 'manual_next') {
+          activeEnvelope = null;
+        }
+
+        const dispatchedPayload: ContinuityDispatchedPayload = {
+          deliveryId: augResult.deliveryId,
+          conversationId: env.conversationId,
+          remoteConversationId: env.remoteConversationId,
+          parentMessageId: env.expectedParentMessageId,
+          sourceMessageIds: env.sourceMessageIds,
+          sourceRevisionIds: env.sourceRevisionIds,
+          deliveryMode: env.deliveryMode,
+          transport,
+          timestamp: Date.now(),
+        };
+        dispatchBridgeEnvelope('continuity.dispatched', dispatchedPayload);
+
+        logger.info(`[StreamArchive] Injected recovered context into DeepSeek prompt (delivery ${augResult.deliveryId})`);
+        return { body: augResult.augmentedBody };
+      } else {
+        if (augResult.reason !== 'not_candidate_endpoint') {
+          const skippedPayload: ContinuitySkippedPayload = {
+            deliveryId: activeEnvelope?.deliveryId,
+            reason: augResult.reason,
+            url,
+            timestamp: Date.now(),
+          };
+          dispatchBridgeEnvelope('continuity.skipped', skippedPayload);
+          logger.info(`[StreamArchive] Continuity skipped: ${augResult.reason}`);
+        }
+        return undefined;
+      }
+    };
+
     // Install passive transport observers
     installFetchCapture({
       producerSessionId,
@@ -194,6 +276,22 @@ export default defineContentScript({
       isCandidate,
       onHistoryStreamEvent: handleHistoryStreamEvent,
       isHistoryCandidate: isDeepSeekHistoryEndpoint,
+      onRequest(input, init) {
+        const url = typeof input === 'string' ? input : 'url' in input ? input.url : input.toString();
+        const method = (init?.method || (typeof input === 'object' && 'method' in input ? input.method : 'GET')).toUpperCase();
+        const body = init?.body ?? (typeof input === 'object' && 'body' in input ? (input as any).body : undefined);
+
+        const res = handleOutgoingRequest(url, method, body, 'fetch');
+        if (res && res.body !== undefined) {
+          return {
+            init: {
+              ...init,
+              body: res.body as any,
+            },
+          };
+        }
+        return undefined;
+      },
     });
 
     installXhrCapture({
@@ -203,6 +301,9 @@ export default defineContentScript({
       isCandidate,
       onHistoryObservation: handleHistoryObservation,
       isHistoryCandidate: isDeepSeekHistoryEndpoint,
+      onRequest(ctx) {
+        return handleOutgoingRequest(ctx.url, ctx.method, ctx.body, 'xhr');
+      },
     });
 
     // Announce bridge readiness to ISOLATED world

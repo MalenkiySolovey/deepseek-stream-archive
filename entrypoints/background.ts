@@ -45,6 +45,10 @@ import {
   MESSAGE_SET_CONTEXT_CONTINUITY_SETTINGS,
   MESSAGE_BUILD_CONTEXT_CONTINUITY_PLAN,
   MESSAGE_GET_CONTEXT_CONTINUITY_STATUS,
+  MESSAGE_RECORD_CONTINUITY_RECEIPT,
+  MESSAGE_GET_CONTINUITY_RECEIPTS,
+  MESSAGE_ARM_CONTINUITY_DELIVERY,
+  MESSAGE_REVOKE_CONTINUITY_DELIVERY,
 
   type SaveSyntheticBatchRequest,
   type SaveSyntheticBatchResponse,
@@ -103,7 +107,12 @@ import {
   validateSetContextContinuitySettingsRequest,
   validateBuildContextContinuityPlanRequest,
   validateGetContextContinuityStatusRequest,
+  validateRecordContinuityReceiptRequest,
+  validateGetContinuityReceiptsRequest,
+  validateArmContinuityDeliveryRequest,
+  validateRevokeContinuityDeliveryRequest,
 } from '../src/bridge/validation';
+import type { ContextDeliveryEnvelope } from '../src/adapters/deepseek/request/types';
 import {
   getContextContinuitySettings,
   saveContextContinuitySettings,
@@ -1163,6 +1172,41 @@ export default defineBackground(() => {
           runtimeCanonicalCheckpointsCount++;
           runtimeRevisionsCommittedCount += validated.checkpoint.revisions.length;
           lastPersistedAt = Date.now();
+
+          // Milestone 2D.5B: Advance continuity receipt lifecycle on canonical checkpoint
+          const targetConvId =
+            validated.checkpoint.conversation?.id || validated.checkpoint.message.conversationId;
+          storageRepo
+            .getContinuityReceiptsForConversation(targetConvId)
+            .then((receipts) => {
+              const pending = receipts
+                .filter((r) => r.state === 'dispatched' || r.state === 'response_observed')
+                .at(-1);
+              if (!pending) return;
+
+              if (validated.checkpoint.isTerminal) {
+                const assistantMsg =
+                  validated.checkpoint.message.role === 'assistant'
+                    ? validated.checkpoint.message
+                    : undefined;
+                storageRepo
+                  .updateContinuityReceipt(pending.id, {
+                    state: 'bridged',
+                    rawStreamKey: validated.checkpoint.streamKey,
+                    resultingMessageId: assistantMsg?.id,
+                  })
+                  .catch(() => {});
+              } else if (pending.state === 'dispatched') {
+                storageRepo
+                  .updateContinuityReceipt(pending.id, {
+                    state: 'response_observed',
+                    rawStreamKey: validated.checkpoint.streamKey,
+                  })
+                  .catch(() => {});
+              }
+            })
+            .catch(() => {});
+
           const res: PersistCanonicalCheckpointResponse = {
             success: true,
             streamKey: validated.checkpoint.streamKey,
@@ -1798,6 +1842,109 @@ export default defineBackground(() => {
           }
         })
         .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
+      return true;
+    }
+
+    // ── Milestone 2D.5B: Continuity Delivery Receipts & Arming ──
+
+    if (message.type === MESSAGE_RECORD_CONTINUITY_RECEIPT) {
+      const validated = validateRecordContinuityReceiptRequest(message);
+      if (!validated) {
+        sendResponse({ success: false, error: 'Invalid record continuity receipt payload' });
+        return false;
+      }
+      storageRepo
+        .recordContinuityReceipt(validated.receipt)
+        .then(() => sendResponse({ success: true }))
+        .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
+      return true;
+    }
+
+    if (message.type === MESSAGE_GET_CONTINUITY_RECEIPTS) {
+      const validated = validateGetContinuityReceiptsRequest(message);
+      if (!validated) {
+        sendResponse({ success: false, error: 'Invalid get continuity receipts payload' });
+        return false;
+      }
+      storageRepo
+        .getContinuityReceiptsForConversation(validated.conversationId)
+        .then((receipts) => sendResponse({ success: true, receipts }))
+        .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
+      return true;
+    }
+
+    if (message.type === MESSAGE_ARM_CONTINUITY_DELIVERY) {
+      const validated = validateArmContinuityDeliveryRequest(message);
+      if (!validated) {
+        sendResponse({ success: false, error: 'Invalid arm continuity delivery payload' });
+        return false;
+      }
+      (async () => {
+        const settings = await getContextContinuitySettings();
+        const plan = await storageRepo.buildContextContinuityPlan(validated.conversationId, {
+          leafMessageId: validated.leafMessageId,
+          branchSelections: validated.branchSelections,
+          settings,
+        });
+        if (!plan || plan.eligibleBlockCount === 0) {
+          return sendResponse({ success: false, error: 'No eligible context to deliver' });
+        }
+        const conv = await storageRepo.getConversation(validated.conversationId);
+        const remoteId = conv?.remoteId || validated.conversationId;
+        const leafMsg = plan.branchLeafId ? await storageRepo.getMessage(plan.branchLeafId) : null;
+        const expectedParent = leafMsg?.remoteId || plan.branchLeafId;
+
+        const deliveryId =
+          typeof crypto !== 'undefined' && crypto.randomUUID
+            ? crypto.randomUUID()
+            : `deliv_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+        const envelope: ContextDeliveryEnvelope = {
+          deliveryId,
+          conversationId: validated.conversationId,
+          remoteConversationId: remoteId,
+          expectedParentMessageId: expectedParent,
+          formattedContext: plan.formattedPreview,
+          sourceMessageIds: plan.eligibleBlocks.map((b) => b.sourceMessageId),
+          sourceRevisionIds: plan.eligibleBlocks.map((b) => b.sourceRevisionId),
+          deliveryMode: settings.deliveryMode,
+          createdAt: Date.now(),
+          expiresAt: Date.now() + 5 * 60 * 1000, // 5 min validity
+        };
+
+        if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query) {
+          chrome.tabs.query({ url: '*://chat.deepseek.com/*' }, (tabs) => {
+            for (const tab of tabs || []) {
+              if (tab.id) {
+                chrome.tabs.sendMessage(tab.id, {
+                  type: 'STREAMARCHIVE_DISPATCH_ARM_TO_MAIN',
+                  envelope,
+                }).catch(() => {});
+              }
+            }
+          });
+        }
+
+        sendResponse({ success: true, envelope });
+      })().catch((err) =>
+        sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) })
+      );
+      return true;
+    }
+
+    if (message.type === MESSAGE_REVOKE_CONTINUITY_DELIVERY) {
+      if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query) {
+        chrome.tabs.query({ url: '*://chat.deepseek.com/*' }, (tabs) => {
+          for (const tab of tabs || []) {
+            if (tab.id) {
+              chrome.tabs.sendMessage(tab.id, {
+                type: 'STREAMARCHIVE_DISPATCH_REVOKE_TO_MAIN',
+              }).catch(() => {});
+            }
+          }
+        });
+      }
+      sendResponse({ success: true });
       return true;
     }
 

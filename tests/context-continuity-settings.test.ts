@@ -30,8 +30,17 @@ describe('Context Continuity Settings', () => {
     });
 
     it('preserves valid settings', () => {
-      const valid = { enabled: true, includeThinking: true };
+      const valid = { enabled: true, includeThinking: true, deliveryMode: 'automatic' as const };
       expect(sanitizeContextContinuitySettings(valid)).toEqual(valid);
+    });
+
+    it('sanitizes deliveryMode and defaults to manual_next on invalid value', () => {
+      const sanitized = sanitizeContextContinuitySettings({
+        enabled: true,
+        includeThinking: false,
+        deliveryMode: 'invalid_mode',
+      });
+      expect(sanitized.deliveryMode).toBe('manual_next');
     });
   });
 
@@ -64,21 +73,32 @@ describe('Context Continuity Settings', () => {
       const updated = await saveContextContinuitySettings({ enabled: true });
       expect(updated.enabled).toBe(true);
       expect(updated.includeThinking).toBe(false);
+      expect(updated.deliveryMode).toBe('manual_next');
       expect(storageStore[CONTEXT_CONTINUITY_SETTINGS_STORAGE_KEY]).toEqual({
         enabled: true,
         includeThinking: false,
+        deliveryMode: 'manual_next',
       });
 
       // 3. Reload from storage
       const reloaded = await getContextContinuitySettings();
-      expect(reloaded).toEqual({ enabled: true, includeThinking: false });
+      expect(reloaded).toEqual({
+        enabled: true,
+        includeThinking: false,
+        deliveryMode: 'manual_next',
+      });
 
-      // 4. Save second partial change: includeThinking = true
-      const secondUpdate = await saveContextContinuitySettings({ includeThinking: true });
-      expect(secondUpdate).toEqual({ enabled: true, includeThinking: true });
+      // 4. Save second partial change: deliveryMode = automatic
+      const secondUpdate = await saveContextContinuitySettings({ deliveryMode: 'automatic' });
+      expect(secondUpdate).toEqual({
+        enabled: true,
+        includeThinking: false,
+        deliveryMode: 'automatic',
+      });
       expect(storageStore[CONTEXT_CONTINUITY_SETTINGS_STORAGE_KEY]).toEqual({
         enabled: true,
-        includeThinking: true,
+        includeThinking: false,
+        deliveryMode: 'automatic',
       });
     });
 

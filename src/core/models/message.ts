@@ -31,6 +31,7 @@ export interface Message {
   role: MessageRole;
   status: MessageStatus;
   content?: string;
+  contextContinuityDeliveryId?: string;
   remoteCreatedAt?: number;
   createdAt: number;
   updatedAt: number;

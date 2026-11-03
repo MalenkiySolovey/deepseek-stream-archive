@@ -22,9 +22,15 @@ export function sanitizeContextContinuitySettings(raw: unknown): ContextContinui
       ? obj.includeThinking
       : DEFAULT_CONTEXT_CONTINUITY_SETTINGS.includeThinking;
 
+  const deliveryMode =
+    obj.deliveryMode === 'automatic' || obj.deliveryMode === 'manual_next'
+      ? obj.deliveryMode
+      : DEFAULT_CONTEXT_CONTINUITY_SETTINGS.deliveryMode;
+
   return {
     enabled,
     includeThinking,
+    deliveryMode,
   };
 }
 

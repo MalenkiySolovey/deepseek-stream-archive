@@ -85,7 +85,7 @@ describe('Passive Transport Byte-Identity Invariant (Milestone 2D.5A)', () => {
         conversationId: 'conv-1',
         messages: [testMsg],
         revisionsMap: new Map([[testMsg.id, [testRev]]]),
-        settings: { enabled: true, includeThinking: true },
+        settings: { enabled: true, includeThinking: true, deliveryMode: 'manual_next' },
       });
       expect(testPlan.eligibleBlockCount).toBe(1);
       expect(testPlan.formattedPreview.length).toBeGreaterThan(0);

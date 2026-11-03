@@ -107,12 +107,17 @@ Other frequent loss vectors include:
 - **Archive Maintenance & Purge:** Fast maintenance actions to clean up expired raw streams, purge all raw evidence while preserving conversations, or reset the local archive.
 - **Local Storage Scope Notice:** All deletions operate strictly inside the local browser storage and never alter data on DeepSeek servers.
 
-### 11. Branch-Aware Context Continuity & Transparent Preview (Milestone 2D.5A)
+### 11. Branch-Aware Context Continuity & Explicit Delivery (Milestones 2D.5A & 2D.5B)
 - **Topological Lineage Derivation:** Pure topological resolver identifying the active branch path, cleanly isolating alternate sibling regenerations (`wrong_branch`) and stripping non-logical turns.
 - **Forensic Cause Invariant:** Filtered responses, network interruptions, manual stops, and template replacements participate equally under uniform structural eligibility rules.
 - **Budget Clamping & Safe Slicing:** Limits inclusion to 4 blocks (12,000 text chars, 6,000 thinking chars) with surrogate-safe UTF-16 slicing and visible omission disclosures.
 - **Transparent Side Panel Preview:** Dedicated modal with payload metrics, cause badges, collapsible exclusion audit, and single-click copy action.
-- **Strict Default OFF & Passive Invariant:** Context Continuity defaults strictly to disabled (`enabled: false`), with **zero** outgoing request modification in Phase 2D.5A.
+- **Explicit Context Delivery (Milestone 2D.5B):** Automated prompt augmentation delivering recovered context into subsequent DeepSeek queries without manual copy-pasting.
+- **Delivery Modes (`manual_next` vs `automatic`):** Default `manual_next` mode requires single-use arming via Side Panel ("Use continuity for next message") with automatic one-shot disarming; `automatic` mode continuously augments the next eligible turn on the active branch.
+- **Strict Fail-Open Safety:** Sends original request completely untouched if endpoint, method, JSON body, parent ID, session ID, or TTL cannot be proven 100% safe.
+- **Retry Idempotency & Delimiter Framing:** Marker boundaries prevent duplicate prompt augmentation during DeepSeek client network retries.
+- **Durable Operational Ledger (`DB_VERSION = 9`):** Stores receipts (`dispatched` -> `response_observed` -> `bridged` | `failed`), breaking infinite re-injection loops while remaining excluded from Portable Backup v1.
+- **Clean History Reconciliation:** Parses delimiter markers from server history, rendering clean user-authored prompts with the `🔄 Context Continuity attached` badge.
 
 ---
 

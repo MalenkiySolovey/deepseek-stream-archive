@@ -19,11 +19,12 @@ import {
   STORE_CANONICAL_CHECKPOINTS,
   STORE_HISTORY_STAGING,
   STORE_HISTORY_STAGING_MANIFESTS,
+  STORE_CONTEXT_CONTINUITY_RECEIPTS,
 } from '../storage/schema';
 import type { MaterializedPortableBackup } from '../backup/reader';
 import type { PortableBackupStoreCounts } from '../backup/format';
 
-export const ALL_NINE_STORES = [
+export const ALL_ARCHIVE_STORES = [
   STORE_CONVERSATIONS,
   STORE_MESSAGES,
   STORE_REVISIONS,
@@ -33,7 +34,10 @@ export const ALL_NINE_STORES = [
   STORE_CANONICAL_CHECKPOINTS,
   STORE_HISTORY_STAGING,
   STORE_HISTORY_STAGING_MANIFESTS,
+  STORE_CONTEXT_CONTINUITY_RECEIPTS,
 ] as const;
+
+export const ALL_NINE_STORES = ALL_ARCHIVE_STORES;
 
 export interface ReplaceExecutionResult {
   success: boolean;

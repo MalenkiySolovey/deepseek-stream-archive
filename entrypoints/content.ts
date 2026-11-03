@@ -1,6 +1,8 @@
 import { defineContentScript } from 'wxt/utils/define-content-script';
 import {
   STREAMARCHIVE_BRIDGE_EVENT,
+  STREAMARCHIVE_CONTINUITY_ARM_EVENT,
+  STREAMARCHIVE_CONTINUITY_REVOKE_EVENT,
   type SyntheticTestPayload,
 } from '../src/bridge/protocol';
 import {
@@ -12,6 +14,8 @@ import {
   validateHistoryStreamChunkPayload,
   validateHistoryStreamCompletePayload,
   validateHistoryStreamAbortPayload,
+  validateContinuityDispatchedPayload,
+  validateContinuitySkippedPayload,
   MAX_HISTORY_TOTAL_CHARS,
   MAX_HISTORY_CHUNKS_COUNT,
 } from '../src/bridge/validation';
@@ -27,6 +31,8 @@ import {
   MESSAGE_HISTORY_INGEST_BATCH,
   MESSAGE_HISTORY_INGEST_COMMIT,
   MESSAGE_HISTORY_INGEST_ABORT,
+  MESSAGE_RECORD_CONTINUITY_RECEIPT,
+  MESSAGE_ARM_CONTINUITY_DELIVERY,
   type SaveSyntheticBatchRequest,
   type SaveSyntheticBatchResponse,
   type ForwardTransportEventRequest,
@@ -728,14 +734,87 @@ export default defineContentScript({
 
         await processSyntheticPayload(payload);
       }
+
+      // 6. Handle Context Continuity Dispatched (Milestone 2D.5B)
+      if (envelope.type === 'continuity.dispatched') {
+        const payload = validateContinuityDispatchedPayload(envelope.payload);
+        if (payload) {
+          try {
+            await chrome.runtime.sendMessage({
+              type: MESSAGE_RECORD_CONTINUITY_RECEIPT,
+              receipt: {
+                id: payload.deliveryId,
+                conversationId: payload.conversationId,
+                remoteConversationId: payload.remoteConversationId,
+                parentMessageId: payload.parentMessageId,
+                sourceMessageIds: payload.sourceMessageIds,
+                sourceRevisionIds: payload.sourceRevisionIds,
+                deliveryMode: payload.deliveryMode,
+                state: 'dispatched',
+                createdAt: payload.timestamp,
+                updatedAt: payload.timestamp,
+              },
+            });
+            logger.info(`[StreamArchive] Recorded continuity delivery receipt: ${payload.deliveryId}`);
+          } catch {
+            // Fail-open
+          }
+        }
+      }
+
+      // 7. Handle Context Continuity Skipped (Milestone 2D.5B)
+      if (envelope.type === 'continuity.skipped') {
+        const payload = validateContinuitySkippedPayload(envelope.payload);
+        if (payload) {
+          logger.info(`[StreamArchive] Context continuity skipped: ${payload.reason}`);
+        }
+      }
     });
 
-    // Listen for extension commands to dispatch synthetic diagnostic test to MAIN world
+    // Listen for extension commands to dispatch actions across the MAIN bridge
     chrome.runtime.onMessage.addListener((message) => {
       if (message && message.type === 'STREAMARCHIVE_REQUEST_PAGE_SYNTHETIC') {
         window.dispatchEvent(new CustomEvent('streamarchive:trigger-synthetic-test'));
       }
+
+      if (message && message.type === 'STREAMARCHIVE_DISPATCH_ARM_TO_MAIN') {
+        if (message.envelope) {
+          window.dispatchEvent(
+            new CustomEvent(STREAMARCHIVE_CONTINUITY_ARM_EVENT, {
+              detail: JSON.stringify(message.envelope),
+            })
+          );
+        }
+      }
+
+      if (message && message.type === 'STREAMARCHIVE_DISPATCH_REVOKE_TO_MAIN') {
+        window.dispatchEvent(new CustomEvent(STREAMARCHIVE_CONTINUITY_REVOKE_EVENT));
+      }
     });
+
+    // SPA Navigation Route Isolation: synchronously revoke armed delivery envelope on conversation switch
+    let lastUrl = window.location.href;
+    const checkNavigation = () => {
+      if (window.location.href !== lastUrl) {
+        lastUrl = window.location.href;
+        window.dispatchEvent(new CustomEvent(STREAMARCHIVE_CONTINUITY_REVOKE_EVENT));
+      }
+    };
+    window.addEventListener('popstate', checkNavigation);
+    const navObserver = new MutationObserver(checkNavigation);
+    try {
+      navObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+    } catch {
+      // ignore
+    }
+
+    if (ctx && typeof ctx.onInvalidated === 'function') {
+      ctx.onInvalidated(() => {
+        window.removeEventListener('popstate', checkNavigation);
+        navObserver.disconnect();
+        window.dispatchEvent(new CustomEvent(STREAMARCHIVE_CONTINUITY_REVOKE_EVENT));
+      });
+    }
   },
 });
 

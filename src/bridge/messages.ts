@@ -59,6 +59,12 @@ export const MESSAGE_SET_CONTEXT_CONTINUITY_SETTINGS = 'STREAMARCHIVE_SET_CONTEX
 export const MESSAGE_BUILD_CONTEXT_CONTINUITY_PLAN = 'STREAMARCHIVE_BUILD_CONTEXT_CONTINUITY_PLAN' as const;
 export const MESSAGE_GET_CONTEXT_CONTINUITY_STATUS = 'STREAMARCHIVE_GET_CONTEXT_CONTINUITY_STATUS' as const;
 
+// ── Milestone 2D.5B: Context Continuity Delivery Messages ──
+export const MESSAGE_RECORD_CONTINUITY_RECEIPT = 'STREAMARCHIVE_RECORD_CONTINUITY_RECEIPT' as const;
+export const MESSAGE_GET_CONTINUITY_RECEIPTS = 'STREAMARCHIVE_GET_CONTINUITY_RECEIPTS' as const;
+export const MESSAGE_ARM_CONTINUITY_DELIVERY = 'STREAMARCHIVE_ARM_CONTINUITY_DELIVERY' as const;
+export const MESSAGE_REVOKE_CONTINUITY_DELIVERY = 'STREAMARCHIVE_REVOKE_CONTINUITY_DELIVERY' as const;
+
 
 
 export type ObservationState = 'not_observed' | 'observed' | 'failed' | 'unsupported';
@@ -647,6 +653,28 @@ export interface GetContextContinuityStatusResponse {
   error?: string;
 }
 
+export interface RecordContinuityReceiptRequest {
+  type: typeof MESSAGE_RECORD_CONTINUITY_RECEIPT;
+  receipt: import('../context-continuity/types').ContextContinuityReceipt;
+}
+
+export interface GetContinuityReceiptsRequest {
+  type: typeof MESSAGE_GET_CONTINUITY_RECEIPTS;
+  conversationId: string;
+}
+
+export interface ArmContinuityDeliveryRequest {
+  type: typeof MESSAGE_ARM_CONTINUITY_DELIVERY;
+  conversationId: string;
+  leafMessageId?: string;
+  branchSelections?: Record<string, number>;
+}
+
+export interface RevokeContinuityDeliveryRequest {
+  type: typeof MESSAGE_REVOKE_CONTINUITY_DELIVERY;
+  reason?: string;
+}
+
 export type ExtensionInternalMessage =
   | SaveSyntheticBatchRequest
   | GetFoundationStatusRequest
@@ -690,5 +718,9 @@ export type ExtensionInternalMessage =
   | GetContextContinuitySettingsRequest
   | SetContextContinuitySettingsRequest
   | BuildContextContinuityPlanRequest
-  | GetContextContinuityStatusRequest;
+  | GetContextContinuityStatusRequest
+  | RecordContinuityReceiptRequest
+  | GetContinuityReceiptsRequest
+  | ArmContinuityDeliveryRequest
+  | RevokeContinuityDeliveryRequest;
 

@@ -26,6 +26,7 @@ export const EXCLUDED_BACKUP_STORES = [
   'canonical_checkpoints',
   'history_staging',
   'history_staging_manifests',
+  'context_continuity_receipts',
 ] as const;
 
 export type ExcludedBackupStoreName = typeof EXCLUDED_BACKUP_STORES[number];

@@ -1,4 +1,5 @@
 import type { MessageRole, MessageStatus } from '../../../core/models';
+import { hasContinuityMarker, parseStreamArchiveAugmentedPrompt } from '../request/marker';
 import {
   normalizeRemoteId,
   type DeepSeekParsedHistory,
@@ -230,8 +231,19 @@ export class DeepSeekHistoryParser {
         }
       }
 
-      const text = textParts.join('');
+      const rawText = textParts.join('');
       const thinking = thinkParts.length > 0 ? thinkParts.join('\n') : undefined;
+
+      let text = rawText;
+      let continuityDeliveryId: string | undefined;
+
+      if (role === 'user' && hasContinuityMarker(rawText)) {
+        const parsed = parseStreamArchiveAugmentedPrompt(rawText);
+        if (parsed.isAugmented) {
+          text = parsed.userPrompt;
+          continuityDeliveryId = parsed.deliveryId;
+        }
+      }
 
       const normalizedMsg: NormalizedHistoryMessage = {
         messageId,
@@ -244,6 +256,7 @@ export class DeepSeekHistoryParser {
         isFiltered,
         templateResponse,
         fragmentsCount: fragments.length,
+        continuityDeliveryId,
       };
 
       const existing = seenMessages.get(messageId);

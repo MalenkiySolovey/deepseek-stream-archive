@@ -13,6 +13,7 @@ import {
   STORE_CANONICAL_CHECKPOINTS,
   STORE_HISTORY_STAGING,
   STORE_HISTORY_STAGING_MANIFESTS,
+  STORE_CONTEXT_CONTINUITY_RECEIPTS,
 } from '../src/storage/schema';
 
 describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () => {
@@ -73,11 +74,11 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       openReq.onerror = () => reject(openReq.error);
     });
 
-    // 2. Open via openExtensionDatabase at DB_VERSION = 8
-    expect(DB_VERSION).toBe(8);
+    // 2. Open via openExtensionDatabase at DB_VERSION = 9
+    expect(DB_VERSION).toBe(9);
     const upgradedDb = await openExtensionDatabase(fakeFactory);
 
-    expect(upgradedDb.version).toBe(8);
+    expect(upgradedDb.version).toBe(9);
 
     // Verify v1 stores still exist
     expect(upgradedDb.objectStoreNames.contains(STORE_CONVERSATIONS)).toBe(true);
@@ -191,9 +192,9 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       openReq.onerror = () => reject(openReq.error);
     });
 
-    // 2. Open via openExtensionDatabase at DB_VERSION = 8
+    // 2. Open via openExtensionDatabase at DB_VERSION = 9
     const upgradedDb = await openExtensionDatabase(fakeFactory);
-    expect(upgradedDb.version).toBe(8);
+    expect(upgradedDb.version).toBe(9);
 
     const tx = upgradedDb.transaction([STORE_MESSAGES, STORE_RAW_STREAMS], 'readonly');
     const msgStore = tx.objectStore(STORE_MESSAGES);
@@ -259,9 +260,9 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       openReq.onerror = () => reject(openReq.error);
     });
 
-    // 2. Open via openExtensionDatabase at DB_VERSION = 8
+    // 2. Open via openExtensionDatabase at DB_VERSION = 9
     const upgradedDb = await openExtensionDatabase(fakeFactory);
-    expect(upgradedDb.version).toBe(8);
+    expect(upgradedDb.version).toBe(9);
 
     const tx = upgradedDb.transaction(
       [STORE_MESSAGES, STORE_CANONICAL_CHECKPOINTS, STORE_HISTORY_STAGING],
@@ -317,9 +318,9 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       openReq.onerror = () => reject(openReq.error);
     });
 
-    // 2. Open via openExtensionDatabase at DB_VERSION = 8
+    // 2. Open via openExtensionDatabase at DB_VERSION = 9
     const upgradedDb = await openExtensionDatabase(fakeFactory);
-    expect(upgradedDb.version).toBe(8);
+    expect(upgradedDb.version).toBe(9);
 
     expect(upgradedDb.objectStoreNames.contains(STORE_HISTORY_STAGING)).toBe(true);
     expect(upgradedDb.objectStoreNames.contains(STORE_HISTORY_STAGING_MANIFESTS)).toBe(true);
@@ -375,9 +376,9 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       openReq.onerror = () => reject(openReq.error);
     });
 
-    // 2. Open via openExtensionDatabase at DB_VERSION = 8
+    // 2. Open via openExtensionDatabase at DB_VERSION = 9
     const upgradedDb = await openExtensionDatabase(fakeFactory);
-    expect(upgradedDb.version).toBe(8);
+    expect(upgradedDb.version).toBe(9);
 
     expect(upgradedDb.objectStoreNames.contains(STORE_HISTORY_STAGING)).toBe(true);
     expect(upgradedDb.objectStoreNames.contains(STORE_HISTORY_STAGING_MANIFESTS)).toBe(true);
@@ -440,9 +441,9 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       openReq.onerror = () => reject(openReq.error);
     });
 
-    // 2. Open via openExtensionDatabase at DB_VERSION = 8
+    // 2. Open via openExtensionDatabase at DB_VERSION = 9
     const upgradedDb = await openExtensionDatabase(fakeFactory);
-    expect(upgradedDb.version).toBe(8);
+    expect(upgradedDb.version).toBe(9);
 
     const tx = upgradedDb.transaction([STORE_MESSAGES], 'readonly');
     const msgStore = tx.objectStore(STORE_MESSAGES);
@@ -453,6 +454,94 @@ describe('Database Migration & Multi-Factory Caching (v1 -> v3 & v2 -> v3)', () 
       tx.oncomplete = () => {
         expect(msgReq.result).toBeDefined();
         expect(msgReq.result.id).toBe('v7-msg-1');
+        resolve();
+      };
+      tx.onerror = () => reject(tx.error);
+    });
+  });
+
+  it('preserves existing v8 database and adds v9 context_continuity_receipts store', async () => {
+    // 1. Initialize DB at version 8
+    await new Promise<void>((resolve, reject) => {
+      const openReq = fakeFactory.open(DB_NAME, 8);
+      openReq.onupgradeneeded = (e) => {
+        const db = (e.target as IDBOpenDBRequest).result;
+        db.createObjectStore(STORE_CONVERSATIONS, { keyPath: 'id' });
+        const msgStore = db.createObjectStore(STORE_MESSAGES, { keyPath: 'id' });
+        msgStore.createIndex('conversationId', 'conversationId', { unique: false });
+        msgStore.createIndex('remoteId', 'remoteId', { unique: false });
+        msgStore.createIndex('parentId', 'parentId', { unique: false });
+        msgStore.createIndex('createdAt', 'createdAt', { unique: false });
+        msgStore.createIndex('conversationId_remoteId', ['conversationId', 'remoteId'], { unique: false });
+        msgStore.createIndex('identityState', 'identityState', { unique: false });
+        msgStore.createIndex('projectionState', 'projectionState', { unique: false });
+        db.createObjectStore(STORE_REVISIONS, { keyPath: 'id' });
+        db.createObjectStore(STORE_RECOVERY_EVENTS, { keyPath: 'id' });
+        db.createObjectStore(STORE_RAW_STREAMS, { keyPath: 'id' });
+        db.createObjectStore(STORE_RAW_STREAM_BATCHES, { keyPath: 'id' });
+        db.createObjectStore(STORE_CANONICAL_CHECKPOINTS, { keyPath: 'streamKey' });
+        db.createObjectStore(STORE_HISTORY_STAGING, { keyPath: 'id' });
+        db.createObjectStore(STORE_HISTORY_STAGING_MANIFESTS, { keyPath: 'stagingId' });
+      };
+      openReq.onsuccess = () => {
+        const db = openReq.result;
+        const tx = db.transaction([STORE_CONVERSATIONS], 'readwrite');
+        tx.objectStore(STORE_CONVERSATIONS).put({
+          id: 'v8-conv-1',
+          remoteId: 'remote-800',
+          title: 'V8 Conversation',
+          createdAt: 8000,
+          updatedAt: 8000,
+        });
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+      };
+      openReq.onerror = () => reject(openReq.error);
+    });
+
+    // 2. Open via openExtensionDatabase at DB_VERSION = 9
+    const upgradedDb = await openExtensionDatabase(fakeFactory);
+    expect(upgradedDb.version).toBe(9);
+
+    // Verify context_continuity_receipts exists with all indexes
+    expect(upgradedDb.objectStoreNames.contains(STORE_CONTEXT_CONTINUITY_RECEIPTS)).toBe(true);
+
+    const tx = upgradedDb.transaction(
+      [STORE_CONVERSATIONS, STORE_CONTEXT_CONTINUITY_RECEIPTS],
+      'readwrite'
+    );
+    const convStore = tx.objectStore(STORE_CONVERSATIONS);
+    const receiptStore = tx.objectStore(STORE_CONTEXT_CONTINUITY_RECEIPTS);
+
+    expect(receiptStore.indexNames.contains('conversationId')).toBe(true);
+    expect(receiptStore.indexNames.contains('state')).toBe(true);
+    expect(receiptStore.indexNames.contains('createdAt')).toBe(true);
+    expect(receiptStore.indexNames.contains('rawStreamKey')).toBe(true);
+
+    // Verify pre-existing data preserved
+    const convReq = convStore.get('v8-conv-1');
+
+    // Verify writing a receipt record works
+    receiptStore.put({
+      id: 'deliv-test-1',
+      conversationId: 'v8-conv-1',
+      remoteConversationId: 'remote-800',
+      parentMessageId: null,
+      sourceMessageIds: ['msg-1'],
+      sourceRevisionIds: ['rev-1'],
+      deliveryMode: 'manual_next',
+      state: 'dispatched',
+      createdAt: 8500,
+      updatedAt: 8500,
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => {
+        expect(convReq.result).toBeDefined();
+        expect(convReq.result.id).toBe('v8-conv-1');
         resolve();
       };
       tx.onerror = () => reject(tx.error);
