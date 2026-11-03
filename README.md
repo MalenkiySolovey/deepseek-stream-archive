@@ -5,12 +5,18 @@
 > Local-first Chromium browser extension that records DeepSeek responses while they stream, preserves complete revisions before content filtering or network disconnects, and provides a private, branch-aware archive in the Side Panel.
 
 ![Platform](https://img.shields.io/badge/platform-Chrome%20%7C%20Chromium%20MV3-4285F4?logo=googlechrome&logoColor=white)
+![Version](https://img.shields.io/badge/version-0.1.0-blue)
 ![Framework](https://img.shields.io/badge/framework-WXT%20%2B%20Svelte%205-FF3E00?logo=svelte&logoColor=white)
-![Tests](https://img.shields.io/badge/unit%20tests-544%20passing-3DDC84)
-![E2E Tests](https://img.shields.io/badge/playwright%20e2e-20%20passing-brightgreen)
-![Status](https://img.shields.io/badge/live%20compatibility-baseline%20accepted-brightgreen)
+![Tests](https://img.shields.io/badge/unit%20tests-578%20passing-3DDC84)
+![E2E Tests](https://img.shields.io/badge/playwright%20e2e-24%20passing-brightgreen)
+![Status](https://img.shields.io/badge/store%20readiness-candidate%20passed-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
+
+> [!NOTE]
+> **Disclaimer**: DeepSeek StreamArchive is an independent open-source community project. It is not affiliated with, sponsored by, or endorsed by DeepSeek (Hangzhou DeepSeek Artificial Intelligence Co., Ltd.).
+>
+> **Privacy First**: DeepSeek StreamArchive operates 100% locally in your browser. It does not collect analytics, telemetry, or account credentials. All archives remain on your device in IndexedDB. See [PRIVACY.md](PRIVACY.md) for full details.
 
 ---
 
@@ -227,23 +233,29 @@ For manual live testing records and protocol details, see the [Live Acceptance T
 StreamArchive maintains an exhaustive multi-tier automated test suite covering chunk boundary fuzzing, protocol decoding, censorship interception, database migrations, and a headless Chromium MV3 compatibility harness:
 
 ```bash
-# Run unit and integration tests (70 test files, 473 tests)
+# Run unit and integration tests (86 test files, 578 tests)
 pnpm run test
 
-# Run TypeScript typecheck
+# Run TypeScript typecheck (0 errors)
 pnpm run typecheck
 
-# Build unpacked Chrome MV3 extension
+# Build unpacked Chrome MV3 extension (.output/chrome-mv3)
 pnpm run build
 
-# Run Playwright Chromium MV3 browser compatibility harness (17 specs, 19 tests, fail-closed network isolation)
+# Run Playwright Chromium MV3 browser compatibility harness (19 specs, 24 tests)
 pnpm run test:e2e
+
+# Package extension distribution archive (.output/deepseek-stream-archive-0.1.0-chrome.zip)
+pnpm run zip
+
+# Run release store readiness and security audit
+pnpm run release:audit
 
 # Start WXT development server with live-reloading
 pnpm run dev
 ```
 
-For detailed architecture of the end-to-end browser test runner, see the [Browser Compatibility Harness Documentation](./docs/COMPATIBILITY_HARNESS.md).
+For detailed architecture of the end-to-end browser test runner, see the [Browser Compatibility Harness Documentation](./docs/COMPATIBILITY_HARNESS.md). For release procedures, see [Release Process Guide](./docs/RELEASE_PROCESS.md) and [Release Checklist](./docs/RELEASE_CHECKLIST.md).
 
 ---
 

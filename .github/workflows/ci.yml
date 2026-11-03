@@ -55,3 +55,9 @@ jobs:
 
       - name: Run browser compatibility harness
         run: pnpm run test:e2e
+
+      - name: Package extension archive
+        run: pnpm run zip
+
+      - name: Run store release audit
+        run: pnpm run release:audit

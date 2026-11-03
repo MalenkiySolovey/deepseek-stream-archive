@@ -180,4 +180,22 @@ During the live acceptance gate recorded in [`docs/LIVE_CONTEXT_CONTINUITY_RESUL
 3. **Durable Bridged Ledger:** Verified that `context_continuity_receipts` in IndexedDB (schema v9) advances from `dispatched` to `response_observed` to `bridged`, suppressing repeated re-injections on subsequent turns across full page reloads (`Ctrl + F5`) and extension restarts.
 4. **Clean Native Bubble Presentation:** User bubbles containing continuity markers are cleanly presented via closed Shadow DOM (`mountCleanUserTurn`), ensuring the native web interface remains clean while native actions (Copy, Edit) stay 100% intact.
 
+---
+
+## 7. Chrome & Platform Compatibility Specification (Milestone 2F Release Candidate)
+
+### 7.1 Chromium Platform Minimum & Certified Versions
+- **Minimum Supported Chrome Version**: **Chrome 114** (`minimum_chrome_version: "114"` declared in `manifest.json`). This baseline is determined by the official introduction of the Manifest V3 `chrome.sidePanel` API.
+- **Tested & Certified Environment**: Chromium 114 through Chromium 134+ on Windows 11, macOS, and Linux.
+- **Supported Browsers**: Google Chrome, Brave, Microsoft Edge, Opera, and other Chromium-based browsers supporting MV3 Side Panel APIs.
+
+### 7.2 Strict Permission Boundary
+- **Permissions Requested**: Strictly `storage` and `sidePanel`.
+- **Host Permissions**: Strictly `https://chat.deepseek.com/*`.
+- **Prohibited Permissions**: Zero use of `<all_urls>`, `tabs`, `activeTab`, `cookies`, `webRequest`, `webRequestBlocking`, `debugger`, or `scripting`.
+
+### 7.3 DeepSeek Web App Contract Stability & Fail-Open Guarantee
+- **Passive Interception**: DeepSeek StreamArchive wraps `window.fetch` and `XMLHttpRequest` via a synchronous MAIN-world script executed at `document_start`.
+- **Request Invariance**: All requests that do not target `/api/v0/chat/completion` or generation endpoints pass through completely untouched without latency.
+- **Fail-Open Operating Model**: If any aspect of SSE decoding, JSON parsing, or DOM rendering raises an unexpected exception, the error is isolated inside extension handlers and native DeepSeek chat operations proceed without interruption.
 

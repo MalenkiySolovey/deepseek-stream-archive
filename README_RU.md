@@ -5,12 +5,18 @@
 > Локальное расширение для браузеров на базе Chromium, которое перехватывает и сохраняет ответы DeepSeek в реальном времени во время генерации, защищает от цензуры (`CONTENT_FILTER`) и обрывов сети, а также предоставляет удобный архив с поддержкой веток диалога в боковой панели (Side Panel).
 
 ![Платформа](https://img.shields.io/badge/платформа-Chrome%20%7C%20Chromium%20MV3-4285F4?logo=googlechrome&logoColor=white)
+![Версия](https://img.shields.io/badge/версия-0.1.0-blue)
 ![Фреймворк](https://img.shields.io/badge/фреймворк-WXT%20%2B%20Svelte%205-FF3E00?logo=svelte&logoColor=white)
-![Юнит-тесты](https://img.shields.io/badge/юнит--тесты-544%20пройдены-3DDC84)
-![E2E тесты](https://img.shields.io/badge/playwright%20e2e-20%20пройдены-brightgreen)
-![Статус](https://img.shields.io/badge/совместимость-базовый%20уровень%20принят-brightgreen)
+![Юнит-тесты](https://img.shields.io/badge/юнит--тесты-578%20пройдены-3DDC84)
+![E2E тесты](https://img.shields.io/badge/playwright%20e2e-24%20пройдены-brightgreen)
+![Статус](https://img.shields.io/badge/готовность%20к%20магазину-кандидат%20готов-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
 ![Лицензия](https://img.shields.io/badge/лицензия-MIT-green)
+
+> [!NOTE]
+> **Отказ от ответственности**: DeepSeek StreamArchive — независимый проект с открытым исходным кодом. Расширение не связано с компанией DeepSeek (Hangzhou DeepSeek Artificial Intelligence Co., Ltd.), не спонсируется и не поддерживается ею.
+>
+> **Приватность превыше всего**: DeepSeek StreamArchive работает на 100% локально в вашем браузере. Мы не собираем аналитику, телеметрию или учетные данные пользователей. Вся переписка хранится исключительно на вашем устройстве в IndexedDB. Подробности см. в [PRIVACY.md](PRIVACY.md).
 
 ---
 
@@ -227,23 +233,29 @@ IndexedDB: StreamArchiveDB (Версия 8)
 Проект покрыт многоуровневым набором автоматических тестов (фаззинг границ чанков, декодирование протокола, перехват цензуры, миграции базы данных и браузерный стенд в headless Chromium MV3):
 
 ```bash
-# Запуск полного набора юнит- и интеграционных тестов Vitest (70 файлов, 473 теста)
+# Запуск полного набора юнит- и интеграционных тестов Vitest (86 файлов, 578 тестов)
 pnpm run test
 
-# Проверка типов TypeScript
+# Проверка типов TypeScript (0 ошибок)
 pnpm run typecheck
 
-# Сборка распакованного расширения Chrome MV3
+# Сборка распакованного расширения Chrome MV3 (.output/chrome-mv3)
 pnpm run build
 
-# Запуск браузерного стенда совместимости Playwright (17 сценариев, 19 тестов, fail-closed изоляция)
+# Запуск браузерного стенда совместимости Playwright (19 сценариев, 24 теста)
 pnpm run test:e2e
+
+# Упаковка дистрибутива расширения в ZIP (.output/deepseek-stream-archive-0.1.0-chrome.zip)
+pnpm run zip
+
+# Аудит готовности к публикации в Chrome Web Store и безопасности
+pnpm run release:audit
 
 # Запуск dev-сервера WXT с горячей перезагрузкой
 pnpm run dev
 ```
 
-Подробную архитектуру стенда браузерной совместимости см. в [Документации стенда совместимости](./docs/COMPATIBILITY_HARNESS.md).
+Подробную архитектуру стенда браузерной совместимости см. в [Документации стенда совместимости](./docs/COMPATIBILITY_HARNESS.md). Процедуру релиза см. в [Руководстве по релизу](./docs/RELEASE_PROCESS.md) и [Чек-листе релиза](./docs/RELEASE_CHECKLIST.md).
 
 ---
 

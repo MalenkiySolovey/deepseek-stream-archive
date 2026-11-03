@@ -7,6 +7,8 @@ export default defineConfig({
     name: 'DeepSeek StreamArchive',
     description: 'Local-first response archiver, revision recorder, and recovery layer for DeepSeek.',
     version: '0.1.0',
+    minimum_chrome_version: '114',
+    homepage_url: 'https://github.com/MalenkiySolovey/deepseek-stream-archive',
     permissions: ['storage', 'sidePanel'],
     host_permissions: ['https://chat.deepseek.com/*'],
     action: {

@@ -1,0 +1,76 @@
+name: Release Candidate Build & Package
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-candidate:
+    name: Build, Audit & Package Release Candidate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2 # v4.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        with:
+          node-version: 24
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript typecheck
+        run: pnpm run typecheck
+
+      - name: Run automated test suite
+        run: pnpm run test
+
+      - name: Build Chromium MV3 extension
+        run: pnpm run build
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install chromium --with-deps
+
+      - name: Run browser compatibility harness
+        run: pnpm run test:e2e
+
+      - name: Package extension archive
+        run: pnpm run zip
+
+      - name: Run store release audit
+        run: pnpm run release:audit
+
+      - name: Calculate artifact checksum
+        run: |
+          ZIP_FILE=$(ls .output/deepseek-stream-archive-*-chrome.zip | head -n 1)
+          SHA256_HASH=$(sha256sum "$ZIP_FILE" | awk '{print $1}')
+          FILE_SIZE=$(stat -c%s "$ZIP_FILE")
+          echo "Package: $ZIP_FILE"
+          echo "Size: $FILE_SIZE bytes"
+          echo "SHA-256: $SHA256_HASH"
+          echo "### Release Candidate Package Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **File**: \`$(basename "$ZIP_FILE")\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Size**: \`$FILE_SIZE bytes\` (\`$(awk "BEGIN {printf \"%.2f KB\", $FILE_SIZE/1024}")\`)" >> $GITHUB_STEP_SUMMARY
+          echo "- **SHA-256**: \`$SHA256_HASH\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Release Candidate ZIP Artifact
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: deepseek-stream-archive-release-candidate
+          path: .output/deepseek-stream-archive-*-chrome.zip
+          retention-days: 30
