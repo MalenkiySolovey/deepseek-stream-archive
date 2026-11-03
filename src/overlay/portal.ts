@@ -19,8 +19,9 @@ import {
   getRecoveryPresentationSettings,
   validateRecoveryPresentationSettings,
 } from '../presentation/settings';
-import { mountInlineRecovery } from '../presentation/inline-recovery/dom';
+import { mountInlineRecovery, mountCleanUserTurn } from '../presentation/inline-recovery/dom';
 import { InlineRecoveryLedger } from '../presentation/inline-recovery/ledger';
+import { hasContinuityMarker, parseStreamArchiveAugmentedPrompt } from '../adapters/deepseek/request/marker';
 
 export interface OverlayContentResult {
   text: string;
@@ -112,6 +113,7 @@ export class StreamArchiveOverlayPortal {
 
   private presentationSettings: RecoveryPresentationSettings;
   private inlineLedger = new InlineRecoveryLedger();
+  private userTurnLedger = new InlineRecoveryLedger();
   private inFlightFetches = new Set<string>();
   private storageListener: ((changes: { [key: string]: chrome.storage.StorageChange }, areaName: string) => void) | null = null;
 
@@ -345,6 +347,7 @@ export class StreamArchiveOverlayPortal {
     this.dismissedMessageIds.clear();
     this.inFlightFetches.clear();
     this.inlineLedger.unmountAll();
+    this.userTurnLedger.unmountAll();
     this.render();
   }
 
@@ -419,6 +422,7 @@ export class StreamArchiveOverlayPortal {
         this.dismissedMessageIds.clear();
         this.inFlightFetches.clear();
         this.inlineLedger.unmountAll();
+        this.userTurnLedger.unmountAll();
         this.render();
       }
       this.refreshSummary();
@@ -510,6 +514,7 @@ export class StreamArchiveOverlayPortal {
     this.activeSummary = null;
     this.inFlightFetches.clear();
     this.inlineLedger.unmountAll();
+    this.userTurnLedger.unmountAll();
     this.render();
 
     // If on homepage or route without session ID, never fetch summary or show overlay
@@ -671,6 +676,50 @@ export class StreamArchiveOverlayPortal {
         this.renderRecoveryModal(activeMsg);
       } else {
         this.activeModalMessageId = null;
+      }
+    }
+
+    // 4. Reconcile user turns containing Context Continuity markers (Milestone 2D.5B-LA, Sections 45-46)
+    this.reconcileUserContinuityTurns();
+  }
+
+  private reconcileUserContinuityTurns(): void {
+    if (this.isDestroyed || !this.isMounted || typeof document === 'undefined') return;
+
+    const elements = document.querySelectorAll('[data-message-id]');
+    const activeDeliveryIds = new Set<string>();
+
+    for (let i = 0; i < elements.length; i++) {
+      const el = elements[i] as HTMLElement;
+      const target = findInlineInsertionPoint(el);
+      if (!target || !target.placeholderElement) continue;
+
+      const rawText = target.placeholderElement.textContent || '';
+      if (!hasContinuityMarker(rawText)) continue;
+
+      const parsed = parseStreamArchiveAugmentedPrompt(rawText);
+      if (!parsed.isAugmented || !parsed.deliveryId) continue;
+
+      activeDeliveryIds.add(parsed.deliveryId);
+
+      const existing = this.userTurnLedger.get(parsed.deliveryId);
+      if (
+        existing &&
+        existing.hostElement.isConnected &&
+        existing.containerElement === target.containerElement
+      ) {
+        continue;
+      }
+
+      const handle = mountCleanUserTurn(target, rawText);
+      if (handle) {
+        this.userTurnLedger.registerHandle(parsed.deliveryId, handle);
+      }
+    }
+
+    for (const handle of this.userTurnLedger.getAllHandles()) {
+      if (!activeDeliveryIds.has(handle.messageId)) {
+        this.userTurnLedger.unmount(handle.messageId);
       }
     }
   }
@@ -902,6 +951,7 @@ export class StreamArchiveOverlayPortal {
       this.storageListener = null;
     }
     this.inlineLedger.unmountAll();
+    this.userTurnLedger.unmountAll();
     this.inFlightFetches.clear();
     if (this.earlyDomReadyHandler && typeof document !== 'undefined') {
       document.removeEventListener('DOMContentLoaded', this.earlyDomReadyHandler);

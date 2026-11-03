@@ -235,4 +235,64 @@ export const INLINE_RECOVERY_STYLES = `
 .streamarchive-inline-copy-btn:focus-visible {
   outline: 2px solid #38bdf8;
 }
+
+/* User turn clean continuity presentation */
+.streamarchive-user-continuity-root {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+
+.streamarchive-user-prompt-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.streamarchive-user-continuity-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: #c084fc;
+  background: rgba(168, 85, 247, 0.12);
+  border: 1px solid rgba(168, 85, 247, 0.3);
+  margin-top: 0.25rem;
+  width: fit-content;
+}
+
+.streamarchive-user-included-context {
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(168, 85, 247, 0.25);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8125rem;
+  margin-top: 0.35rem;
+}
+
+.streamarchive-user-included-summary {
+  cursor: pointer;
+  color: #a78bfa;
+  font-weight: 500;
+  user-select: none;
+}
+
+.streamarchive-user-included-body {
+  margin-top: 0.5rem;
+  max-height: 250px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #94a3b8;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  border-top: 1px solid rgba(168, 85, 247, 0.15);
+  padding-top: 0.5rem;
+}
 `;

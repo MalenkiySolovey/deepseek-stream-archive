@@ -1,6 +1,7 @@
 import type { InlineInsertionTarget } from '../../adapters/deepseek/dom/types';
 import type { PageRecoveryMessageSummary } from '../../adapters/deepseek/dom/types';
 import type { OverlayContentResult } from '../../overlay/portal';
+import { parseStreamArchiveAugmentedPrompt } from '../../adapters/deepseek/request/marker';
 import { parseSafeMarkdown, renderSafeMarkdownToFragment } from '../safe-markdown';
 import { INLINE_RECOVERY_STYLES } from './styles';
 import type { InlineHostHandle, InlineRecoveryPresentationOptions } from './types';
@@ -238,6 +239,126 @@ export function mountInlineRecovery(
   return {
     messageId: message.messageId,
     remoteId,
+    hostElement: host,
+    shadowRoot: shadow,
+    containerElement: target.containerElement,
+    unmount,
+  };
+}
+
+/**
+ * Mounts a clean non-destructive presentation for user turns that contain Context Continuity markers.
+ *
+ * Requirements (Milestone 2D.5B-LA, Sections 45-46):
+ * - Renders original clean user prompt
+ * - Displays Context Continuity trust badge
+ * - Collapsible included context toggle
+ * - Reversible placeholder element hiding
+ * - Closed Shadow DOM isolation
+ * - DeepSeek native toolbar intact in host DOM
+ * - Zero innerHTML / outerHTML / insertAdjacentHTML / React internal access
+ */
+export function mountCleanUserTurn(
+  target: InlineInsertionTarget,
+  rawText: string,
+  options?: { locale?: 'en' | 'ru' }
+): InlineHostHandle | null {
+  if (!target || !target.containerElement || !rawText) return null;
+
+  const parsed = parseStreamArchiveAugmentedPrompt(rawText);
+  if (!parsed.isAugmented) return null;
+
+  const locale = options?.locale || 'en';
+  let originalPlaceholderDisplay = '';
+  const placeholder = target.placeholderElement;
+  if (placeholder) {
+    originalPlaceholderDisplay = placeholder.style.display || '';
+    placeholder.style.display = 'none';
+  }
+
+  const host = document.createElement('div');
+  const deliveryId = parsed.deliveryId || 'continuity';
+  host.setAttribute('data-streamarchive-user-turn-host', deliveryId);
+  OWNED_INLINE_HOSTS.add(host);
+
+  let shadow: ShadowRoot | null = null;
+  try {
+    shadow = host.attachShadow({ mode: 'closed' });
+  } catch {
+    shadow = (host as any).shadowRoot || null;
+  }
+
+  if (!shadow) {
+    if (placeholder) placeholder.style.display = originalPlaceholderDisplay;
+    return null;
+  }
+
+  const styleEl = document.createElement('style');
+  styleEl.textContent = INLINE_RECOVERY_STYLES;
+  shadow.appendChild(styleEl);
+
+  const root = document.createElement('div');
+  root.className = 'streamarchive-user-continuity-root';
+
+  // 1. Original user-authored prompt
+  const promptEl = document.createElement('div');
+  promptEl.className = 'streamarchive-user-prompt-text';
+  promptEl.textContent = parsed.userPrompt;
+  root.appendChild(promptEl);
+
+  // 2. Trust indicator badge (Section 45: 🔄 Context Continuity supplied / 1 recovered response)
+  const badge = document.createElement('div');
+  badge.className = 'streamarchive-user-continuity-badge';
+  badge.textContent =
+    locale === 'ru'
+      ? '🔄 Непрерывность контекста применена (1 восстановленный ответ)'
+      : '🔄 Context Continuity supplied (1 recovered response)';
+  root.appendChild(badge);
+
+  // 3. Collapsible included context toggle (Section 45: [View included context])
+  if (parsed.continuityContext && parsed.continuityContext.trim().length > 0) {
+    const details = document.createElement('details');
+    details.className = 'streamarchive-user-included-context';
+
+    const summary = document.createElement('summary');
+    summary.className = 'streamarchive-user-included-summary';
+    summary.textContent =
+      locale === 'ru' ? '▶ Показать включённый контекст' : '▶ View included context';
+    details.appendChild(summary);
+
+    const body = document.createElement('div');
+    body.className = 'streamarchive-user-included-body';
+    body.textContent = parsed.continuityContext;
+    details.appendChild(body);
+
+    root.appendChild(details);
+  }
+
+  shadow.appendChild(root);
+
+  try {
+    target.containerElement.insertBefore(host, target.insertRefNode);
+  } catch {
+    target.containerElement.appendChild(host);
+  }
+
+  const unmount = () => {
+    try {
+      if (host.parentNode) {
+        host.parentNode.removeChild(host);
+      }
+    } catch {
+      // ignore
+    }
+    OWNED_INLINE_HOSTS.delete(host);
+    if (placeholder) {
+      placeholder.style.display = originalPlaceholderDisplay;
+    }
+  };
+
+  return {
+    messageId: deliveryId,
+    remoteId: deliveryId,
     hostElement: host,
     shadowRoot: shadow,
     containerElement: target.containerElement,
