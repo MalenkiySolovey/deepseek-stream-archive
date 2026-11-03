@@ -52,7 +52,7 @@ export function selectPreferredRevision(
   }
 
   // If message was filtered, prefer uncensored lastGood revision with meaningful content
-  if (message.status === 'filtered') {
+  if (message.status === 'filtered' || revisions.some((r) => r.isLastGood)) {
     // 1. Explicit uncensored lastGood with visible answer
     const lastGoodWithAnswer = revisions
       .filter((r) => r.isLastGood && r.text && r.text.trim().length > 0)

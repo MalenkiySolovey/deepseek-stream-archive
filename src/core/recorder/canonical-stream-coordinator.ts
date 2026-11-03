@@ -8,6 +8,7 @@ export interface CanonicalCheckpointDto {
   streamKey: string;
   checkpointSeq: number;
   conversation?: Conversation;
+  userMessage?: Message;
   message: Message;
   revisions: ResponseRevision[];
   recoveryEvents: RecoveryEvent[];
@@ -73,6 +74,8 @@ export interface CanonicalStreamCoordinatorConfig {
   streamId: string;
   provisionalSessionId?: string;
   conversationTitle?: string;
+  requestPrompt?: string;
+  requestParentMessageId?: string | null;
   onCheckpoint: (checkpoint: CanonicalCheckpointDto) => Promise<CanonicalCheckpointAck>;
   debounceMs?: number;
   minCharsForFlush?: number;
@@ -119,6 +122,7 @@ export class CanonicalStreamCoordinator {
   private readonly retryBackoffMs: number[];
   private readonly maxRetries: number;
   private readonly checkpointAttemptTimeoutMs: number;
+  private readonly userMessage?: Message;
 
   private readonly recorder: CanonicalRevisionRecorder;
   private state: CoordinatorState = 'idle';
@@ -155,10 +159,30 @@ export class CanonicalStreamCoordinator {
     this.maxRetries = config.maxRetries ?? config.maxRetryAttempts ?? 10;
     this.checkpointAttemptTimeoutMs = config.checkpointAttemptTimeoutMs ?? 15000;
 
+    if (config.requestPrompt && config.requestPrompt.trim().length > 0) {
+      const sanitizedKey = this.rawStreamKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const userMessageId = `msg_user_${sanitizedKey}`;
+      this.userMessage = {
+        id: userMessageId,
+        conversationId: this.provisionalSessionId,
+        remoteParentId: config.requestParentMessageId || undefined,
+        role: 'user',
+        status: 'finished',
+        content: config.requestPrompt,
+        identityState: 'provisional',
+        projectionState: 'provisional_logical',
+        sourceRawStreamKey: this.rawStreamKey,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+    }
+
     const deterministicMessageId = makeProvisionalMessageId(this.rawStreamKey);
     this.recorder = new CanonicalRevisionRecorder({
       conversationId: this.provisionalSessionId,
       messageId: deterministicMessageId,
+      parentId: this.userMessage?.id,
+      remoteParentId: config.requestParentMessageId || undefined,
       sourceRawStreamKey: this.rawStreamKey,
       flushIntervalMs: this.debounceMs,
       minCharsForFlush: config.minCharsForFlush ?? 50,
@@ -414,6 +438,7 @@ export class CanonicalStreamCoordinator {
         streamKey: this.rawStreamKey,
         checkpointSeq: seq,
         conversation: conversation ? deepClone(conversation) : undefined,
+        userMessage: this.userMessage ? deepClone(this.userMessage) : undefined,
         message: deepClone(messageSnapshot),
         revisions: deepClone(newRevisions),
         recoveryEvents: deepClone(newRecoveryEvents),

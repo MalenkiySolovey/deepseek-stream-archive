@@ -20,6 +20,7 @@ import {
 } from '../src/adapters/deepseek/history/capture-policy';
 import type { HistoryObservationPayload } from '../src/bridge/protocol';
 import { augmentDeepSeekRequest } from '../src/adapters/deepseek/request/augment';
+import { parseDeepSeekRequestBody } from '../src/adapters/deepseek/request/parser';
 import type { ContextDeliveryEnvelope } from '../src/adapters/deepseek/request/types';
 import { logger } from '../src/shared/logger';
 
@@ -268,6 +269,16 @@ export default defineContentScript({
       }
     };
 
+    const extractDeepSeekRequestMetadata = (context: { method: string; url: string; body: unknown }): Partial<import('../src/transport/types').TransportMetadata> | undefined => {
+      const parsed = parseDeepSeekRequestBody(context.body);
+      if (!parsed) return undefined;
+      return {
+        requestPrompt: typeof parsed.prompt === 'string' ? parsed.prompt : undefined,
+        requestParentTurnId: parsed.parent_message_id !== undefined ? (parsed.parent_message_id ? String(parsed.parent_message_id) : null) : undefined,
+        requestSessionId: parsed.chat_session_id ? String(parsed.chat_session_id) : undefined,
+      };
+    };
+
     // Install passive transport observers
     installFetchCapture({
       producerSessionId,
@@ -276,6 +287,7 @@ export default defineContentScript({
       isCandidate,
       onHistoryStreamEvent: handleHistoryStreamEvent,
       isHistoryCandidate: isDeepSeekHistoryEndpoint,
+      onRequestMetadata: extractDeepSeekRequestMetadata,
       onRequest(input, init) {
         const url = typeof input === 'string' ? input : 'url' in input ? input.url : input.toString();
         const method = (init?.method || (typeof input === 'object' && 'method' in input ? input.method : 'GET')).toUpperCase();
@@ -301,6 +313,7 @@ export default defineContentScript({
       isCandidate,
       onHistoryObservation: handleHistoryObservation,
       isHistoryCandidate: isDeepSeekHistoryEndpoint,
+      onRequestMetadata: extractDeepSeekRequestMetadata,
       onRequest(ctx) {
         return handleOutgoingRequest(ctx.url, ctx.method, ctx.body, 'xhr');
       },

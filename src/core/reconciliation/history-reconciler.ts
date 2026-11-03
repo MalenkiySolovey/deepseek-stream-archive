@@ -229,10 +229,35 @@ export class HistoryReconciler {
       // Check whether this unmatched provisional assistant message has any captured revisions or recovery events
       const currentRevs = await this.storage.listRevisionsByMessage(em.id);
       const currentRecs = await this.storage.listRecoveryEvents(em.id);
+      const isRecovered =
+        em.status === 'filtered' ||
+        currentRecs.length > 0 ||
+        currentRevs.some((r) => r.isLastGood);
+
+      if (isRecovered) {
+        // Invariant: Filtered/recovered messages are NEVER degraded to unmatched_capture!
+        // DeepSeek omits censored responses from history, but StreamArchive preserves them as logical turns.
+        if (em.projectionState !== 'provisional_logical' || em.status !== 'filtered') {
+          const updatedMsg: Message = {
+            ...em,
+            projectionState: 'provisional_logical',
+            status: 'filtered',
+            updatedAt: now,
+          };
+          const existingIdx = messagesToPut.findIndex((p) => p.id === em.id);
+          if (existingIdx >= 0) {
+            messagesToPut[existingIdx] = updatedMsg;
+          } else {
+            messagesToPut.push(updatedMsg);
+            messagesUpdated++;
+          }
+        }
+        continue;
+      }
+
       const hasContent =
         (em.content && em.content.trim().length > 0) ||
-        currentRevs.some((r) => r.text.length > 0 || (r.thinking && r.thinking.length > 0)) ||
-        currentRecs.length > 0;
+        currentRevs.some((r) => r.text.length > 0 || (r.thinking && r.thinking.length > 0));
 
       const targetProjection: import('../models').MessageProjectionState = hasContent
         ? 'unmatched_capture'

@@ -134,6 +134,7 @@ describe('Three Truths End-to-End Convergence', () => {
             checkpointSeq: dto.checkpointSeq,
             isTerminal: dto.isFinal,
             conversation: dto.conversation,
+            userMessage: dto.userMessage,
             message: dto.message,
             revisions: dto.revisions,
             recoveryEvents: dto.recoveryEvents,

@@ -19,6 +19,7 @@ export interface CanonicalCheckpointData {
   isTerminal?: boolean;
   isFinal?: boolean;
   conversation?: Conversation;
+  userMessage?: Message;
   message: Message;
   revisions: ResponseRevision[];
   recoveryEvents?: RecoveryEvent[];

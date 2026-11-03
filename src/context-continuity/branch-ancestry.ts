@@ -40,7 +40,19 @@ export function getActiveBranchAncestry(
       visited.add(current.id);
       activePath.unshift(current);
       activeMessageIds.add(current.id);
-      current = current.parentId ? messageMap.get(current.parentId) : undefined;
+      let nextParentId = current.parentId;
+      if (!nextParentId && current.role === 'assistant') {
+        const currIdx = logicalTurns.findIndex((m) => m.id === current!.id);
+        if (currIdx > 0) {
+          for (let j = currIdx - 1; j >= 0; j--) {
+            if (logicalTurns[j]!.role === 'user') {
+              nextParentId = logicalTurns[j]!.id;
+              break;
+            }
+          }
+        }
+      }
+      current = nextParentId ? messageMap.get(nextParentId) : undefined;
     }
 
     const depthMap = new Map<string, number>();
@@ -58,17 +70,26 @@ export function getActiveBranchAncestry(
 
   // ── Strategy B: Downward traversal using branchSelections from root ──
   const groups = new Map<string, Message[]>();
-  for (const m of logicalTurns) {
-    const parentKey = m.parentId || '__root__';
+  for (let i = 0; i < logicalTurns.length; i++) {
+    const m = logicalTurns[i]!;
+    let parentKey = m.parentId || '__root__';
+    if (!m.parentId && m.role === 'assistant') {
+      for (let j = i - 1; j >= 0; j--) {
+        if (logicalTurns[j]!.role === 'user') {
+          parentKey = logicalTurns[j]!.id;
+          break;
+        }
+      }
+    }
     if (!groups.has(parentKey)) {
       groups.set(parentKey, []);
     }
     groups.get(parentKey)!.push(m);
   }
 
-  // Ensure deterministic sibling ordering (by createdAt ascending)
+  // Ensure deterministic sibling ordering (by createdAt ascending, then id)
   for (const list of groups.values()) {
-    list.sort((a, b) => a.createdAt - b.createdAt);
+    list.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
   }
 
   const activePath: Message[] = [];

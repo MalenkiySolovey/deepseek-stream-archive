@@ -8,6 +8,9 @@ export interface TransportMetadata {
   status?: number;
   statusText?: string;
   contentType?: string;
+  requestPrompt?: string;
+  requestParentTurnId?: string | null;
+  requestSessionId?: string;
 }
 
 export interface RequestCandidateMetadata {

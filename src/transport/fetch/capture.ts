@@ -21,6 +21,7 @@ export interface FetchCaptureOptions {
   onHistoryStreamEvent?: (event: HistoryStreamCaptureEvent) => void;
   isHistoryCandidate?: (url: string) => boolean;
   onRequest?: (input: RequestInfo | URL, init?: RequestInit) => { input?: RequestInfo | URL; init?: RequestInit } | undefined;
+  onRequestMetadata?: (context: { method: string; url: string; body: unknown }) => Partial<TransportMetadata> | undefined;
 }
 
 const DEFAULT_MAX_CHUNK_CHARS = 64 * 1024; // 64K characters safeguard limit
@@ -253,12 +254,26 @@ export function installFetchCapture(options: FetchCaptureOptions): () => void {
 
       let currentStreamSeq = 0;
 
+      let extraMetadata: Partial<TransportMetadata> | undefined;
+      if (options.onRequestMetadata) {
+        try {
+          extraMetadata = options.onRequestMetadata({
+            method,
+            url: rawUrl,
+            body: init?.body,
+          });
+        } catch {
+          // fail-open
+        }
+      }
+
       const metadata: TransportMetadata = {
         method,
         url: sanitizeUrl(rawUrl),
         status: response.status,
         statusText: response.statusText,
         contentType,
+        ...extraMetadata,
       };
 
       // 3. Emit stream 'open' event only after clone succeeded

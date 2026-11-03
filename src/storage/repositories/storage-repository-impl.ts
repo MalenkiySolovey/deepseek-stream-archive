@@ -320,6 +320,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
             checkpointSeq: data.checkpointSeq,
             isTerminal: isTerm,
             conversation: data.conversation,
+            userMessage: data.userMessage,
             message: data.message,
             revisions: data.revisions,
             recoveryEvents: data.recoveryEvents,
@@ -383,6 +384,17 @@ export class IndexedDbStorageRepository implements StorageRepository {
             } else {
               convStore.put(conv);
             }
+          };
+        }
+
+        // User message merge (if provided with generation request)
+        if (data.userMessage) {
+          const umsgReq = msgStore.get(data.userMessage.id);
+          umsgReq.onerror = () => fail(umsgReq.error || new Error('Failed to read user message for merge'));
+          umsgReq.onsuccess = () => {
+            const existingUMsg = umsgReq.result as Message | undefined;
+            const mergedU = mergeCanonicalMessage(existingUMsg, data.userMessage!, 'live');
+            msgStore.put(mergedU);
           };
         }
 

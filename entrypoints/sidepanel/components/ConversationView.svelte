@@ -414,33 +414,68 @@
     return detail.messages.filter((m) => isUnmatchedCapture(m));
   });
 
+  function getEffectiveParentKey(msg: ArchiveMessageSummary, allMsgs: ArchiveMessageSummary[]): string {
+    if (msg.parentId) {
+      return msg.parentId;
+    }
+    if (msg.role === 'user') {
+      return '__root__';
+    }
+    const idx = allMsgs.findIndex((m) => m.id === msg.id);
+    if (idx > 0) {
+      for (let i = idx - 1; i >= 0; i--) {
+        if (allMsgs[i]!.role === 'user') {
+          return allMsgs[i]!.id;
+        }
+      }
+    }
+    return '__root__';
+  }
+
   let visibleMessages = $derived<ArchiveMessageSummary[]>(() => {
     const msgs = logicalMessages();
     if (msgs.length === 0) return [];
 
-    // Group siblings by parentId (or root)
+    // Group children by effective parentKey
     const groups = new Map<string, ArchiveMessageSummary[]>();
     for (const msg of msgs) {
-      const parentKey = msg.parentId || '__root__';
+      const parentKey = getEffectiveParentKey(msg, msgs);
       if (!groups.has(parentKey)) {
         groups.set(parentKey, []);
       }
       groups.get(parentKey)!.push(msg);
     }
 
-    // Filter to selected branch per group
+    // Sort siblings by createdAt ascending, then id
+    for (const list of groups.values()) {
+      list.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+    }
+
+    const roots = groups.get('__root__') || [];
+    if (roots.length === 0) {
+      return [...msgs].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+    }
+
+    // Traverse downward from active root to leaf
     const result: ArchiveMessageSummary[] = [];
-    for (const msg of msgs) {
-      const parentKey = msg.parentId || '__root__';
-      const siblings = groups.get(parentKey)!;
-      if (siblings.length > 1) {
-        const activeIdx = branchSelections[parentKey] ?? 0;
-        if (siblings[activeIdx]?.id === msg.id) {
-          result.push(msg);
-        }
-      } else {
-        result.push(msg);
+    const visited = new Set<string>();
+
+    const rootIdx = branchSelections['__root__'] ?? 0;
+    let current: ArchiveMessageSummary | undefined =
+      roots[Math.max(0, Math.min(rootIdx, roots.length - 1))];
+
+    while (current && !visited.has(current.id)) {
+      visited.add(current.id);
+      result.push(current);
+
+      const children = groups.get(current.id);
+      if (!children || children.length === 0) {
+        break;
       }
+
+      const selIdx = branchSelections[current.id] ?? 0;
+      const clampedIdx = Math.max(0, Math.min(selIdx, children.length - 1));
+      current = children[clampedIdx];
     }
 
     return result;
@@ -449,14 +484,16 @@
   function getSiblingInfo(msg: ArchiveMessageSummary) {
     if (!detail) return { count: 1, current: 1, key: '' };
     const msgs = logicalMessages();
-    const parentKey = msg.parentId || '__root__';
-    const siblings = msgs.filter(
-      (m) => (m.parentId || '__root__') === parentKey
-    );
+    const parentKey = getEffectiveParentKey(msg, msgs);
+    const siblings = msgs
+      .filter((m) => getEffectiveParentKey(m, msgs) === parentKey)
+      .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+
     const activeIdx = branchSelections[parentKey] ?? 0;
+    const clampedIdx = Math.max(0, Math.min(activeIdx, siblings.length - 1));
     return {
       count: siblings.length,
-      current: activeIdx + 1,
+      current: clampedIdx + 1,
       key: parentKey,
     };
   }
@@ -613,7 +650,9 @@
         {@const branchInfo = getSiblingInfo(msg)}
         {@const activeData = getActiveContent(msg)}
         {@const isAssistant = msg.role === 'assistant'}
-        {@const lastGoodRev = (msg.status === 'filtered' && msg.preferredRevision) ? msg.preferredRevision : (msg.preferredRevision?.isLastGood ? msg.preferredRevision : undefined)}
+        {@const isFiltered = msg.status === 'filtered' || (msg.recoveryEvents && msg.recoveryEvents.length > 0) || Boolean(msg.preferredRevision?.isLastGood)}
+        {@const displayStatus = isFiltered ? 'filtered' : msg.status}
+        {@const lastGoodRev = (isFiltered && msg.preferredRevision) ? msg.preferredRevision : (msg.preferredRevision?.isLastGood ? msg.preferredRevision : undefined)}
 
         <div class="message-card" class:assistant={isAssistant} class:user={!isAssistant}>
           <div class="message-header">
@@ -627,8 +666,8 @@
                 </span>
               {/if}
               {#if isAssistant}
-                <span class="status-pill status-{msg.status}">
-                  {msg.status}
+                <span class="status-pill status-{displayStatus}">
+                  {displayStatus}
                 </span>
                 <span class="identity-pill" class:reconciled={msg.identityState === 'reconciled'}>
                   {msg.identityState === 'reconciled' ? t.reconciled : t.provisional}

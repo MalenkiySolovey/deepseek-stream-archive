@@ -744,6 +744,12 @@ export function validatePersistCanonicalCheckpointRequest(
   const message = validateMessage(cp.message);
   if (!message) return null;
 
+  const userMessage =
+    cp.userMessage !== undefined
+      ? validateMessage(cp.userMessage) || undefined
+      : undefined;
+  if (cp.userMessage !== undefined && !userMessage) return null;
+
   const conversation =
     cp.conversation !== undefined
       ? validateConversation(cp.conversation) || undefined
@@ -777,6 +783,7 @@ export function validatePersistCanonicalCheckpointRequest(
       checkpointSeq: cp.checkpointSeq,
       isTerminal,
       conversation,
+      userMessage,
       message,
       revisions,
       recoveryEvents,

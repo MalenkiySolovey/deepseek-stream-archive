@@ -284,7 +284,10 @@ export default defineContentScript({
             const canonicalCoordinator = new CanonicalStreamCoordinator({
               producerSessionId: transportEvent.producerSessionId,
               streamId: transportEvent.streamId,
-              provisionalSessionId: currentRouteSessionId,
+              provisionalSessionId:
+                transportEvent.metadata?.requestSessionId || currentRouteSessionId,
+              requestPrompt: transportEvent.metadata?.requestPrompt,
+              requestParentMessageId: transportEvent.metadata?.requestParentTurnId,
               conversationTitle:
                 (typeof document !== 'undefined' && document.title) ||
                 `DeepSeek Chat ${transportEvent.streamId.slice(0, 8)}`,
@@ -296,6 +299,7 @@ export default defineContentScript({
                     checkpointSeq: dto.checkpointSeq,
                     isTerminal: dto.isFinal,
                     conversation: dto.conversation,
+                    userMessage: dto.userMessage,
                     message: dto.message,
                     revisions: dto.revisions,
                     recoveryEvents: dto.recoveryEvents,

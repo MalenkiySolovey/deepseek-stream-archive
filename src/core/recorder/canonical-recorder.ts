@@ -239,6 +239,9 @@ export class CanonicalRevisionRecorder implements RevisionRecorder {
   }
 
   private mapTerminalStatus(event: { status?: string; terminalReason?: string }): void {
+    if (this.status === 'filtered') {
+      return;
+    }
     const raw = (event.terminalReason || event.status || '').toLowerCase();
     if (raw === 'completed' || raw === 'finished') {
       this.status = 'finished';
@@ -262,6 +265,9 @@ export class CanonicalRevisionRecorder implements RevisionRecorder {
   }
 
   private mapProtocolStatus(status: string): void {
+    if (this.status === 'filtered') {
+      return;
+    }
     const upper = status.toUpperCase();
     if (upper === 'CONTENT_FILTER') {
       this.status = 'filtered';

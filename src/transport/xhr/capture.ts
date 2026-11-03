@@ -12,6 +12,7 @@ export interface XhrCaptureOptions {
   onHistoryObservation?: (observation: { url: string; status: number; body: string }) => void;
   isHistoryCandidate?: (url: string) => boolean;
   onRequest?: (context: { method: string; url: string; body: unknown; xhr: XMLHttpRequest }) => { body?: unknown } | undefined;
+  onRequestMetadata?: (context: { method: string; url: string; body: unknown }) => Partial<TransportMetadata> | undefined;
 }
 
 interface XhrCaptureState {
@@ -105,6 +106,26 @@ export function installXhrCapture(options: XhrCaptureOptions): () => void {
     };
     xhrStateMap.set(xhr, state);
 
+    if (options.onRequestMetadata) {
+      try {
+        const extra = options.onRequestMetadata({
+          method: state.metadata?.method || 'POST',
+          url: state.rawUrl || state.metadata?.url || '',
+          body: args[0],
+        });
+        if (extra) {
+          state.metadata = {
+            method: state.metadata?.method || 'POST',
+            url: state.metadata?.url || 'http://localhost',
+            ...state.metadata,
+            ...extra,
+          };
+        }
+      } catch {
+        // fail-open
+      }
+    }
+
     const checkCandidate = (): boolean => {
       try {
         if (xhr.readyState < 2) return false;
@@ -147,6 +168,9 @@ export function installXhrCapture(options: XhrCaptureOptions): () => void {
             status: xhr.status,
             statusText: xhr.statusText,
             contentType: xhr.getResponseHeader('content-type') || 'text/event-stream',
+            requestPrompt: state.metadata?.requestPrompt,
+            requestParentTurnId: state.metadata?.requestParentTurnId,
+            requestSessionId: state.metadata?.requestSessionId,
           };
 
           onEvent({

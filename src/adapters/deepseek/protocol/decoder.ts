@@ -262,7 +262,7 @@ export class DeepSeekProtocolDecoder {
             timestamp: Date.now(),
             messageId: this.currentMessageId,
             sessionId: this.sessionId,
-            status: currentStatus || (terminalReason === 'filtered' ? 'CONTENT_FILTER' : 'FINISHED'),
+            status: terminalReason === 'filtered' ? 'CONTENT_FILTER' : (currentStatus || 'FINISHED'),
             terminalReason,
             hasPendingFragment: this.patchApplier.hasPendingFragment() ?? false,
             incompleteMessage: this.patchApplier.incompleteMessage() ?? false,
@@ -304,7 +304,7 @@ export class DeepSeekProtocolDecoder {
           timestamp: Date.now(),
           messageId: this.currentMessageId,
           sessionId: this.sessionId,
-          status: currentStatus || (terminalReason === 'filtered' ? 'CONTENT_FILTER' : 'CLOSED'),
+          status: terminalReason === 'filtered' ? 'CONTENT_FILTER' : (currentStatus || 'CLOSED'),
           terminalReason,
           projectionSource: this.currentProjectionSource,
         });
@@ -552,18 +552,21 @@ export class DeepSeekProtocolDecoder {
 
     // Default: transport completed normally (AUTHORITATIVE status only!)
     const existingStatus = this.patchApplier.getStatus();
-    if (existingStatus && this.profile.terminalStatuses.includes(existingStatus as any)) {
+    if (this.filterTriggered || (existingStatus && this.profile.terminalStatuses.includes(existingStatus as any))) {
       const hasPending = this.patchApplier.hasPendingFragment() ?? false;
       const isIncomplete = this.patchApplier.incompleteMessage() ?? false;
 
       let terminalReason: TerminalReason = 'completed';
-      if (existingStatus === 'FINISHED') {
-        terminalReason = (hasPending || isIncomplete) ? 'incomplete' : 'completed';
-      } else if (existingStatus === 'CONTENT_FILTER') {
+      let effectiveStatus = existingStatus || 'FINISHED';
+
+      if (this.filterTriggered || existingStatus === 'CONTENT_FILTER') {
         if (!this.filterTriggered) {
           events.push(...this.triggerFilter('CONTENT_FILTER'));
         }
         terminalReason = 'filtered';
+        effectiveStatus = 'CONTENT_FILTER';
+      } else if (existingStatus === 'FINISHED') {
+        terminalReason = (hasPending || isIncomplete) ? 'incomplete' : 'completed';
       } else if (existingStatus === 'CONTEXT_LENGTH_EXCEEDED') {
         terminalReason = 'truncated_context_limit';
       } else if (existingStatus === 'INCOMPLETE') {
@@ -580,7 +583,7 @@ export class DeepSeekProtocolDecoder {
         timestamp: Date.now(),
         messageId: this.currentMessageId,
         sessionId: this.sessionId,
-        status: existingStatus,
+        status: effectiveStatus,
         terminalReason,
         hasPendingFragment: hasPending,
         incompleteMessage: isIncomplete,

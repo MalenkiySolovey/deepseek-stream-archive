@@ -45,6 +45,22 @@ export interface PersistedCanonicalCheckpointPayload {
     createdAt?: number;
     updatedAt?: number;
   };
+  userMessage?: {
+    id: string;
+    conversationId: string;
+    remoteId?: string;
+    role: string;
+    status: string;
+    content?: string;
+    parentId?: string;
+    remoteParentId?: string;
+    identityState?: string;
+    projectionState?: string;
+    sourceRawStreamKey?: string;
+    remoteCreatedAt?: number;
+    createdAt?: number;
+    updatedAt?: number;
+  };
   message: {
     id: string;
     conversationId: string;
@@ -97,6 +113,24 @@ export function serializeCanonicalCheckpointForFingerprint(
           title: input.conversation.title ?? null,
           createdAt: input.conversation.createdAt ?? null,
           updatedAt: input.conversation.updatedAt ?? null,
+        }
+      : null,
+    userMessage: input.userMessage
+      ? {
+          id: input.userMessage.id,
+          conversationId: input.userMessage.conversationId,
+          remoteId: input.userMessage.remoteId ?? null,
+          role: input.userMessage.role,
+          status: input.userMessage.status,
+          content: input.userMessage.content ?? null,
+          parentId: input.userMessage.parentId ?? null,
+          remoteParentId: input.userMessage.remoteParentId ?? null,
+          identityState: input.userMessage.identityState ?? null,
+          projectionState: input.userMessage.projectionState ?? null,
+          sourceRawStreamKey: input.userMessage.sourceRawStreamKey ?? null,
+          remoteCreatedAt: input.userMessage.remoteCreatedAt ?? null,
+          createdAt: input.userMessage.createdAt ?? null,
+          updatedAt: input.userMessage.updatedAt ?? null,
         }
       : null,
     message: {
