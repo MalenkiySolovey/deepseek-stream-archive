@@ -22,11 +22,12 @@ test.describe('E2E Browser Compatibility: Context Continuity Planner & Transpare
     expect(await toggleThinking.isChecked()).toBe(true);
 
     // Verify storage persistence
-    const storedSettings = await sidepanel.evaluate(async () => {
-      const res = await chrome.storage.local.get('streamarchive_context_continuity_settings');
-      return res['streamarchive_context_continuity_settings'];
-    });
-    expect(storedSettings).toEqual({
+    await expect.poll(async () => {
+      return await sidepanel.evaluate(async () => {
+        const res = await chrome.storage.local.get('streamarchive_context_continuity_settings');
+        return res['streamarchive_context_continuity_settings'];
+      });
+    }).toEqual({
       enabled: true,
       includeThinking: true,
       deliveryMode: 'manual_next',
