@@ -14,7 +14,7 @@ This document specifies the exact dimensional, visual, and content requirements 
 | Asset Type | Required Dimensions | Format | Requirement Status | Purpose |
 |---|---|---|---|---|
 | **Extension Store Icon** | **128 x 128 px** | PNG | **Verified on Disk** (`public/icons/icon-128.png`) | Displayed in search results, extension card, and management page. |
-| **Store Screenshots** | **1280 x 800 px** (or 640 x 400 px) | PNG or JPEG | **Specification Defined** (1-5 screenshots required) | Real screenshots illustrating core features and interfaces. |
+| **Store Screenshots** | **1280 x 800 px** (or 640 x 400 px) | PNG or JPEG | **Staged & Verified** (5/5 present in `release-test/screenshots/`, see [STORE_ASSET_STAGING_0.1.0.md](STORE_ASSET_STAGING_0.1.0.md)) | Real screenshots illustrating core features and interfaces. |
 | **Small Promo Tile** | **440 x 280 px** | PNG or JPEG | `MANUAL ASSET REQUIRED` | Promotional banner displayed in Web Store category and search pages. |
 | **Marquee Promo Tile** | **1400 x 560 px** | PNG or JPEG | `MANUAL ASSET REQUIRED` (Optional) | High-resolution hero graphic for featured placements in Chrome Web Store. |
 
