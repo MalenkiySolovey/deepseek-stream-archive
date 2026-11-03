@@ -118,6 +118,7 @@ Other frequent loss vectors include:
 - **Retry Idempotency & Delimiter Framing:** Marker boundaries prevent duplicate prompt augmentation during DeepSeek client network retries.
 - **Durable Operational Ledger (`DB_VERSION = 9`):** Stores receipts (`dispatched` -> `response_observed` -> `bridged` | `failed`), breaking infinite re-injection loops while remaining excluded from Portable Backup v1.
 - **Clean History Reconciliation:** Parses delimiter markers from server history, rendering clean user-authored prompts with the `🔄 Context Continuity attached` badge.
+- **Live DeepSeek Verification (Milestone 2D.5B-LA):** Verified against live production DeepSeek (`https://chat.deepseek.com/`) with closed Shadow DOM clean user bubble presentation (`mountCleanUserTurn`), single-use armed delivery, semantic context proof, and durable bridged suppression.
 
 ---
 

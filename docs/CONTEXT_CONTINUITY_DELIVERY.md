@@ -114,3 +114,19 @@ When passive history synchronization ingests user turns containing continuity ma
 3. The delivery ID is stored in `message.contextContinuityDeliveryId`.
 4. The Side Panel and UI present the clean user message with an attached badge:
    `🔄 Context Continuity attached` / `🔄 Контекст StreamArchive прикреплен`.
+
+---
+
+## 5. Live Acceptance & Native Bubble Presentation (Milestone 2D.5B-LA)
+
+Context Continuity has been verified against live production DeepSeek (`https://chat.deepseek.com/`) on 2026-11-03:
+- **Live Acceptance Report:** [`docs/LIVE_CONTEXT_CONTINUITY_RESULTS_2026-11-03.md`](./LIVE_CONTEXT_CONTINUITY_RESULTS_2026-11-03.md).
+- **Native User Bubble Presentation:**
+  - Pre-reload: DeepSeek's composer state renders the clean user prompt directly.
+  - Post-reload (`Ctrl + F5`): DeepSeek renders `/api/v0/chat/history_messages`. `mountCleanUserTurn` de-augments the native DOM placeholder via a closed Shadow DOM host, rendering:
+    - Clean user prompt text
+    - Trust badge: `🔄 Context Continuity supplied (1 recovered response)`
+    - Collapsible disclosure: `[View included context]` / `[Показать включённый контекст]`
+  - Native user message actions (Copy, Edit) remain in the host DOM and 100% functional.
+- **Durable Single-Use Bridge:** Verified that once bridged, receipts in DB9 permanently suppress re-injection on subsequent turns across reloads.
+- **Overall Verdict:** `PASS`.

@@ -654,5 +654,33 @@ StreamArchive includes 6 dedicated test suites bringing the automated regression
 7. **Browser E2E Context Continuity Preview (`tests/browser/context-continuity-preview.spec.ts`):**
    - Full Playwright Chromium MV3 spec verifying Settings toggle interaction, persistence in `chrome.storage.local`, multi-turn IndexedDB seeding (filtered turn + sibling branch + server-reconciled turn), ConversationView header preview button, modal statistics verification (1 eligible turn), payload verification, exclusion listing (`wrong_branch`, `already_in_server_history`), and single-click clipboard copying.
 
+---
+
+## 14. Context Continuity Delivery & Prompt Augmentation Test Suites (Milestones 2D.5B & 2D.5B-LA)
+
+Automated regression coverage expanded to **578 unit/integration tests across 86 files** and **24 Playwright Chromium MV3 E2E tests across 19 specs**:
+
+1. **Request Mutation & Fail-Open Guarding (`tests/context-continuity-request-augment.test.ts`):**
+   - 11 unit tests verifying boundary marker formatting, session ID matching, parent message ID matching, fail-open behavior on mismatched parameters, non-prompt field preservation (`thinking_enabled`, `search_enabled`, `model_type`, `ref_file_ids`), and retry deduplication via `hasContinuityMarker`.
+
+2. **Delivery Marker Parser & History Recovery (`tests/context-continuity-marker-parser.test.ts`):**
+   - 6 unit tests verifying robust extraction of `deliveryId`, `continuityContext`, and user-authored prompts from augmented strings, including CRLF normalization and search fallback.
+
+3. **Request Parser & Schema Validation (`tests/context-continuity-request-parser.test.ts`):**
+   - 7 unit tests verifying parsing of generation request payloads across `completion`, `edit_message`, `regenerate`, and other DeepSeek shapes.
+
+4. **Clean User-Turn Presentation (`tests/user-turn-presentation.test.ts`):**
+   - 3 unit tests verifying closed Shadow DOM host mounting, reversible placeholder suppression, prompt de-augmentation, trust disclosure badge rendering, collapsible context inspection, and Russian locale support.
+
+5. **Browser E2E Explicit Delivery (`tests/browser/context-continuity-delivery.spec.ts`):**
+   - 4 browser E2E tests verifying:
+     - Strict default OFF preserves original outgoing request 100% untouched.
+     - `manual_next` mode arming, prompt augmentation, automatic disarming for subsequent turns, and receipt creation in IndexedDB.
+     - Automatic delivery mode continuously augments without manual button clicks.
+     - Fail-open invariant preserves original request on session or parent mismatch.
+
+6. **Live Production Acceptance Gate (Milestone 2D.5B-LA):**
+   - Formal verification against live `https://chat.deepseek.com/` documented in [`docs/LIVE_CONTEXT_CONTINUITY_RESULTS_2026-11-03.md`](./LIVE_CONTEXT_CONTINUITY_RESULTS_2026-11-03.md).
+
 > [!IMPORTANT]
-> Automated tests confirm structural and protocol compliance. For instructions on executing real-world manual acceptance testing against live `chat.deepseek.com`, see the [Live Acceptance Testing Guide](./LIVE_ACCEPTANCE.md), [Live Acceptance Results Template](./LIVE_ACCEPTANCE_RESULTS_TEMPLATE.md), and [Inline Recovery Live Acceptance Results (2026-11-03)](./LIVE_INLINE_RECOVERY_RESULTS_2026-11-03.md).
+> Automated tests confirm structural and protocol compliance. For instructions on executing real-world manual acceptance testing against live `chat.deepseek.com`, see the [Live Acceptance Testing Guide](./LIVE_ACCEPTANCE.md), [Live Acceptance Results Template](./LIVE_ACCEPTANCE_RESULTS_TEMPLATE.md), [Inline Recovery Live Acceptance Results (2026-11-03)](./LIVE_INLINE_RECOVERY_RESULTS_2026-11-03.md), and [Context Continuity Live Acceptance Results (2026-11-03)](./LIVE_CONTEXT_CONTINUITY_RESULTS_2026-11-03.md).

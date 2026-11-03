@@ -173,4 +173,11 @@ To guarantee 100% forward and backward compatibility with DeepSeek's evolving we
 2. **Topological Tree Immunity:** Plans resolve active branches from canonical DAG relationships (`parentId`), rendering the planner completely immune to DeepSeek virtual list DOM unmounting or frontend CSS changes.
 3. **Forensic Cause Uniformity:** Because recovery cause is treated strictly as descriptive metadata rather than an eligibility filter, future changes in DeepSeek's rejection strings or error codes do not break continuity evaluation.
 
+### 6.7 Live Context Continuity Delivery Certification (Milestone 2D.5B-LA)
+During the live acceptance gate recorded in [`docs/LIVE_CONTEXT_CONTINUITY_RESULTS_2026-11-03.md`](./LIVE_CONTEXT_CONTINUITY_RESULTS_2026-11-03.md):
+1. **Request Body Compatibility:** Verified that DeepSeek's production generation endpoint (`POST /api/v0/chat/completion`) seamlessly accepts prompt augmentation with StreamArchive boundary markers while maintaining session, parent, model, and search flag integrity.
+2. **Fail-Open Delivery:** Any session or parent message ID divergence immediately bypasses augmentation and dispatches the original prompt 100% unmodified.
+3. **Durable Bridged Ledger:** Verified that `context_continuity_receipts` in IndexedDB (schema v9) advances from `dispatched` to `response_observed` to `bridged`, suppressing repeated re-injections on subsequent turns across full page reloads (`Ctrl + F5`) and extension restarts.
+4. **Clean Native Bubble Presentation:** User bubbles containing continuity markers are cleanly presented via closed Shadow DOM (`mountCleanUserTurn`), ensuring the native web interface remains clean while native actions (Copy, Edit) stay 100% intact.
+
 
