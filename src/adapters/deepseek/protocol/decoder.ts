@@ -49,6 +49,7 @@ export class DeepSeekProtocolDecoder {
   private isFinished = false;
   private filterTriggered = false;
   private lastGoodState?: DeepSeekLastGoodState;
+  private lastMeaningfulState?: DeepSeekLastGoodState;
 
   private currentMessageId?: string;
   private lastProjectedAnswer = '';
@@ -234,6 +235,9 @@ export class DeepSeekProtocolDecoder {
         let terminalReason: TerminalReason | undefined = undefined;
 
         if (this.filterTriggered || currentStatus === 'CONTENT_FILTER') {
+          if (!this.filterTriggered && currentStatus === 'CONTENT_FILTER') {
+            semanticEvents.push(...this.triggerFilter('CONTENT_FILTER'));
+          }
           terminalReason = 'filtered';
         } else if (currentStatus === 'FINISHED') {
           const hasPending = this.patchApplier.hasPendingFragment() ?? false;
@@ -276,6 +280,9 @@ export class DeepSeekProtocolDecoder {
         let terminalReason: TerminalReason = 'closed_without_resolved_status';
 
         if (this.filterTriggered || currentStatus === 'CONTENT_FILTER') {
+          if (!this.filterTriggered && currentStatus === 'CONTENT_FILTER') {
+            semanticEvents.push(...this.triggerFilter('CONTENT_FILTER'));
+          }
           terminalReason = 'filtered';
         } else if (currentStatus === 'FINISHED') {
           terminalReason = 'completed';
@@ -343,39 +350,7 @@ export class DeepSeekProtocolDecoder {
     // 3. Detect-Before-Apply: Structural scan for censorship or refusal markers
     const filterReason = this.detectCensorship(parsed);
     if (filterReason && !this.filterTriggered) {
-      this.filterTriggered = true;
-      this.filterEventsCount++;
-
-      // Freeze current valid projected state prior to patch mutation
-      const currentProj = projectDeepSeekState(this.patchApplier.getState());
-      this.lastGoodState = {
-        messageId: this.currentMessageId,
-        sessionId: this.sessionId,
-        answer: currentProj.answer,
-        thinking: currentProj.thinking,
-        fragments: structuredClone(this.patchApplier.getFragments()),
-        capturedAt: Date.now(),
-        reason: filterReason,
-        projectionSource: currentProj.source,
-      };
-
-      this.lastFilterEvent = {
-        reason: filterReason,
-        timestamp: Date.now(),
-        messageId: this.currentMessageId,
-      };
-
-      semanticEvents.push({
-        type: 'filter_triggered',
-        streamId: this.streamId,
-        sequence: this.nextSeq(),
-        timestamp: Date.now(),
-        messageId: this.currentMessageId,
-        sessionId: this.sessionId,
-        reason: filterReason,
-        lastGood: this.lastGoodState,
-        projectionSource: currentProj.source,
-      });
+      semanticEvents.push(...this.triggerFilter(filterReason));
     }
 
     // 4. Update diagnostics operations count with bounded traversal
@@ -405,6 +380,9 @@ export class DeepSeekProtocolDecoder {
     const projected = projectDeepSeekState(this.patchApplier.getState());
     this.currentProjectionSource = projected.source;
     const { answer, thinking, source } = projected;
+
+    // Invariant: track rolling meaningful projected state prior to any destructive replacements
+    this.updateMeaningfulState(projected);
 
     // Check Answer
     const answerDiff = computeTextDiff(this.lastProjectedAnswer, answer);
@@ -466,6 +444,9 @@ export class DeepSeekProtocolDecoder {
 
     // 8. Check terminal status using normalized protocol vocabulary (AUTHORITATIVE status only!)
     const currentStatus = this.patchApplier.getStatus();
+    if (currentStatus === 'CONTENT_FILTER' && !this.filterTriggered) {
+      semanticEvents.push(...this.triggerFilter('CONTENT_FILTER'));
+    }
     if (currentStatus && this.profile.terminalStatuses.includes(currentStatus as any) && !this.isFinished) {
       this.isFinished = true;
 
@@ -579,6 +560,9 @@ export class DeepSeekProtocolDecoder {
       if (existingStatus === 'FINISHED') {
         terminalReason = (hasPending || isIncomplete) ? 'incomplete' : 'completed';
       } else if (existingStatus === 'CONTENT_FILTER') {
+        if (!this.filterTriggered) {
+          events.push(...this.triggerFilter('CONTENT_FILTER'));
+        }
         terminalReason = 'filtered';
       } else if (existingStatus === 'CONTEXT_LENGTH_EXCEEDED') {
         terminalReason = 'truncated_context_limit';
@@ -619,6 +603,172 @@ export class DeepSeekProtocolDecoder {
     });
 
     return events;
+  }
+
+  /**
+   * Updates rolling latest meaningful state based on newly projected content.
+   * Invariant: Never allow an empty or destructive post-response projection to
+   * erase an earlier meaningful assistant response.
+   */
+  private updateMeaningfulState(projected: DeepSeekProjectedContent): void {
+    const hasAnswer = projected.answer.trim().length > 0;
+    const hasThinking = projected.thinking.trim().length > 0;
+
+    if (!hasAnswer && !hasThinking) {
+      return;
+    }
+
+    if (!this.lastMeaningfulState) {
+      this.lastMeaningfulState = {
+        messageId: this.currentMessageId,
+        sessionId: this.sessionId,
+        answer: projected.answer,
+        thinking: projected.thinking,
+        fragments: structuredClone(this.patchApplier.getFragments()),
+        capturedAt: Date.now(),
+        reason: 'meaningful_projection',
+        projectionSource: projected.source,
+      };
+      return;
+    }
+
+    // If incoming projection has a visible answer:
+    if (hasAnswer) {
+      this.lastMeaningfulState = {
+        messageId: this.currentMessageId || this.lastMeaningfulState.messageId,
+        sessionId: this.sessionId || this.lastMeaningfulState.sessionId,
+        answer: projected.answer,
+        thinking: hasThinking ? projected.thinking : this.lastMeaningfulState.thinking,
+        fragments: structuredClone(this.patchApplier.getFragments()),
+        capturedAt: Date.now(),
+        reason: 'meaningful_projection',
+        projectionSource: projected.source,
+      };
+      return;
+    }
+
+    // Incoming has NO visible answer, but has thinking:
+    // If we previously had a visible answer, PRESERVE it! Only advance thinking if newer thinking is non-empty.
+    if (this.lastMeaningfulState.answer.trim().length > 0) {
+      if (hasThinking && projected.thinking.length >= this.lastMeaningfulState.thinking.length) {
+        this.lastMeaningfulState.thinking = projected.thinking;
+        this.lastMeaningfulState.capturedAt = Date.now();
+      }
+      return;
+    }
+
+    // Thinking-only stream:
+    if (hasThinking) {
+      this.lastMeaningfulState = {
+        messageId: this.currentMessageId || this.lastMeaningfulState.messageId,
+        sessionId: this.sessionId || this.lastMeaningfulState.sessionId,
+        answer: '',
+        thinking: projected.thinking,
+        fragments: structuredClone(this.patchApplier.getFragments()),
+        capturedAt: Date.now(),
+        reason: 'meaningful_projection',
+        projectionSource: projected.source,
+      };
+    }
+  }
+
+  /**
+   * Resolves the authoritative Last-Good state upon content filter detection.
+   * Selection priority (Section 10):
+   * 1. Meaningful state immediately BEFORE current destructive filter patch (if answer or thinking is non-empty)
+   * 2. Otherwise previously tracked rolling latest meaningful projected state
+   * 3. Otherwise undefined (genuine input filter / no recoverable content)
+   */
+  private resolveLastGoodState(reason: string): DeepSeekLastGoodState | undefined {
+    // Candidate 1: Immediate pre-patch projection from patchApplier
+    const currentProj = projectDeepSeekState(this.patchApplier.getState());
+    const prePatchHasAnswer = currentProj.answer.trim().length > 0;
+    const prePatchHasThinking = currentProj.thinking.trim().length > 0;
+
+    const rollingHasAnswer = Boolean(
+      this.lastMeaningfulState && this.lastMeaningfulState.answer.trim().length > 0
+    );
+
+    // If immediate pre-patch has a visible answer, it is immediate and meaningful!
+    if (prePatchHasAnswer) {
+      return {
+        messageId: this.currentMessageId,
+        sessionId: this.sessionId,
+        answer: currentProj.answer,
+        thinking: currentProj.thinking,
+        fragments: structuredClone(this.patchApplier.getFragments()),
+        capturedAt: Date.now(),
+        reason,
+        projectionSource: currentProj.source,
+      };
+    }
+
+    // If immediate pre-patch has NO visible answer, but rolling meaningful state DOES:
+    // Prefer the rolling meaningful state with the real visible answer!
+    if (rollingHasAnswer && this.lastMeaningfulState) {
+      return {
+        ...this.lastMeaningfulState,
+        reason,
+        capturedAt: this.lastMeaningfulState.capturedAt || Date.now(),
+      };
+    }
+
+    // Thinking-only stream: immediate pre-patch has thinking
+    if (prePatchHasThinking) {
+      return {
+        messageId: this.currentMessageId,
+        sessionId: this.sessionId,
+        answer: '',
+        thinking: currentProj.thinking,
+        fragments: structuredClone(this.patchApplier.getFragments()),
+        capturedAt: Date.now(),
+        reason,
+        projectionSource: currentProj.source,
+      };
+    }
+
+    // Thinking-only stream: rolling meaningful state has thinking
+    if (this.lastMeaningfulState && this.lastMeaningfulState.thinking.trim().length > 0) {
+      return {
+        ...this.lastMeaningfulState,
+        reason,
+        capturedAt: this.lastMeaningfulState.capturedAt || Date.now(),
+      };
+    }
+
+    // Genuine input filter case: no answer and no thinking ever reached browser
+    return undefined;
+  }
+
+  private triggerFilter(reason: string): DeepSeekSemanticEvent[] {
+    if (this.filterTriggered) {
+      return [];
+    }
+    this.filterTriggered = true;
+    this.filterEventsCount++;
+
+    const chosenLastGood = this.resolveLastGoodState(reason);
+    this.lastGoodState = chosenLastGood;
+
+    this.lastFilterEvent = {
+      reason,
+      timestamp: Date.now(),
+      messageId: this.currentMessageId,
+    };
+
+    return [
+      {
+        type: 'filter_triggered',
+        streamId: this.streamId,
+        sequence: this.nextSeq(),
+        timestamp: Date.now(),
+        messageId: this.currentMessageId,
+        sessionId: this.sessionId,
+        reason,
+        lastGood: chosenLastGood,
+        projectionSource: chosenLastGood ? chosenLastGood.projectionSource : 'none',
+      },
+    ];
   }
 
   getLastGoodState(): DeepSeekLastGoodState | undefined {

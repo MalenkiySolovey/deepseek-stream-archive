@@ -63,9 +63,12 @@ export function buildConversationExportDto(
     // Build recovery payload if applicable
     let recoveryPayload: ConversationExportV1['messages'][0]['recovery'];
     if (options.includeRecovery) {
-      const lastGoodRev = revisions.find((r) => r.isLastGood);
+      const lastGoodRev =
+        revisions.find((r) => r.isLastGood && (r.text.trim().length > 0 || (r.thinking && r.thinking.trim().length > 0))) ||
+        [...revisions].reverse().find((r) => r.source === 'network' && (r.text.trim().length > 0 || (r.thinking && r.thinking.trim().length > 0)));
       const primaryEvent = recoveryEvents[0];
-      if (lastGoodRev && (message.status === 'filtered' || primaryEvent)) {
+      const hasMeaningfulContent = Boolean(lastGoodRev && (lastGoodRev.text.trim().length > 0 || (lastGoodRev.thinking && lastGoodRev.thinking.trim().length > 0)));
+      if (hasMeaningfulContent && (message.status === 'filtered' || primaryEvent)) {
         recoveryPayload = {
           event: {
             id: primaryEvent?.id ?? `rec_${message.id}`,
@@ -73,8 +76,8 @@ export function buildConversationExportDto(
             detectedAt: primaryEvent?.detectedAt ?? message.updatedAt,
             reason: primaryEvent?.reason,
           },
-          lastGoodText: lastGoodRev.text,
-          lastGoodThinking: options.includeReasoning ? lastGoodRev.thinking : undefined,
+          lastGoodText: lastGoodRev!.text,
+          lastGoodThinking: options.includeReasoning ? lastGoodRev!.thinking : undefined,
         };
       }
     }

@@ -613,7 +613,7 @@
         {@const branchInfo = getSiblingInfo(msg)}
         {@const activeData = getActiveContent(msg)}
         {@const isAssistant = msg.role === 'assistant'}
-        {@const lastGoodRev = msg.preferredRevision?.isLastGood ? msg.preferredRevision : undefined}
+        {@const lastGoodRev = (msg.status === 'filtered' && msg.preferredRevision) ? msg.preferredRevision : (msg.preferredRevision?.isLastGood ? msg.preferredRevision : undefined)}
 
         <div class="message-card" class:assistant={isAssistant} class:user={!isAssistant}>
           <div class="message-header">
@@ -676,7 +676,7 @@
           {/if}
 
           <!-- Recovery Preview Card for Filtered / Censored Messages -->
-          {#if isAssistant && (msg.status === 'filtered' || msg.recoveryEvents.length > 0 || lastGoodRev)}
+          {#if isAssistant && lastGoodRev && (lastGoodRev.text.trim().length > 0 || (lastGoodRev.thinking && lastGoodRev.thinking.trim().length > 0))}
             <div class="recovery-preview-card">
               <div class="recovery-card-header">
                 <span class="recovery-icon">🛡️</span>
@@ -684,23 +684,25 @@
                   <div class="recovery-card-title">{t.recoveryCardTitle}</div>
                   <div class="recovery-card-desc">{t.recoveryCardDesc}</div>
                 </div>
-                {#if lastGoodRev}
-                  <button
-                    class="copy-recovery-btn"
-                    type="button"
-                    onclick={() => copyToClipboard(lastGoodRev.text, `rec_${msg.id}`)}
-                  >
-                    {copiedId === `rec_${msg.id}` ? t.copiedText : t.copyPreservedText}
-                  </button>
-                {/if}
+                <button
+                  class="copy-recovery-btn"
+                  type="button"
+                  onclick={() => copyToClipboard(lastGoodRev.text || lastGoodRev.thinking || '', `rec_${msg.id}`)}
+                >
+                  {copiedId === `rec_${msg.id}` ? t.copiedText : t.copyPreservedText}
+                </button>
               </div>
 
-              {#if lastGoodRev}
-                <div class="recovered-text-box">
+              <div class="recovered-text-box">
+                {#if lastGoodRev.text && lastGoodRev.text.trim().length > 0}
                   <div class="recovered-text-label">{t.lastGoodBadge} ({lastGoodRev.text.length} chars):</div>
                   <SafeMarkdown content={lastGoodRev.text} />
-                </div>
-              {/if}
+                {/if}
+                {#if lastGoodRev.thinking && lastGoodRev.thinking.trim().length > 0}
+                  <div class="recovered-text-label" style="margin-top: 8px;">💭 {t.thinkingTitle} ({lastGoodRev.thinking.length} {t.thinkingChars}):</div>
+                  <SafeMarkdown content={lastGoodRev.thinking} />
+                {/if}
+              </div>
             </div>
           {/if}
 

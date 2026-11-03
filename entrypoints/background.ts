@@ -1442,8 +1442,21 @@ export default defineBackground(() => {
               sendResponse({ success: false, data: null, error: 'recovery_event_invalid' });
               return;
             }
-            const rev = await storageRepo.getRevision(event.recoveredRevisionId);
-            if (!rev || rev.messageId !== msg.id || !rev.isLastGood) {
+            let rev = await storageRepo.getRevision(event.recoveredRevisionId);
+            const isMeaningful = rev && (rev.text.trim().length > 0 || (rev.thinking && rev.thinking.trim().length > 0));
+
+            if (!rev || !isMeaningful) {
+              // Read-time legacy repair: locate latest meaningful network revision for msg
+              const revs = await storageRepo.listRevisionsByMessage(msg.id);
+              const repaired = [...revs].reverse().find(
+                (r) => r.source === 'network' && (r.text.trim().length > 0 || (r.thinking && r.thinking.trim().length > 0))
+              );
+              if (repaired) {
+                rev = repaired;
+              }
+            }
+
+            if (!rev || rev.messageId !== msg.id || (rev.text.trim().length === 0 && (!rev.thinking || rev.thinking.trim().length === 0))) {
               sendResponse({ success: false, data: null, error: 'recovered_revision_invalid' });
               return;
             }

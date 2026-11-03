@@ -38,7 +38,9 @@ export function computeContentFingerprint(
 
 /**
  * Pure preferred revision selection policy.
- * - For filtered messages: prefers uncensored lastGood revision (recovery view).
+ * - For filtered messages: prefers uncensored lastGood revision (recovery view) with meaningful content.
+ *   Read-time legacy repair: if isLastGood revision was recorded empty due to premature destructive clearing,
+ *   falls back to the latest meaningful network revision for that message.
  * - For normal messages: prefers latest valid history revision -> latest valid network revision -> replay revision.
  */
 export function selectPreferredRevision(
@@ -49,11 +51,38 @@ export function selectPreferredRevision(
     return null;
   }
 
-  // If message was filtered, prefer uncensored lastGood revision
+  // If message was filtered, prefer uncensored lastGood revision with meaningful content
   if (message.status === 'filtered') {
-    const lastGood = revisions.filter((r) => r.isLastGood).at(-1);
-    if (lastGood) {
-      return lastGood;
+    // 1. Explicit uncensored lastGood with visible answer
+    const lastGoodWithAnswer = revisions
+      .filter((r) => r.isLastGood && r.text && r.text.trim().length > 0)
+      .at(-1);
+    if (lastGoodWithAnswer) {
+      return lastGoodWithAnswer;
+    }
+
+    // 2. Read-time legacy repair: if lastGood was 0 chars or missing, check if earlier network revision had visible answer
+    const networkWithAnswer = [...revisions]
+      .reverse()
+      .find((r) => r.source === 'network' && r.text && r.text.trim().length > 0);
+    if (networkWithAnswer) {
+      return networkWithAnswer;
+    }
+
+    // 3. Uncensored lastGood with thinking only
+    const lastGoodWithThinking = revisions
+      .filter((r) => r.isLastGood && r.thinking && r.thinking.trim().length > 0)
+      .at(-1);
+    if (lastGoodWithThinking) {
+      return lastGoodWithThinking;
+    }
+
+    // 4. Network with thinking only
+    const networkWithThinking = [...revisions]
+      .reverse()
+      .find((r) => r.source === 'network' && r.thinking && r.thinking.trim().length > 0);
+    if (networkWithThinking) {
+      return networkWithThinking;
     }
   }
 

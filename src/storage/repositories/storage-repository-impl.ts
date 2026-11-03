@@ -1378,7 +1378,10 @@ export class IndexedDbStorageRepository implements StorageRepository {
               revReq.onerror = () => checkDone();
               revReq.onsuccess = () => {
                 const rev = revReq.result as ResponseRevision | undefined;
-                if (rev && rev.isLastGood && rev.messageId === m.id) {
+                const hasDirectContent =
+                  rev && (rev.text.trim().length > 0 || (rev.thinking && rev.thinking.trim().length > 0));
+
+                if (rev && rev.isLastGood && rev.messageId === m.id && hasDirectContent) {
                   const presKind =
                     authEvent.kind === 'network_interruption'
                       ? 'interruption_recovery'
@@ -1395,8 +1398,42 @@ export class IndexedDbStorageRepository implements StorageRepository {
                     recoveredRevisionId: rev.id,
                     recoveryEventId: authEvent.id,
                   });
+                  checkDone();
+                  return;
                 }
-                checkDone();
+
+                // Read-time legacy repair: RecoveryEvent pointed to empty revision
+                // Query all revisions for m.id to find latest meaningful network revision
+                const revIndex = revStore.index('messageId');
+                const allRevsReq = revIndex.getAll(m.id);
+                allRevsReq.onerror = () => checkDone();
+                allRevsReq.onsuccess = () => {
+                  const allRevs = (allRevsReq.result as ResponseRevision[]) || [];
+                  const repairedRev = [...allRevs].reverse().find(
+                    (r) =>
+                      r.source === 'network' &&
+                      (r.text.trim().length > 0 || (r.thinking && r.thinking.trim().length > 0))
+                  );
+                  if (repairedRev) {
+                    const presKind =
+                      authEvent.kind === 'network_interruption'
+                        ? 'interruption_recovery'
+                        : 'pre_filter_recovery';
+                    results.push({
+                      messageId: m.id,
+                      remoteId: m.remoteId,
+                      role: m.role,
+                      status: m.status,
+                      hasLastGood: true,
+                      recoveryKind: 'authoritative_recovery',
+                      presentationKind: presKind,
+                      capturedAt: repairedRev.capturedAt,
+                      recoveredRevisionId: repairedRev.id,
+                      recoveryEventId: authEvent.id,
+                    });
+                  }
+                  checkDone();
+                };
               };
               return;
             }

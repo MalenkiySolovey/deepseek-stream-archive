@@ -280,4 +280,142 @@ describe('CanonicalRevisionRecorder', () => {
     expect(snapshot.sourceRawStreamKey).toBe('prod_session:stream_uuid');
     expect(snapshot.identityState).toBe('provisional');
   });
+
+  // --- Milestone v0.1.0 Core Correctness Regressions ---
+
+  it('recovers meaningful previous revision when filter arrives after destructive answer_replace', () => {
+    const recorder = new CanonicalRevisionRecorder({
+      conversationId: 'conv-reg-1',
+      messageId: 'msg-reg-1',
+      minCharsForFlush: 10,
+    });
+
+    // 1. Stream 11038 chars (simulated with a meaningful string)
+    const longAnswer = 'REAL PRE-FILTER RESPONSE: Extensive analysis with math and code derivations.';
+    recorder.feedSemanticEvent({
+      streamId: 's-live-1',
+      sequence: 1,
+      timestamp: 100,
+      type: 'answer_delta',
+      delta: longAnswer,
+    });
+
+    const rev1 = recorder.flush(false);
+    expect(rev1).not.toBeNull();
+    expect(rev1!.text).toBe(longAnswer);
+
+    // 2. Destructive replacement: answer becomes 0 chars (as observed in user live session: #386 0 chars)
+    recorder.feedSemanticEvent({
+      streamId: 's-live-1',
+      sequence: 2,
+      timestamp: 200,
+      type: 'answer_replace',
+      fullText: '',
+    });
+
+    // 3. Filter triggered event arrives with empty/cleared lastGood
+    recorder.feedSemanticEvent({
+      streamId: 's-live-1',
+      sequence: 3,
+      timestamp: 300,
+      type: 'filter_triggered',
+      reason: 'CONTENT_FILTER',
+      lastGood: {
+        answer: '',
+        thinking: '',
+        capturedAt: 300,
+        reason: 'CONTENT_FILTER',
+        projectionSource: 'fragments',
+      },
+    });
+
+    expect(recorder.getCurrentStatus()).toBe('filtered');
+    const lastGood = recorder.getLastGoodRevision();
+    expect(lastGood).not.toBeNull();
+
+    // Invariant: Must NOT be 0 chars! Must be the real pre-filter text!
+    expect(lastGood!.text).toBe(longAnswer);
+    expect(lastGood!.isLastGood).toBe(true);
+
+    const recEvents = recorder.getRecoveryEvents();
+    expect(recEvents).toHaveLength(1);
+    expect(recEvents[0]!.recoveredRevisionId).toBe(lastGood!.id);
+  });
+
+  it('refuses to create empty Last Good revision or false RecoveryEvent on empty snapshot request', () => {
+    const recorder = new CanonicalRevisionRecorder({
+      conversationId: 'conv-reg-2',
+      messageId: 'msg-reg-2',
+    });
+
+    // Directly call recordLastGoodSnapshot with empty strings
+    const result = recorder.recordLastGoodSnapshot('', '', 'CONTENT_FILTER');
+    expect(result).toBeNull();
+    expect(recorder.getLastGoodRevision()).toBeNull();
+    expect(recorder.getRecoveryEvents()).toHaveLength(0);
+    expect(recorder.getRevisions()).toHaveLength(0);
+  });
+
+  it('handles genuine input filter without fabricated Last Good or RecoveryEvent', () => {
+    const recorder = new CanonicalRevisionRecorder({
+      conversationId: 'conv-reg-3',
+      messageId: 'msg-reg-3',
+    });
+
+    // Filter triggered on empty prompt without any prior content
+    recorder.feedSemanticEvent({
+      streamId: 's-input-censor',
+      sequence: 1,
+      timestamp: 100,
+      type: 'filter_triggered',
+      reason: 'CONTENT_FILTER',
+    });
+
+    expect(recorder.getCurrentStatus()).toBe('filtered');
+    expect(recorder.getLastGoodRevision()).toBeNull();
+    expect(recorder.getRecoveryEvents()).toHaveLength(0);
+    expect(recorder.getRevisions()).toHaveLength(0);
+
+    const snapshot = recorder.buildMessageSnapshot();
+    expect(snapshot.projectionState).toBe('provisional_logical');
+  });
+
+  it('preserves thinking in thinking-only recovery without pretending visible answer existed', () => {
+    const recorder = new CanonicalRevisionRecorder({
+      conversationId: 'conv-reg-4',
+      messageId: 'msg-reg-4',
+    });
+
+    recorder.feedSemanticEvent({
+      streamId: 's-think-censor',
+      sequence: 1,
+      timestamp: 100,
+      type: 'thinking_delta',
+      delta: 'Reasoning about query safety constraints...',
+    });
+
+    recorder.feedSemanticEvent({
+      streamId: 's-think-censor',
+      sequence: 2,
+      timestamp: 200,
+      type: 'filter_triggered',
+      reason: 'CONTENT_FILTER',
+      lastGood: {
+        answer: '',
+        thinking: 'Reasoning about query safety constraints...',
+        capturedAt: 200,
+        reason: 'CONTENT_FILTER',
+        projectionSource: 'fragments',
+      },
+    });
+
+    const lastGood = recorder.getLastGoodRevision();
+    expect(lastGood).not.toBeNull();
+    expect(lastGood!.text).toBe('');
+    expect(lastGood!.thinking).toBe('Reasoning about query safety constraints...');
+
+    const recEvents = recorder.getRecoveryEvents();
+    expect(recEvents).toHaveLength(1);
+    expect(recEvents[0]!.recoveredRevisionId).toBe(lastGood!.id);
+  });
 });

@@ -164,4 +164,149 @@ describe('DeepSeek Censorship & Filter Detection (Detect-Before-Apply)', () => {
     expect(decoder.getLastGoodState()).toBeUndefined();
     expect(decoder.getProjectedContent().answer).toBe('The server constant is CONTENT_FILTER in the codebase.');
   });
+
+  // --- Milestone v0.1.0 Core Correctness Regressions ---
+
+  it('preserves meaningful answer across intermediate destructive patch that clears content before CONTENT_FILTER status arrives', () => {
+    const decoder = new DeepSeekProtocolDecoder('stream_destructive_intermediate', 'sess_live_bug');
+
+    // 1. Initial valid assistant response (e.g. 11038 chars in live session)
+    const usefulReply = 'REAL PRE-FILTER RESPONSE: Here is a detailed 11038 character answer with crucial derivations.';
+    decoder.feed({
+      data: JSON.stringify({
+        p: 'response',
+        o: 'BATCH',
+        v: [
+          { p: 'message_id', v: 'msg_filtered_live' },
+          {
+            p: 'fragments',
+            o: 'SET',
+            v: [
+              { type: 'THINK', content: 'Detailed thinking process before filter.' },
+              { type: 'RESPONSE', content: usefulReply },
+            ],
+          },
+        ],
+      }),
+    });
+
+    expect(decoder.getProjectedContent().answer).toBe(usefulReply);
+
+    // 2. Intermediate destructive patch: DeepSeek clears/empties fragments BEFORE sending status marker!
+    const clearEvents = decoder.feed({
+      data: JSON.stringify({
+        p: 'fragments',
+        o: 'SET',
+        v: [],
+      }),
+    });
+
+    // Content is now 0 chars in projection
+    expect(decoder.getProjectedContent().answer).toBe('');
+    expect(clearEvents.some((e) => e.type === 'answer_replace' && e.fullText === '')).toBe(true);
+
+    // 3. Subsequent event: CONTENT_FILTER arrives in separate status patch
+    const filterEvents = decoder.feed({
+      data: JSON.stringify({
+        p: 'status',
+        o: 'SET',
+        v: 'CONTENT_FILTER',
+      }),
+    });
+
+    const filterEvt = filterEvents.find((e) => e.type === 'filter_triggered');
+    expect(filterEvt).toBeDefined();
+    expect(filterEvt?.reason).toBe('CONTENT_FILTER');
+
+    // Invariant: Last Good MUST be the real pre-filter text, NOT ""!
+    expect(filterEvt?.lastGood).toBeDefined();
+    expect(filterEvt?.lastGood?.answer).toBe(usefulReply);
+    expect(filterEvt?.lastGood?.thinking).toBe('Detailed thinking process before filter.');
+    expect(filterEvt?.lastGood?.messageId).toBe('msg_filtered_live');
+    expect(decoder.getLastGoodState()?.answer).toBe(usefulReply);
+  });
+
+  it('handles genuine input-filter with no fabricated lastGood state or recovery', () => {
+    const decoder = new DeepSeekProtocolDecoder('stream_genuine_input_filter');
+
+    // Feed message_id and immediate CONTENT_FILTER without any generated content
+    const events = decoder.feed({
+      data: JSON.stringify({
+        p: 'response',
+        o: 'BATCH',
+        v: [
+          { p: 'message_id', v: 'msg_input_filtered' },
+          { p: 'status', o: 'SET', v: 'CONTENT_FILTER' },
+        ],
+      }),
+    });
+
+    const filterEvt = events.find((e) => e.type === 'filter_triggered');
+    expect(filterEvt).toBeDefined();
+    expect(filterEvt?.reason).toBe('CONTENT_FILTER');
+
+    // Invariant: No fabricated lastGood state when no text ever reached the browser!
+    expect(filterEvt?.lastGood).toBeUndefined();
+    expect(decoder.getLastGoodState()).toBeUndefined();
+  });
+
+  it('preserves reasoning in thinking-only stream before CONTENT_FILTER', () => {
+    const decoder = new DeepSeekProtocolDecoder('stream_thinking_only_filter');
+
+    // Stream reasoning tokens only
+    decoder.feed({
+      data: JSON.stringify({
+        p: 'fragments',
+        o: 'SET',
+        v: [{ type: 'THINK', content: 'Step-by-step reasoning on policy edge case.' }],
+      }),
+    });
+
+    // Content filter triggers
+    const events = decoder.feed({
+      data: JSON.stringify({
+        p: 'status',
+        o: 'SET',
+        v: 'CONTENT_FILTER',
+      }),
+    });
+
+    const filterEvt = events.find((e) => e.type === 'filter_triggered');
+    expect(filterEvt).toBeDefined();
+    expect(filterEvt?.lastGood).toBeDefined();
+    expect(filterEvt?.lastGood?.answer).toBe('');
+    expect(filterEvt?.lastGood?.thinking).toBe('Step-by-step reasoning on policy edge case.');
+  });
+
+  it('preserves pre-replacement response when intermediate patch replaces response with native refusal template', () => {
+    const decoder = new DeepSeekProtocolDecoder('stream_template_intermediate');
+
+    const usefulAnswer = 'Useful technical information before policy replacement.';
+    decoder.feed({
+      data: JSON.stringify({
+        p: 'fragments',
+        o: 'SET',
+        v: [{ type: 'RESPONSE', content: usefulAnswer }],
+      }),
+    });
+
+    // Native refusal replacement
+    decoder.feed({
+      data: JSON.stringify({
+        p: 'fragments',
+        o: 'SET',
+        v: [{ type: 'TEMPLATE_RESPONSE', content: "Sorry, that's beyond my current scope. Let's talk about something else." }],
+      }),
+    });
+
+    // Close event with CONTENT_FILTER
+    const finishEvents = decoder.feed({
+      event: 'finish',
+      data: '',
+    });
+
+    const lastGood = decoder.getLastGoodState();
+    expect(lastGood).toBeDefined();
+    expect(lastGood?.answer).toBe(usefulAnswer);
+  });
 });

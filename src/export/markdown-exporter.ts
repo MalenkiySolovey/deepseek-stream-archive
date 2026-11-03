@@ -134,10 +134,13 @@ export function buildConversationMarkdown(
 
     // Pre-Filter Censorship Recovery
     if (options.includeRecovery) {
-      const lastGoodRev = revisions.find((r) => r.isLastGood);
+      const lastGoodRev =
+        revisions.find((r) => r.isLastGood && (r.text.trim().length > 0 || (r.thinking && r.thinking.trim().length > 0))) ||
+        [...revisions].reverse().find((r) => r.source === 'network' && (r.text.trim().length > 0 || (r.thinking && r.thinking.trim().length > 0)));
       const isFiltered = message.status === 'filtered' || recoveryEvents.length > 0;
+      const hasMeaningfulContent = Boolean(lastGoodRev && (lastGoodRev.text.trim().length > 0 || (lastGoodRev.thinking && lastGoodRev.thinking.trim().length > 0)));
 
-      if (isFiltered && lastGoodRev) {
+      if (isFiltered && hasMeaningfulContent && lastGoodRev) {
         lines.push('### Recovery');
         lines.push('');
         lines.push('> **StreamArchive Recovery**');

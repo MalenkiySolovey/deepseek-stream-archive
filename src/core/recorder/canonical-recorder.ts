@@ -36,6 +36,8 @@ export class CanonicalRevisionRecorder implements RevisionRecorder {
 
   private accumulatedText = '';
   private accumulatedThinking = '';
+  private lastMeaningfulText = '';
+  private lastMeaningfulThinking = '';
   private status: MessageStatus = 'streaming';
   private revisionCount = 0;
   private lastFlushedAt = 0;
@@ -86,9 +88,15 @@ export class CanonicalRevisionRecorder implements RevisionRecorder {
   feedDelta(delta: { text?: string; thinking?: string }): void {
     if (delta.text) {
       this.accumulatedText += delta.text;
+      if (this.accumulatedText.trim().length > 0) {
+        this.lastMeaningfulText = this.accumulatedText;
+      }
     }
     if (delta.thinking) {
       this.accumulatedThinking += delta.thinking;
+      if (this.accumulatedThinking.trim().length > 0) {
+        this.lastMeaningfulThinking = this.accumulatedThinking;
+      }
     }
   }
 
@@ -103,24 +111,36 @@ export class CanonicalRevisionRecorder implements RevisionRecorder {
       case 'answer_delta':
         if (event.delta) {
           this.accumulatedText += event.delta;
+          if (this.accumulatedText.trim().length > 0) {
+            this.lastMeaningfulText = this.accumulatedText;
+          }
         }
         break;
 
       case 'answer_replace':
         if (event.fullText !== undefined) {
           this.accumulatedText = event.fullText;
+          if (this.accumulatedText.trim().length > 0) {
+            this.lastMeaningfulText = this.accumulatedText;
+          }
         }
         break;
 
       case 'thinking_delta':
         if (event.delta) {
           this.accumulatedThinking += event.delta;
+          if (this.accumulatedThinking.trim().length > 0) {
+            this.lastMeaningfulThinking = this.accumulatedThinking;
+          }
         }
         break;
 
       case 'thinking_replace':
         if (event.fullText !== undefined) {
           this.accumulatedThinking = event.fullText;
+          if (this.accumulatedThinking.trim().length > 0) {
+            this.lastMeaningfulThinking = this.accumulatedThinking;
+          }
         }
         break;
 
@@ -130,10 +150,58 @@ export class CanonicalRevisionRecorder implements RevisionRecorder {
           // Duplicate protection: filter incident already recorded for this stream
           break;
         }
-        if (event.lastGood) {
-          this.recordLastGoodSnapshot(event.lastGood.answer, event.lastGood.thinking, event.reason);
-        } else {
-          this.markLastGood();
+
+        {
+          let candidateAnswer = '';
+          let candidateThinking = '';
+
+          const eventHasAnswer = Boolean(event.lastGood?.answer && event.lastGood.answer.trim().length > 0);
+          const eventHasThinking = Boolean(event.lastGood?.thinking && event.lastGood.thinking.trim().length > 0);
+
+          if (eventHasAnswer) {
+            candidateAnswer = event.lastGood!.answer;
+            candidateThinking = event.lastGood!.thinking || '';
+          } else {
+            // Priority 2: search earlier revisions for latest meaningful visible answer
+            const revsWithAnswer = this.allRevisions.filter((r) => r.text && r.text.trim().length > 0);
+            if (revsWithAnswer.length > 0) {
+              const bestRev = revsWithAnswer[revsWithAnswer.length - 1]!;
+              candidateAnswer = bestRev.text;
+              candidateThinking =
+                bestRev.thinking ||
+                (eventHasThinking
+                  ? event.lastGood!.thinking!
+                  : this.accumulatedThinking || this.lastMeaningfulThinking);
+            } else if (this.accumulatedText.trim().length > 0) {
+              candidateAnswer = this.accumulatedText;
+              candidateThinking = this.accumulatedThinking;
+            } else if (this.lastMeaningfulText.trim().length > 0) {
+              candidateAnswer = this.lastMeaningfulText;
+              candidateThinking = this.lastMeaningfulThinking;
+            } else if (eventHasThinking) {
+              // Thinking-only candidate
+              candidateAnswer = '';
+              candidateThinking = event.lastGood!.thinking!;
+            } else {
+              // Priority 3: earlier revisions with thinking only
+              const revsWithThinking = this.allRevisions.filter((r) => r.thinking && r.thinking.trim().length > 0);
+              if (revsWithThinking.length > 0) {
+                const bestRev = revsWithThinking[revsWithThinking.length - 1]!;
+                candidateAnswer = '';
+                candidateThinking = bestRev.thinking!;
+              } else if (this.accumulatedThinking.trim().length > 0) {
+                candidateAnswer = '';
+                candidateThinking = this.accumulatedThinking;
+              } else if (this.lastMeaningfulThinking.trim().length > 0) {
+                candidateAnswer = '';
+                candidateThinking = this.lastMeaningfulThinking;
+              }
+            }
+          }
+
+          if (candidateAnswer.trim().length > 0 || candidateThinking.trim().length > 0) {
+            this.recordLastGoodSnapshot(candidateAnswer, candidateThinking, event.reason);
+          }
         }
         break;
 
@@ -263,10 +331,16 @@ export class CanonicalRevisionRecorder implements RevisionRecorder {
     return revision;
   }
 
-  recordLastGoodSnapshot(answer: string, thinking: string, reason?: string): ResponseRevision {
+  recordLastGoodSnapshot(answer: string, thinking: string, reason?: string): ResponseRevision | null {
     if (this.lastGoodRevision) {
       return this.lastGoodRevision;
     }
+    const cleanAnswer = (answer || '').trim();
+    const cleanThinking = (thinking || '').trim();
+    if (cleanAnswer.length === 0 && cleanThinking.length === 0) {
+      return null;
+    }
+
     const now = Date.now();
     const revIdx = this.revisionCount++;
     const revision: ResponseRevision = {
@@ -274,7 +348,7 @@ export class CanonicalRevisionRecorder implements RevisionRecorder {
       messageId: this.messageId,
       revisionIndex: revIdx,
       text: answer,
-      thinking: thinking.length > 0 ? thinking : undefined,
+      thinking: cleanThinking.length > 0 ? thinking : undefined,
       source: this.source,
       capturedAt: now,
       isFinal: false,
@@ -299,10 +373,13 @@ export class CanonicalRevisionRecorder implements RevisionRecorder {
   }
 
   markLastGood(): ResponseRevision | null {
-    if (this.accumulatedText.length === 0 && this.accumulatedThinking.length === 0) {
-      return null;
+    if (this.accumulatedText.trim().length > 0 || this.accumulatedThinking.trim().length > 0) {
+      return this.recordLastGoodSnapshot(this.accumulatedText, this.accumulatedThinking);
     }
-    return this.recordLastGoodSnapshot(this.accumulatedText, this.accumulatedThinking);
+    if (this.lastMeaningfulText.trim().length > 0 || this.lastMeaningfulThinking.trim().length > 0) {
+      return this.recordLastGoodSnapshot(this.lastMeaningfulText, this.lastMeaningfulThinking);
+    }
+    return null;
   }
 
   buildMessageSnapshot(): Message {
@@ -352,6 +429,8 @@ export class CanonicalRevisionRecorder implements RevisionRecorder {
   reset(): void {
     this.accumulatedText = '';
     this.accumulatedThinking = '';
+    this.lastMeaningfulText = '';
+    this.lastMeaningfulThinking = '';
     this.status = 'streaming';
     this.revisionCount = 0;
     this.lastFlushedAt = 0;
