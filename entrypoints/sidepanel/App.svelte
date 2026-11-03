@@ -549,7 +549,7 @@
 <div class="sidepanel-root">
   <header class="app-header">
     <div class="header-brand">
-      <span class="brand-icon">📦</span>
+      <img class="brand-icon" src="/icons/icon-32.png" alt="StreamArchive" width="20" height="20" />
       <h1 class="brand-title">StreamArchive</h1>
     </div>
 
@@ -1488,8 +1488,11 @@
   }
 
   .brand-icon {
-    font-size: 1.125rem;
-    line-height: 1;
+    width: 20px;
+    height: 20px;
+    object-fit: contain;
+    border-radius: 4px;
+    flex-shrink: 0;
   }
 
   .brand-title {
