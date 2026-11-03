@@ -22,6 +22,8 @@ export const MESSAGE_PERSIST_RAW_BATCH = 'STREAMARCHIVE_PERSIST_RAW_BATCH' as co
 export const MESSAGE_FINALIZE_RAW_STREAM = 'STREAMARCHIVE_FINALIZE_RAW_STREAM' as const;
 export const MESSAGE_GET_RAW_JOURNAL_STATUS = 'STREAMARCHIVE_GET_RAW_JOURNAL_STATUS' as const;
 export const MESSAGE_FORWARD_HISTORY_OBSERVATION = 'STREAMARCHIVE_FORWARD_HISTORY_OBSERVATION' as const;
+export const MESSAGE_PERSIST_USER_TURN = 'STREAMARCHIVE_PERSIST_USER_TURN' as const;
+export const MESSAGE_RECORD_RECOVERY_DIAGNOSTIC = 'STREAMARCHIVE_RECORD_RECOVERY_DIAGNOSTIC' as const;
 export const MESSAGE_GET_ARCHIVE_SUMMARY = 'STREAMARCHIVE_GET_ARCHIVE_SUMMARY' as const;
 export const MESSAGE_PERSIST_CANONICAL_CHECKPOINT = 'STREAMARCHIVE_PERSIST_CANONICAL_CHECKPOINT' as const;
 export const MESSAGE_LIST_ARCHIVE_CONVERSATIONS = 'STREAMARCHIVE_LIST_ARCHIVE_CONVERSATIONS' as const;
@@ -125,6 +127,12 @@ export interface DurableArchiveEvidence {
   lastPersistedAt?: number;
 }
 
+export interface RuntimeRecoveryDiagnostics {
+  successfulInlineRendersCount: number;
+  fallbackRenderCount: number;
+  domMappingErrorsCount: number;
+}
+
 export interface FoundationStatusResponse {
   bridgeState: ObservationState;
   backgroundAlive: boolean;
@@ -137,6 +145,16 @@ export interface FoundationStatusResponse {
   runtimeEpochId: string;
   runtimeStartedAt: number;
   durableArchiveEvidence?: DurableArchiveEvidence;
+  runtimeRecovery?: RuntimeRecoveryDiagnostics;
+}
+
+export interface RecordRecoveryDiagnosticRequest {
+  type: typeof MESSAGE_RECORD_RECOVERY_DIAGNOSTIC;
+  kind: 'inline_success' | 'fallback_render' | 'dom_mapping_error';
+}
+
+export interface RecordRecoveryDiagnosticResponse {
+  received: boolean;
 }
 
 export interface ListSyntheticRevisionsRequest {
@@ -278,6 +296,18 @@ export interface ForwardHistoryObservationResponse {
   messagesUpdated?: number;
   revisionsCreated?: number;
   treeLinksResolved?: number;
+  error?: string;
+}
+
+export interface PersistUserTurnRequest {
+  type: typeof MESSAGE_PERSIST_USER_TURN;
+  userMessage: Message;
+}
+
+export interface PersistUserTurnResponse {
+  success: boolean;
+  messageId: string;
+  persistedAt?: number;
   error?: string;
 }
 

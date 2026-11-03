@@ -217,8 +217,10 @@ export class DeepSeekHistoryParser {
             textParts.push(m.content);
           }
         } else {
-          if (typeof m.content === 'string') {
+          if (typeof m.content === 'string' && m.content.length > 0) {
             textParts.push(m.content);
+          } else if (typeof m.text === 'string' && m.text.length > 0) {
+            textParts.push(m.text);
           }
         }
       }

@@ -4,6 +4,7 @@ import type { PageRecoverySummary, PageRecoveryMessageSummary } from '../adapter
 import {
   MESSAGE_GET_PAGE_RECOVERY_SUMMARY,
   MESSAGE_GET_PAGE_RECOVERY_CONTENT,
+  MESSAGE_RECORD_RECOVERY_DIAGNOSTIC,
   type GetPageRecoverySummaryRequest,
   type GetPageRecoverySummaryResponse,
   type GetPageRecoveryContentRequest,
@@ -588,12 +589,15 @@ export class StreamArchiveOverlayPortal {
                 } else {
                   const handle = mountInlineRecovery(target, msg, cached, {
                     showThinkingInline: this.presentationSettings.showThinkingInline,
+                    inlinePlacement: this.presentationSettings.inlinePlacement,
                   });
                   if (handle) {
                     this.inlineLedger.registerHandle(msg.messageId, handle);
+                    this.reportRecoveryDiagnostic('inline_success');
                   } else {
                     // Fallback to anchored badge if closed shadow DOM or mount failed
                     this.renderAnchoredBadge(msg, anchor.rect);
+                    this.reportRecoveryDiagnostic('fallback_render');
                   }
                 }
               } else {
@@ -606,6 +610,7 @@ export class StreamArchiveOverlayPortal {
               // Fallback to anchored badge
               isAnchored = true;
               this.renderAnchoredBadge(msg, anchor.rect);
+              this.reportRecoveryDiagnostic('fallback_render');
             }
           } else if (anchor) {
             // Anchor exists in DOM but outside current viewport range
@@ -622,9 +627,11 @@ export class StreamArchiveOverlayPortal {
                 ) {
                   const handle = mountInlineRecovery(target, msg, cached, {
                     showThinkingInline: this.presentationSettings.showThinkingInline,
+                    inlinePlacement: this.presentationSettings.inlinePlacement,
                   });
                   if (handle) {
                     this.inlineLedger.registerHandle(msg.messageId, handle);
+                    this.reportRecoveryDiagnostic('inline_success');
                   }
                 }
               } else {
@@ -642,6 +649,7 @@ export class StreamArchiveOverlayPortal {
             }
           }
           unanchoredMessages.push(msg);
+          this.reportRecoveryDiagnostic('dom_mapping_error');
         }
       }
     } else {
@@ -721,6 +729,21 @@ export class StreamArchiveOverlayPortal {
       if (!activeDeliveryIds.has(handle.messageId)) {
         this.userTurnLedger.unmount(handle.messageId);
       }
+    }
+  }
+
+  private reportRecoveryDiagnostic(kind: 'inline_success' | 'fallback_render' | 'dom_mapping_error'): void {
+    try {
+      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+        chrome.runtime
+          .sendMessage({
+            type: MESSAGE_RECORD_RECOVERY_DIAGNOSTIC,
+            kind,
+          })
+          .catch(() => {});
+      }
+    } catch {
+      // ignore
     }
   }
 

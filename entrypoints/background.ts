@@ -15,6 +15,7 @@ import {
   MESSAGE_FINALIZE_RAW_STREAM,
   MESSAGE_GET_RAW_JOURNAL_STATUS,
   MESSAGE_FORWARD_HISTORY_OBSERVATION,
+  MESSAGE_PERSIST_USER_TURN,
   MESSAGE_GET_ARCHIVE_SUMMARY,
   MESSAGE_PERSIST_CANONICAL_CHECKPOINT,
   MESSAGE_LIST_ARCHIVE_CONVERSATIONS,
@@ -49,6 +50,7 @@ import {
   MESSAGE_GET_CONTINUITY_RECEIPTS,
   MESSAGE_ARM_CONTINUITY_DELIVERY,
   MESSAGE_REVOKE_CONTINUITY_DELIVERY,
+  MESSAGE_RECORD_RECOVERY_DIAGNOSTIC,
 
   type SaveSyntheticBatchRequest,
   type SaveSyntheticBatchResponse,
@@ -73,6 +75,8 @@ import {
   type ForwardHistoryObservationResponse,
   type GetArchiveSummaryRequest,
   type GetArchiveSummaryResponse,
+  type PersistUserTurnRequest,
+  type PersistUserTurnResponse,
   type PersistCanonicalCheckpointRequest,
   type PersistCanonicalCheckpointResponse,
   type ListArchiveConversationsResponse,
@@ -84,6 +88,7 @@ import {
   validatePersistRawStreamOpenRequest,
   validatePersistRawBatchRequest,
   validateFinalizeRawStreamRequest,
+  validatePersistUserTurnRequest,
   validatePersistCanonicalCheckpointRequest,
   validateListArchiveConversationsRequest,
   validateGetArchiveConversationRequest,
@@ -108,6 +113,7 @@ import {
   validateBuildContextContinuityPlanRequest,
   validateGetContextContinuityStatusRequest,
   validateRecordContinuityReceiptRequest,
+  validateRecordRecoveryDiagnosticRequest,
   validateGetContinuityReceiptsRequest,
   validateArmContinuityDeliveryRequest,
   validateRevokeContinuityDeliveryRequest,
@@ -168,6 +174,12 @@ export default defineBackground(() => {
   let runtimeRevisionsCommittedCount = 0;
   let runtimeHistoryObservationsCount = 0;
   let runtimeHistoryReconciliationsCount = 0;
+
+  const runtimeRecoveryDiagnostics: import('../src/bridge/messages').RuntimeRecoveryDiagnostics = {
+    successfulInlineRendersCount: 0,
+    fallbackRenderCount: 0,
+    domMappingErrorsCount: 0,
+  };
 
   let bridgeState: ObservationState = 'not_observed';
   const activeTransportStreams = new Set<string>(); // composite keys: `${producerSessionId}:${streamId}`
@@ -373,6 +385,24 @@ export default defineBackground(() => {
 
       const res: ForwardTransportEventResponse = { received: true };
       sendResponse(res);
+      return false;
+    }
+
+    // 2b. Recovery Diagnostic Recorded from Content Script
+    if (message.type === MESSAGE_RECORD_RECOVERY_DIAGNOSTIC) {
+      const req = validateRecordRecoveryDiagnosticRequest(message);
+      if (req) {
+        if (req.kind === 'inline_success') {
+          runtimeRecoveryDiagnostics.successfulInlineRendersCount++;
+        } else if (req.kind === 'fallback_render') {
+          runtimeRecoveryDiagnostics.fallbackRenderCount++;
+        } else if (req.kind === 'dom_mapping_error') {
+          runtimeRecoveryDiagnostics.domMappingErrorsCount++;
+        }
+        sendResponse({ received: true });
+      } else {
+        sendResponse({ received: false });
+      }
       return false;
     }
 
@@ -623,6 +653,7 @@ export default defineBackground(() => {
             runtimeEpochId,
             runtimeStartedAt,
             durableArchiveEvidence,
+            runtimeRecovery: { ...runtimeRecoveryDiagnostics },
           };
           sendResponse(status);
         })
@@ -659,6 +690,7 @@ export default defineBackground(() => {
             ],
             runtimeEpochId,
             runtimeStartedAt,
+            runtimeRecovery: { ...runtimeRecoveryDiagnostics },
           });
         });
 
@@ -1148,6 +1180,58 @@ export default defineBackground(() => {
             stagingId: validated.stagingId,
             error: err instanceof Error ? err.message : String(err),
           });
+        });
+      return true;
+    }
+
+    // 12b. Handle Immediate User Turn Persistence (Section 6)
+    if (message.type === MESSAGE_PERSIST_USER_TURN) {
+      const validated = validatePersistUserTurnRequest(message);
+      if (!validated) {
+        sendResponse({
+          success: false,
+          messageId: '',
+          error: 'Invalid user turn payload',
+        } as PersistUserTurnResponse);
+        return false;
+      }
+
+      const userMsg = validated.userMessage;
+      Promise.all([
+        storageRepo.getConversation(userMsg.conversationId),
+        storageRepo.getConversationByRemoteId(userMsg.conversationId),
+      ])
+        .then(async ([existingById, existingByRemote]) => {
+          let existingConv = existingById || existingByRemote;
+          if (!existingConv) {
+            await storageRepo.saveConversation({
+              id: userMsg.conversationId,
+              remoteId: userMsg.conversationId,
+              title: userMsg.content?.slice(0, 40).trim() || 'DeepSeek Chat',
+              createdAt: userMsg.createdAt,
+              updatedAt: userMsg.updatedAt,
+            });
+          } else {
+            userMsg.conversationId = existingConv.id;
+            await storageRepo.saveConversation({
+              ...existingConv,
+              remoteId: existingConv.remoteId || userMsg.conversationId,
+              updatedAt: userMsg.updatedAt,
+            });
+          }
+          await storageRepo.saveMessages([userMsg]);
+          sendResponse({
+            success: true,
+            messageId: userMsg.id,
+            persistedAt: Date.now(),
+          } as PersistUserTurnResponse);
+        })
+        .catch((err) => {
+          sendResponse({
+            success: false,
+            messageId: userMsg.id,
+            error: err instanceof Error ? err.message : String(err),
+          } as PersistUserTurnResponse);
         });
       return true;
     }

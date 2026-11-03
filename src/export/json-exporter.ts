@@ -1,5 +1,6 @@
 import type { ConversationExportModel, ConversationExportOptions, ConversationExportV1 } from './types';
 import { isLogicalMessage, isUnmatchedCapture, selectPreferredRevision } from '../core/models';
+import { buildConversationTree } from '../core/conversation-tree';
 
 /**
  * Build the canonical ConversationExportV1 DTO object from a conversation model.
@@ -19,31 +20,16 @@ export function buildConversationExportDto(
     )
   );
 
-  // 2. Group siblings by parentId to compute branch counts
-  const groups = new Map<string, typeof logicalTurns>();
-  for (const item of logicalTurns) {
-    const parentKey = item.message.parentId || '__root__';
-    if (!groups.has(parentKey)) {
-      groups.set(parentKey, []);
-    }
-    groups.get(parentKey)!.push(item);
-  }
+  // 2. Build DAG conversation tree for active branch isolation
+  const tree = buildConversationTree(
+    logicalTurns.map((item) => item.message),
+    { branchSelections: options.branchSelections }
+  );
 
   // 3. Filter items according to branch option
   let exportItems: typeof logicalTurns = [];
   if (options.branches === 'active') {
-    for (const item of logicalTurns) {
-      const parentKey = item.message.parentId || '__root__';
-      const siblings = groups.get(parentKey)!;
-      if (siblings.length > 1) {
-        const activeIdx = options.branchSelections?.[parentKey] ?? 0;
-        if (siblings[activeIdx]?.message.id === item.message.id) {
-          exportItems.push(item);
-        }
-      } else {
-        exportItems.push(item);
-      }
-    }
+    exportItems = logicalTurns.filter((item) => tree.activeMessageIds.has(item.message.id));
   } else {
     exportItems = logicalTurns;
   }
@@ -51,10 +37,20 @@ export function buildConversationExportDto(
   // 4. Map logical turns into export DTO format
   const exportMessages = exportItems.map((item) => {
     const { message, revisions, recoveryEvents } = item;
-    const parentKey = message.parentId || '__root__';
-    const siblings = groups.get(parentKey) || [];
-    const hasBranches = siblings.length > 1;
-    const branchIndex = siblings.findIndex((s) => s.message.id === message.id) + 1;
+    const node = tree.getNode(message.id);
+    const hasBranches = Boolean(
+      node && (node.userBranchCount > 1 || node.assistantVariantCount > 1)
+    );
+    const branchIndex = node
+      ? node.userBranchCount > 1
+        ? node.userBranchIndex + 1
+        : node.assistantVariantIndex + 1
+      : 1;
+    const branchCount = node
+      ? node.userBranchCount > 1
+        ? node.userBranchCount
+        : node.assistantVariantCount
+      : 1;
 
     const preferred = selectPreferredRevision(message, revisions);
     const contentText = preferred?.text ?? message.content ?? '';
@@ -107,7 +103,7 @@ export function buildConversationExportDto(
       identityState: message.identityState,
       projectionState: message.projectionState || 'logical',
       branchIndex: hasBranches ? branchIndex : undefined,
-      branchCount: hasBranches ? siblings.length : undefined,
+      branchCount: hasBranches ? branchCount : undefined,
       createdAt: message.createdAt,
       updatedAt: message.updatedAt,
       content: contentText,

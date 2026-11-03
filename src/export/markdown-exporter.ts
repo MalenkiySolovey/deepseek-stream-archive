@@ -12,6 +12,8 @@ function formatIso(ts: number): string {
   }
 }
 
+import { buildConversationTree } from '../core/conversation-tree';
+
 /**
  * Build a deterministic human-readable Markdown export from a conversation model.
  */
@@ -43,31 +45,16 @@ export function buildConversationMarkdown(
     )
   );
 
-  // 2. Group siblings by parentId to compute branch counts
-  const groups = new Map<string, typeof logicalTurns>();
-  for (const item of logicalTurns) {
-    const parentKey = item.message.parentId || '__root__';
-    if (!groups.has(parentKey)) {
-      groups.set(parentKey, []);
-    }
-    groups.get(parentKey)!.push(item);
-  }
+  // 2. Build DAG conversation tree for active branch isolation
+  const tree = buildConversationTree(
+    logicalTurns.map((item) => item.message),
+    { branchSelections: options.branchSelections }
+  );
 
   // 3. Select items to export based on branch options
   let exportItems: typeof logicalTurns = [];
   if (options.branches === 'active') {
-    for (const item of logicalTurns) {
-      const parentKey = item.message.parentId || '__root__';
-      const siblings = groups.get(parentKey)!;
-      if (siblings.length > 1) {
-        const activeIdx = options.branchSelections?.[parentKey] ?? 0;
-        if (siblings[activeIdx]?.message.id === item.message.id) {
-          exportItems.push(item);
-        }
-      } else {
-        exportItems.push(item);
-      }
-    }
+    exportItems = logicalTurns.filter((item) => tree.activeMessageIds.has(item.message.id));
   } else {
     // All branches included
     exportItems = logicalTurns;
@@ -76,10 +63,20 @@ export function buildConversationMarkdown(
   // 4. Render each message
   for (const item of exportItems) {
     const { message, revisions, recoveryEvents } = item;
-    const parentKey = message.parentId || '__root__';
-    const siblings = groups.get(parentKey) || [];
-    const hasBranches = siblings.length > 1;
-    const branchIndex = siblings.findIndex((s) => s.message.id === message.id) + 1;
+    const node = tree.getNode(message.id);
+    const hasBranches = Boolean(
+      node && (node.userBranchCount > 1 || node.assistantVariantCount > 1)
+    );
+    const branchIndex = node
+      ? node.userBranchCount > 1
+        ? node.userBranchIndex + 1
+        : node.assistantVariantIndex + 1
+      : 1;
+    const branchCount = node
+      ? node.userBranchCount > 1
+        ? node.userBranchCount
+        : node.assistantVariantCount
+      : 1;
 
     // Heading based on role and branch
     if (message.role === 'user') {
@@ -99,7 +96,7 @@ export function buildConversationMarkdown(
     }
 
     // Assistant message
-    const branchLabel = hasBranches ? ` — Branch ${branchIndex} of ${siblings.length}` : '';
+    const branchLabel = hasBranches ? ` — Branch ${branchIndex} of ${branchCount}` : '';
     lines.push(`## Assistant${branchLabel}`);
     lines.push('');
 

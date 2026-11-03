@@ -11,6 +11,16 @@ export interface ArchiveSummary {
   recoveryEventsCount: number;
   unmatchedCapturesCount?: number;
   attemptOnlyCount?: number;
+
+  // Structural Conversation Architecture diagnostics (Milestone Global Fix)
+  userMessagesCount?: number;
+  assistantMessagesCount?: number;
+  userPromptVariantsCount?: number;
+  assistantVariantsCount?: number;
+  unconfirmedParentMessagesCount?: number;
+  idConflictsCount?: number;
+  recoveriesWithTextCount?: number;
+  recoveriesWithThinkingOnlyCount?: number;
 }
 
 export interface CanonicalCheckpointData {

@@ -295,4 +295,36 @@ export const INLINE_RECOVERY_STYLES = `
   border-top: 1px solid rgba(168, 85, 247, 0.15);
   padding-top: 0.5rem;
 }
+
+.streamarchive-inline-notice {
+  padding: 0.5rem 0.75rem;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 6px;
+  color: #fbbf24;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.streamarchive-inline-subtitle {
+  font-size: 0.75rem;
+  color: #94a3b8;
+  margin-top: 0.2rem;
+}
+
+.streamarchive-inline-toggle-orig-btn {
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  color: #94a3b8;
+  padding: 0.3rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.streamarchive-inline-toggle-orig-btn:hover {
+  background: rgba(148, 163, 184, 0.15);
+  color: #f1f5f9;
+}
 `;

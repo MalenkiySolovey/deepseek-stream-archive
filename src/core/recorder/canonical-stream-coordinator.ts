@@ -74,6 +74,7 @@ export interface CanonicalStreamCoordinatorConfig {
   streamId: string;
   provisionalSessionId?: string;
   conversationTitle?: string;
+  clientTurnId?: string;
   requestPrompt?: string;
   requestParentMessageId?: string | null;
   onCheckpoint: (checkpoint: CanonicalCheckpointDto) => Promise<CanonicalCheckpointAck>;
@@ -159,9 +160,13 @@ export class CanonicalStreamCoordinator {
     this.maxRetries = config.maxRetries ?? config.maxRetryAttempts ?? 10;
     this.checkpointAttemptTimeoutMs = config.checkpointAttemptTimeoutMs ?? 15000;
 
-    if (config.requestPrompt && config.requestPrompt.trim().length > 0) {
-      const sanitizedKey = this.rawStreamKey.replace(/[^a-zA-Z0-9_-]/g, '_');
-      const userMessageId = `msg_user_${sanitizedKey}`;
+    const userMessageId =
+      config.clientTurnId ||
+      (config.requestPrompt && config.requestPrompt.trim().length > 0
+        ? `msg_user_${this.rawStreamKey.replace(/[^a-zA-Z0-9_-]/g, '_')}`
+        : undefined);
+
+    if (userMessageId && config.requestPrompt && config.requestPrompt.trim().length > 0) {
       this.userMessage = {
         id: userMessageId,
         conversationId: this.provisionalSessionId,
@@ -181,7 +186,7 @@ export class CanonicalStreamCoordinator {
     this.recorder = new CanonicalRevisionRecorder({
       conversationId: this.provisionalSessionId,
       messageId: deterministicMessageId,
-      parentId: this.userMessage?.id,
+      parentId: this.userMessage?.id || config.clientTurnId,
       remoteParentId: config.requestParentMessageId || undefined,
       sourceRawStreamKey: this.rawStreamKey,
       flushIntervalMs: this.debounceMs,

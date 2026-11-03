@@ -32,6 +32,10 @@
     isUnmatchedCapture,
     type ResponseRevision,
   } from '../../../src/core/models';
+  import {
+    buildConversationTree,
+    type ConversationTreeResult,
+  } from '../../../src/core/conversation-tree';
   import SafeMarkdown from './SafeMarkdown.svelte';
   import ContextContinuityPreviewModal from './ContextContinuityPreviewModal.svelte';
   import { getContextContinuitySettings } from '../../../src/context-continuity/settings';
@@ -414,88 +418,51 @@
     return detail.messages.filter((m) => isUnmatchedCapture(m));
   });
 
-  function getEffectiveParentKey(msg: ArchiveMessageSummary, allMsgs: ArchiveMessageSummary[]): string {
-    if (msg.parentId) {
-      return msg.parentId;
-    }
-    if (msg.role === 'user') {
-      return '__root__';
-    }
-    const idx = allMsgs.findIndex((m) => m.id === msg.id);
-    if (idx > 0) {
-      for (let i = idx - 1; i >= 0; i--) {
-        if (allMsgs[i]!.role === 'user') {
-          return allMsgs[i]!.id;
-        }
-      }
-    }
-    return '__root__';
-  }
+  let conversationTree = $derived<ConversationTreeResult<ArchiveMessageSummary>>(() => {
+    const msgs = logicalMessages();
+    return buildConversationTree(msgs, {
+      conversation: detail?.conversation,
+      branchSelections,
+      preferLatestByDefault: false,
+    });
+  });
 
   let visibleMessages = $derived<ArchiveMessageSummary[]>(() => {
-    const msgs = logicalMessages();
-    if (msgs.length === 0) return [];
+    return conversationTree().activePath;
+  });
 
-    // Group children by effective parentKey
-    const groups = new Map<string, ArchiveMessageSummary[]>();
-    for (const msg of msgs) {
-      const parentKey = getEffectiveParentKey(msg, msgs);
-      if (!groups.has(parentKey)) {
-        groups.set(parentKey, []);
-      }
-      groups.get(parentKey)!.push(msg);
-    }
-
-    // Sort siblings by createdAt ascending, then id
-    for (const list of groups.values()) {
-      list.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
-    }
-
-    const roots = groups.get('__root__') || [];
-    if (roots.length === 0) {
-      return [...msgs].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
-    }
-
-    // Traverse downward from active root to leaf
-    const result: ArchiveMessageSummary[] = [];
-    const visited = new Set<string>();
-
-    const rootIdx = branchSelections['__root__'] ?? 0;
-    let current: ArchiveMessageSummary | undefined =
-      roots[Math.max(0, Math.min(rootIdx, roots.length - 1))];
-
-    while (current && !visited.has(current.id)) {
-      visited.add(current.id);
-      result.push(current);
-
-      const children = groups.get(current.id);
-      if (!children || children.length === 0) {
-        break;
-      }
-
-      const selIdx = branchSelections[current.id] ?? 0;
-      const clampedIdx = Math.max(0, Math.min(selIdx, children.length - 1));
-      current = children[clampedIdx];
-    }
-
-    return result;
+  let unlinkedMessages = $derived<ArchiveMessageSummary[]>(() => {
+    return conversationTree().unlinkedMessages;
   });
 
   function getSiblingInfo(msg: ArchiveMessageSummary) {
-    if (!detail) return { count: 1, current: 1, key: '' };
-    const msgs = logicalMessages();
-    const parentKey = getEffectiveParentKey(msg, msgs);
-    const siblings = msgs
-      .filter((m) => getEffectiveParentKey(m, msgs) === parentKey)
-      .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
-
-    const activeIdx = branchSelections[parentKey] ?? 0;
-    const clampedIdx = Math.max(0, Math.min(activeIdx, siblings.length - 1));
-    return {
-      count: siblings.length,
-      current: clampedIdx + 1,
-      key: parentKey,
-    };
+    const tree = conversationTree();
+    const node = tree.getNode(msg.id);
+    if (!node) {
+      return { count: 1, current: 1, key: '', isUserBranch: false, isAssistantVariant: false };
+    }
+    const isUser = msg.role === 'user';
+    if (isUser && node.userBranchCount > 1) {
+      const key = node.parent ? node.parent.message.id : '__root__';
+      return {
+        count: node.userBranchCount,
+        current: node.userBranchIndex + 1,
+        key,
+        isUserBranch: true,
+        isAssistantVariant: false,
+      };
+    }
+    if (!isUser && node.assistantVariantCount > 1) {
+      const key = node.parent ? node.parent.message.id : '';
+      return {
+        count: node.assistantVariantCount,
+        current: node.assistantVariantIndex + 1,
+        key,
+        isUserBranch: false,
+        isAssistantVariant: true,
+      };
+    }
+    return { count: 1, current: 1, key: '', isUserBranch: false, isAssistantVariant: false };
   }
 
   function switchBranch(key: string, delta: number, total: number) {
@@ -678,11 +645,13 @@
             <div class="header-actions">
               {#if branchInfo.count > 1}
                 <div class="branch-controls">
-                  <span class="branch-label">{t.branchXofY} {branchInfo.current} {t.of} {branchInfo.count}</span>
+                  <span class="branch-label">
+                    {branchInfo.isAssistantVariant ? t.responseXofY : t.branchXofY} {branchInfo.current} {t.of} {branchInfo.count}
+                  </span>
                   <button
                     class="branch-nav-btn"
                     type="button"
-                    title={t.prevBranch}
+                    title={branchInfo.isAssistantVariant ? t.prevResponse : t.prevBranch}
                     onclick={() => switchBranch(branchInfo.key, -1, branchInfo.count)}
                   >
                     ‹
@@ -690,7 +659,7 @@
                   <button
                     class="branch-nav-btn"
                     type="button"
-                    title={t.nextBranch}
+                    title={branchInfo.isAssistantVariant ? t.nextResponse : t.nextBranch}
                     onclick={() => switchBranch(branchInfo.key, 1, branchInfo.count)}
                   >
                     ›
@@ -812,6 +781,44 @@
           {/if}
         </div>
       {/each}
+      {#if unlinkedMessages().length > 0}
+        <div class="unlinked-turns-section">
+          <div class="unlinked-turns-header">
+            <span class="unlinked-icon">⚠️</span>
+            <div class="unlinked-header-text">
+              <span class="unlinked-title">{t.unlinkedTurnsTitle} ({unlinkedMessages().length})</span>
+              <span class="unlinked-desc">{t.unlinkedTurnsDesc}</span>
+            </div>
+          </div>
+          <div class="unlinked-turns-list">
+            {#each unlinkedMessages() as um (um.id)}
+              {@const umData = getActiveContent(um)}
+              <div class="unlinked-turn-card">
+                <div class="unmatched-card-meta">
+                  <span class="role-badge" class:asst={um.role === 'assistant'} class:usr={um.role === 'user'}>
+                    {um.role === 'assistant' ? t.roleAssistant : t.roleUser}
+                  </span>
+                  <span class="unmatched-pill">{um.status}</span>
+                  <span class="unmatched-key">ID: {um.id}</span>
+                  {#if um.remoteParentId}
+                    <span class="unmatched-key">Parent: {um.remoteParentId}</span>
+                  {/if}
+                  <button
+                    class="copy-btn mini"
+                    type="button"
+                    onclick={() => copyToClipboard(umData.text || um.content || '', um.id)}
+                  >
+                    {copiedId === um.id ? t.copiedText : t.copyText}
+                  </button>
+                </div>
+                <div class="unmatched-content">
+                  <SafeMarkdown content={umData.text || um.content || ''} />
+                </div>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
       {#if unmatchedCaptures().length > 0}
         <div class="unmatched-captures-section">
           <div class="unmatched-captures-header">
@@ -1926,5 +1933,48 @@
 
   .thinking-details.mini {
     margin-bottom: 0.5rem;
+  }
+
+  .unlinked-turns-section {
+    margin-top: 1rem;
+    padding: 0.875rem 1rem;
+    background: #171717;
+    border: 1px dashed #b45309;
+    border-radius: 0.5rem;
+  }
+
+  .unlinked-turns-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .unlinked-icon {
+    font-size: 1.125rem;
+  }
+
+  .unlinked-title {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: #fde68a;
+  }
+
+  .unlinked-desc {
+    font-size: 0.6875rem;
+    color: #94a3b8;
+  }
+
+  .unlinked-turns-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .unlinked-turn-card {
+    background: #1e1e1e;
+    border: 1px solid #3f3f46;
+    border-radius: 0.375rem;
+    padding: 0.75rem;
   }
 </style>

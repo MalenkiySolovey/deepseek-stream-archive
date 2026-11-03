@@ -1516,31 +1516,73 @@ export class IndexedDbStorageRepository implements StorageRepository {
 
       let reconciledCount = 0;
       let lastGoodCount = 0;
+      let userMessagesCount = 0;
+      let assistantMessagesCount = 0;
+      let idConflictsCount = 0;
+      let recoveriesWithTextCount = 0;
+      let recoveriesWithThinkingOnlyCount = 0;
 
-      // Count identityState without loading message bodies
-      if (msgStore.indexNames.contains('identityState')) {
-        const idIndex = msgStore.index('identityState');
-        const recReq = idIndex.count('reconciled');
-        recReq.onsuccess = () => {
-          reconciledCount = recReq.result || 0;
-        };
-      } else {
-        const msgCursor = msgStore.openCursor();
-        msgCursor.onsuccess = (e) => {
-          const cursor = (e.target as IDBRequest).result as IDBCursorWithValue;
-          if (cursor) {
-            if (cursor.value.identityState === 'reconciled') reconciledCount++;
-            cursor.continue();
+      const seenRemoteIds = new Set<string>();
+      const knownIds = new Set<string>();
+      const parentPointers: Array<{ parentId?: string; remoteParentId?: string; role: string }> = [];
+      const userBranchesByParent = new Map<string, number>();
+      const assistantBranchesByParent = new Map<string, number>();
+
+      const msgCursor = msgStore.openCursor();
+      msgCursor.onsuccess = (e) => {
+        const cursor = (e.target as IDBRequest).result as IDBCursorWithValue;
+        if (cursor) {
+          const val = cursor.value;
+          if (val.identityState === 'reconciled') {
+            reconciledCount++;
           }
-        };
-      }
+          if (val.role === 'user') {
+            userMessagesCount++;
+            const k = `${val.conversationId || ''}:${val.parentId || val.remoteParentId || '__root__'}`;
+            userBranchesByParent.set(k, (userBranchesByParent.get(k) || 0) + 1);
+          } else {
+            assistantMessagesCount++;
+            const k = `${val.conversationId || ''}:${val.parentId || val.remoteParentId || '__orphan__'}`;
+            assistantBranchesByParent.set(k, (assistantBranchesByParent.get(k) || 0) + 1);
+          }
 
-      // Count isLastGood revisions without loading giant text arrays into memory
+          if (val.id) knownIds.add(val.id);
+          if (val.remoteId) {
+            knownIds.add(val.remoteId);
+            const scopedKey = `${val.conversationId || 'default'}::${val.remoteId}`;
+            if (seenRemoteIds.has(scopedKey)) {
+              idConflictsCount++;
+            } else {
+              seenRemoteIds.add(scopedKey);
+            }
+          }
+
+          parentPointers.push({
+            parentId: val.parentId,
+            remoteParentId: val.remoteParentId,
+            role: val.role || 'assistant',
+          });
+
+          cursor.continue();
+        }
+      };
+
+      // Count isLastGood revisions and recovery content types without loading giant text arrays into memory
       const revCursor = revStore.openCursor();
       revCursor.onsuccess = (e) => {
         const cursor = (e.target as IDBRequest).result as IDBCursorWithValue;
         if (cursor) {
-          if (cursor.value.isLastGood) lastGoodCount++;
+          const rev = cursor.value;
+          if (rev.isLastGood) {
+            lastGoodCount++;
+            const hasText = !!(rev.text && rev.text.trim().length > 0);
+            const hasThinking = !!(rev.thinking && rev.thinking.trim().length > 0);
+            if (hasText) {
+              recoveriesWithTextCount++;
+            } else if (hasThinking) {
+              recoveriesWithThinkingOnlyCount++;
+            }
+          }
           cursor.continue();
         }
       };
@@ -1564,6 +1606,30 @@ export class IndexedDbStorageRepository implements StorageRepository {
         const totalMessages = msgCountReq.result || 0;
         const provisionalCount = Math.max(0, totalMessages - reconciledCount);
 
+        let userPromptVariantsCount = 0;
+        for (const count of userBranchesByParent.values()) {
+          if (count > 1) userPromptVariantsCount += (count - 1);
+        }
+
+        let assistantVariantsCount = 0;
+        for (const count of assistantBranchesByParent.values()) {
+          if (count > 1) assistantVariantsCount += (count - 1);
+        }
+
+        let unconfirmedParentMessagesCount = 0;
+        for (const ptr of parentPointers) {
+          if (ptr.parentId || ptr.remoteParentId) {
+            const parentFound =
+              (ptr.parentId && knownIds.has(ptr.parentId)) ||
+              (ptr.remoteParentId && knownIds.has(ptr.remoteParentId));
+            if (!parentFound) {
+              unconfirmedParentMessagesCount++;
+            }
+          } else if (ptr.role === 'assistant') {
+            unconfirmedParentMessagesCount++;
+          }
+        }
+
         resolve({
           conversationsCount: convCountReq.result || 0,
           messagesCount: totalMessages,
@@ -1574,6 +1640,14 @@ export class IndexedDbStorageRepository implements StorageRepository {
           recoveryEventsCount: recCountReq.result || 0,
           unmatchedCapturesCount,
           attemptOnlyCount,
+          userMessagesCount,
+          assistantMessagesCount,
+          userPromptVariantsCount,
+          assistantVariantsCount,
+          unconfirmedParentMessagesCount,
+          idConflictsCount,
+          recoveriesWithTextCount,
+          recoveriesWithThinkingOnlyCount,
         });
       };
 

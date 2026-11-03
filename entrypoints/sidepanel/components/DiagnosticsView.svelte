@@ -209,6 +209,70 @@
       </div>
     </div>
 
+    <!-- Conversation Structure & Branches -->
+    <div class="section-card">
+      <h3 class="card-title">{t.diagStructureTitle}</h3>
+      <div class="metrics-grid">
+        <div class="metric-box">
+          <span class="m-val">{archiveSummary.userMessagesCount ?? 0}</span>
+          <span class="m-lbl">{t.diagUserPrompts}</span>
+        </div>
+        <div class="metric-box">
+          <span class="m-val">{archiveSummary.assistantMessagesCount ?? 0}</span>
+          <span class="m-lbl">{t.diagAssistantResponses}</span>
+        </div>
+        <div class="metric-box">
+          <span class="m-val">{archiveSummary.userPromptVariantsCount ?? 0}</span>
+          <span class="m-lbl">{t.diagUserEdits}</span>
+        </div>
+        <div class="metric-box">
+          <span class="m-val">{archiveSummary.assistantVariantsCount ?? 0}</span>
+          <span class="m-lbl">{t.diagAssistantRegens}</span>
+        </div>
+        <div class="metric-box">
+          <span class="m-val" class:highlight-warn={(archiveSummary.unconfirmedParentMessagesCount ?? 0) > 0}>
+            {archiveSummary.unconfirmedParentMessagesCount ?? 0}
+          </span>
+          <span class="m-lbl">{t.diagUnconfirmedLinks}</span>
+        </div>
+        <div class="metric-box">
+          <span class="m-val" class:highlight-warn={(archiveSummary.idConflictsCount ?? 0) > 0}>
+            {archiveSummary.idConflictsCount ?? 0}
+          </span>
+          <span class="m-lbl">{t.diagIdConflicts}</span>
+        </div>
+        <div class="metric-box">
+          <span class="m-val highlight-success">{archiveSummary.recoveriesWithTextCount ?? 0}</span>
+          <span class="m-lbl">{t.diagRecoveriesText}</span>
+        </div>
+        <div class="metric-box">
+          <span class="m-val">{archiveSummary.recoveriesWithThinkingOnlyCount ?? 0}</span>
+          <span class="m-lbl">{t.diagRecoveriesThinking}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Runtime Recovery & Inline Display (Current Session) -->
+    <div class="section-card">
+      <h3 class="card-title">{t.diagRuntimeRecoveryTitle}</h3>
+      <div class="metrics-grid">
+        <div class="metric-box">
+          <span class="m-val highlight-success">{status.runtimeRecovery?.successfulInlineRendersCount ?? 0}</span>
+          <span class="m-lbl">{t.diagInlineSuccess}</span>
+        </div>
+        <div class="metric-box">
+          <span class="m-val">{status.runtimeRecovery?.fallbackRenderCount ?? 0}</span>
+          <span class="m-lbl">{t.diagFallbackRender}</span>
+        </div>
+        <div class="metric-box">
+          <span class="m-val" class:highlight-warn={(status.runtimeRecovery?.domMappingErrorsCount ?? 0) > 0}>
+            {status.runtimeRecovery?.domMappingErrorsCount ?? 0}
+          </span>
+          <span class="m-lbl">{t.diagDomMappingErrors}</span>
+        </div>
+      </div>
+    </div>
+
     <!-- Foundation & Transport -->
     <div class="section-card">
       <div class="card-header-row">

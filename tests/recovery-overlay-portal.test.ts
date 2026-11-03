@@ -696,6 +696,7 @@ describe('StreamArchive In-Page Recovery Overlay Portal (Shadow DOM)', () => {
         presentationSettings: {
           displayMode: 'inline',
           showThinkingInline: true,
+          inlinePlacement: 'replace',
         },
       });
 

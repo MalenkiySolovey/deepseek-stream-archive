@@ -151,6 +151,11 @@
     await saveRecoveryPresentationSettings(recoverySettings);
   }
 
+  async function handleInlinePlacementChange(placement: 'underneath' | 'replace') {
+    recoverySettings = { ...recoverySettings, inlinePlacement: placement };
+    await saveRecoveryPresentationSettings(recoverySettings);
+  }
+
   async function handleContinuityEnabledChange(enabled: boolean) {
     continuitySettings = { ...continuitySettings, enabled };
     await saveContextContinuitySettings(continuitySettings);
@@ -665,6 +670,37 @@
           </div>
 
           {#if recoverySettings.displayMode === 'inline'}
+            <div class="setting-radio-group" style="margin-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 0.75rem;">
+              <span class="setting-label">{t.inlinePlacementTitle}</span>
+              <label class="setting-radio-item">
+                <input
+                  type="radio"
+                  name="inlinePlacement"
+                  value="underneath"
+                  checked={recoverySettings.inlinePlacement !== 'replace'}
+                  onchange={() => handleInlinePlacementChange('underneath')}
+                />
+                <div class="radio-content">
+                  <strong>{t.inlinePlacementUnderneath}</strong>
+                  <span class="setting-hint">{t.inlinePlacementUnderneathDesc}</span>
+                </div>
+              </label>
+
+              <label class="setting-radio-item">
+                <input
+                  type="radio"
+                  name="inlinePlacement"
+                  value="replace"
+                  checked={recoverySettings.inlinePlacement === 'replace'}
+                  onchange={() => handleInlinePlacementChange('replace')}
+                />
+                <div class="radio-content">
+                  <strong>{t.inlinePlacementReplace}</strong>
+                  <span class="setting-hint">{t.inlinePlacementReplaceDesc}</span>
+                </div>
+              </label>
+            </div>
+
             <div class="setting-checkbox-item">
               <label class="checkbox-label">
                 <input

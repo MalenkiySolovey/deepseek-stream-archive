@@ -20,7 +20,10 @@ import {
 } from '../src/adapters/deepseek/history/capture-policy';
 import type { HistoryObservationPayload } from '../src/bridge/protocol';
 import { augmentDeepSeekRequest } from '../src/adapters/deepseek/request/augment';
-import { parseDeepSeekRequestBody } from '../src/adapters/deepseek/request/parser';
+import {
+  isDeepSeekUserGenerationEndpoint,
+  parseDeepSeekRequestBody,
+} from '../src/adapters/deepseek/request/parser';
 import type { ContextDeliveryEnvelope } from '../src/adapters/deepseek/request/types';
 import { logger } from '../src/shared/logger';
 
@@ -195,6 +198,7 @@ export default defineContentScript({
 
     // ── Context Continuity Delivery Envelope (MAIN world) ──
     let activeEnvelope: ContextDeliveryEnvelope | null = null;
+    const bodyToTurnIdMap = new Map<unknown, string>();
 
     window.addEventListener(STREAMARCHIVE_CONTINUITY_ARM_EVENT, (event: any) => {
       try {
@@ -221,58 +225,95 @@ export default defineContentScript({
       body: unknown,
       transport: 'fetch' | 'xhr'
     ): { body?: unknown } | undefined => {
-      if (!activeEnvelope) {
-        return undefined;
-      }
+      let finalBody: unknown = body;
+      let originalUserPrompt: string | undefined = undefined;
 
-      const augResult = augmentDeepSeekRequest({
-        url,
-        method,
-        body,
-        envelope: activeEnvelope,
-      });
+      if (activeEnvelope) {
+        const augResult = augmentDeepSeekRequest({
+          url,
+          method,
+          body,
+          envelope: activeEnvelope,
+        });
 
-      if (augResult.augmented) {
-        const env = activeEnvelope;
-        // In manual_next mode, single delivery disarms the envelope immediately
-        if (env.deliveryMode === 'manual_next') {
-          activeEnvelope = null;
-        }
+        if (augResult.augmented) {
+          const env = activeEnvelope;
+          if (env.deliveryMode === 'manual_next') {
+            activeEnvelope = null;
+          }
 
-        const dispatchedPayload: ContinuityDispatchedPayload = {
-          deliveryId: augResult.deliveryId,
-          conversationId: env.conversationId,
-          remoteConversationId: env.remoteConversationId,
-          parentMessageId: env.expectedParentMessageId,
-          sourceMessageIds: env.sourceMessageIds,
-          sourceRevisionIds: env.sourceRevisionIds,
-          deliveryMode: env.deliveryMode,
-          transport,
-          timestamp: Date.now(),
-        };
-        dispatchBridgeEnvelope('continuity.dispatched', dispatchedPayload);
-
-        logger.info(`[StreamArchive] Injected recovered context into DeepSeek prompt (delivery ${augResult.deliveryId})`);
-        return { body: augResult.augmentedBody };
-      } else {
-        if (augResult.reason !== 'not_candidate_endpoint') {
-          const skippedPayload: ContinuitySkippedPayload = {
-            deliveryId: activeEnvelope?.deliveryId,
-            reason: augResult.reason,
-            url,
+          const dispatchedPayload: ContinuityDispatchedPayload = {
+            deliveryId: augResult.deliveryId,
+            conversationId: env.conversationId,
+            remoteConversationId: env.remoteConversationId,
+            parentMessageId: env.expectedParentMessageId,
+            sourceMessageIds: env.sourceMessageIds,
+            sourceRevisionIds: env.sourceRevisionIds,
+            deliveryMode: env.deliveryMode,
+            transport,
             timestamp: Date.now(),
           };
-          dispatchBridgeEnvelope('continuity.skipped', skippedPayload);
-          logger.info(`[StreamArchive] Continuity skipped: ${augResult.reason}`);
+          dispatchBridgeEnvelope('continuity.dispatched', dispatchedPayload);
+
+          logger.info(`[StreamArchive] Injected recovered context into DeepSeek prompt (delivery ${augResult.deliveryId})`);
+          finalBody = augResult.augmentedBody;
+          originalUserPrompt = augResult.originalPrompt;
+        } else {
+          if (augResult.reason !== 'not_candidate_endpoint') {
+            const skippedPayload: ContinuitySkippedPayload = {
+              deliveryId: activeEnvelope?.deliveryId,
+              reason: augResult.reason,
+              url,
+              timestamp: Date.now(),
+            };
+            dispatchBridgeEnvelope('continuity.skipped', skippedPayload);
+            logger.info(`[StreamArchive] Continuity skipped: ${augResult.reason}`);
+          }
         }
-        return undefined;
       }
+
+      // Immediate User Prompt Persistence (Section 6)
+      if (isDeepSeekUserGenerationEndpoint(url, method)) {
+        const parsed = parseDeepSeekRequestBody(finalBody);
+        if (parsed && typeof parsed.prompt === 'string' && parsed.prompt.trim().length > 0) {
+          const clientTurnId =
+            typeof crypto !== 'undefined' && crypto.randomUUID
+              ? `turn_user_${crypto.randomUUID()}`
+              : `turn_user_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+          bodyToTurnIdMap.set(finalBody, clientTurnId);
+          if (body !== finalBody) {
+            bodyToTurnIdMap.set(body, clientTurnId);
+          }
+
+          const userPromptText = originalUserPrompt || parsed.prompt;
+          const parentTurnId =
+            parsed.parent_message_id !== undefined
+              ? (parsed.parent_message_id ? String(parsed.parent_message_id) : null)
+              : undefined;
+
+          dispatchBridgeEnvelope('user_turn.observed', {
+            clientTurnId,
+            sessionId: parsed.chat_session_id ? String(parsed.chat_session_id) : undefined,
+            prompt: userPromptText,
+            parentTurnId,
+            transport,
+            timestamp: Date.now(),
+          });
+
+          logger.info(`[StreamArchive] Observed user prompt outgoing turn: ${clientTurnId}`);
+        }
+      }
+
+      return finalBody !== body ? { body: finalBody } : undefined;
     };
 
     const extractDeepSeekRequestMetadata = (context: { method: string; url: string; body: unknown }): Partial<import('../src/transport/types').TransportMetadata> | undefined => {
       const parsed = parseDeepSeekRequestBody(context.body);
       if (!parsed) return undefined;
+      const clientTurnId = bodyToTurnIdMap.get(context.body);
       return {
+        clientTurnId,
         requestPrompt: typeof parsed.prompt === 'string' ? parsed.prompt : undefined,
         requestParentTurnId: parsed.parent_message_id !== undefined ? (parsed.parent_message_id ? String(parsed.parent_message_id) : null) : undefined,
         requestSessionId: parsed.chat_session_id ? String(parsed.chat_session_id) : undefined,

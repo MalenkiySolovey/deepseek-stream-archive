@@ -17,7 +17,8 @@ export type BridgeEventType =
   | 'history.complete'
   | 'history.abort'
   | 'continuity.dispatched'
-  | 'continuity.skipped';
+  | 'continuity.skipped'
+  | 'user_turn.observed';
 
 export interface StreamArchiveBridgeEnvelope<T = unknown> {
   source: typeof BRIDGE_SOURCE_TAG;
@@ -86,5 +87,14 @@ export interface ContinuitySkippedPayload {
   deliveryId?: string;
   reason: string;
   url: string;
+  timestamp: number;
+}
+
+export interface UserTurnObservedPayload {
+  clientTurnId: string;
+  sessionId?: string;
+  prompt: string;
+  parentTurnId?: string | null;
+  transport: 'fetch' | 'xhr';
   timestamp: number;
 }

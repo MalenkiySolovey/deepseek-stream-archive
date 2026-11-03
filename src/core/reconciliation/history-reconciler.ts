@@ -40,7 +40,9 @@ export class HistoryReconciler {
     const now = Date.now();
 
     // ── Phase 1: Conversation Reconciliation ──
-    const existingConv = await this.storage.getConversationByRemoteId(session.sessionId);
+    const existingConv =
+      (await this.storage.getConversationByRemoteId(session.sessionId)) ||
+      (await this.storage.getConversation(session.sessionId));
     let isNewConversation = false;
     let conversation: Conversation;
 
@@ -53,6 +55,7 @@ export class HistoryReconciler {
         title: session.title,
         createdAt: session.updatedAt || now,
         updatedAt: Math.max(session.updatedAt || now, now),
+        currentMessageId: session.currentMessageId || undefined,
       };
       isNewConversation = true;
     } else {
@@ -60,6 +63,7 @@ export class HistoryReconciler {
         ...existingConv,
         title: session.title || existingConv.title,
         updatedAt: Math.max(session.updatedAt || existingConv.updatedAt, existingConv.updatedAt),
+        currentMessageId: session.currentMessageId || existingConv.currentMessageId || undefined,
       };
     }
 
@@ -72,6 +76,11 @@ export class HistoryReconciler {
       }
     }
 
+    // Index unmatched provisional user messages for linking to authoritative server history
+    const unmatchedProvisionalUser = existingMessages.filter(
+      (m) => m.role === 'user' && !m.remoteId && m.identityState !== 'reconciled'
+    );
+
     let messagesCreated = 0;
     let messagesUpdated = 0;
     let revisionsCreated = 0;
@@ -80,7 +89,19 @@ export class HistoryReconciler {
     const revisionsToPut: ResponseRevision[] = [];
 
     for (const hm of messages) {
-      const existing = existingByRemoteId.get(hm.messageId);
+      let existing = existingByRemoteId.get(hm.messageId);
+
+      // Associate unmatched provisional user turn with authoritative history turn
+      if (!existing && hm.role === 'user') {
+        const matchIdx = unmatchedProvisionalUser.findIndex(
+          (cand) => cand.content === hm.text || !cand.content || !hm.text
+        );
+        if (matchIdx >= 0) {
+          existing = unmatchedProvisionalUser.splice(matchIdx, 1)[0]!;
+          existing.remoteId = hm.messageId;
+          existingByRemoteId.set(hm.messageId, existing);
+        }
+      }
 
       if (existing) {
         // Message already exists from live streaming or previous history
@@ -222,6 +243,30 @@ export class HistoryReconciler {
       if (em.identityState === 'reconciled') {
         continue;
       }
+
+      if (em.role === 'user') {
+        // Redundant client retry attempt of a user prompt that was already captured/reconciled
+        const isRedundantRetry = messages.some(
+          (hm) => hm.role === 'user' && (hm.text === em.content || !em.content)
+        );
+        if (isRedundantRetry) {
+          const updatedMsg: Message = {
+            ...em,
+            projectionState: 'attempt_only',
+            parentId: undefined,
+            updatedAt: now,
+          };
+          const existingIdx = messagesToPut.findIndex((p) => p.id === em.id);
+          if (existingIdx >= 0) {
+            messagesToPut[existingIdx] = updatedMsg;
+          } else {
+            messagesToPut.push(updatedMsg);
+            messagesUpdated++;
+          }
+        }
+        continue;
+      }
+
       if (em.role !== 'assistant') {
         continue;
       }
