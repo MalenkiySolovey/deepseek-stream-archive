@@ -67,6 +67,23 @@ In single-page applications (SPAs), users frequently switch between conversation
 - **Consequence:** An overlay query started on Chat A resolves after the user opens Chat B. Community extensions routinely display badges and recovered text from Chat A inside Chat B.
 - **StreamArchive Solution:** Every navigation event increments an in-memory `routeEpoch` integer and purges active overlays. When a background recovery query returns, the content script discards the payload unless `payload.routeEpoch === currentRouteEpoch` and `payload.sessionId === currentSessionId`.
 
+### 3.5 Outgoing Request Mutation vs Derived Continuity Planning
+In upstream LLM enhancement scripts, attempting to bridge context after a censorship or network failure often relies on mutating outgoing HTTP payloads or typing synthetic text into the textarea:
+```javascript
+// Upstream anti-pattern: silent outgoing prompt rewriting
+const origFetch = window.fetch;
+window.fetch = function(url, options) {
+  if (url.includes('/completion')) {
+    const body = JSON.parse(options.body);
+    body.prompt = hiddenInjectedContext + body.prompt; // CRITICAL: Violates user agency and risks prompt injection
+    options.body = JSON.stringify(body);
+  }
+  return origFetch.apply(this, arguments);
+};
+```
+- **Consequence:** Mutating outgoing requests behind the user's back alters server contracts, introduces unpredictable prompt injection vulnerabilities, breaks model instruction hierarchy, and violates user consent.
+- **StreamArchive Solution (Milestone 2D.5A, ADR 0027):** Outgoing network requests remain 100% untouched byte-for-byte. StreamArchive constructs a pure, derived, transparent continuity plan in memory, displaying payload metrics, exclusion reasons, and bounds in the Side Panel, allowing the user to review and manually copy context with complete sovereignty.
+
 ---
 
 ## 4. Synthesis & Contribution

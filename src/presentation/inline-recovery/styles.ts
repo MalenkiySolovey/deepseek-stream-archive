@@ -78,6 +78,19 @@ export const INLINE_RECOVERY_STYLES = `
   color: #f87171;
 }
 
+.streamarchive-inline-continuity-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: #c084fc;
+  background: rgba(168, 85, 247, 0.12);
+  border: 1px solid rgba(168, 85, 247, 0.3);
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+}
+
+
 /* DeepThink collapsible section */
 .streamarchive-inline-thinking {
   background: rgba(30, 41, 59, 0.6);

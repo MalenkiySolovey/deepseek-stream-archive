@@ -623,5 +623,36 @@ The automated regression corpus stands at **452 Vitest tests across 66 test file
      - Changing settings back to `overlay` unmounts inline hosts and restores placeholder visibility.
      - Route navigation between chat sessions cleanly unmounts inline hosts without cross-chat state leakage.
 
+---
+
+## 13. Context Continuity Planning & Transparent Preview Test Suites (Milestone 2D.5A)
+
+StreamArchive includes 6 dedicated test suites bringing the automated regression corpus to **544 unit tests across 81 files** and **20 Playwright E2E browser tests**:
+
+1. **Eligibility Evaluation & Mandatory Forensic Cause Regression (`tests/context-continuity-eligibility.test.ts`):**
+   - 17 unit tests verifying:
+     - **Mandatory Invariant:** Identical canonical topology with 5 different recovery causes (`content_filter`, `template_response`, `network_interruption`, `user_stop`, `client_abort`) produces identical `continuityDecision = eligible`.
+     - Structural exclusions: `conversation_mismatch`, `not_logical_assistant`, `attempt_only` exclusion, `wrong_branch`, `already_in_server_history` (by id, remoteId, or reconciled history source), `already_bridged`, and `no_usable_revision`.
+     - Usable revision priority resolution (`RecoveryEvent.recoveredRevisionId` > `isLastGood` > preferred revision).
+     - Forensic recovery cause extraction from events and message status.
+
+2. **Topological Active Branch Lineage (`tests/context-continuity-branch-ancestry.test.ts`):**
+   - 7 unit tests verifying upward lineage tracing from explicit `leafMessageId`, downward traversal from root using `branchSelections`, cycle prevention, sibling branch isolation, and non-logical turn filtering.
+
+3. **Context Continuity Planner & Budget Clamping (`tests/context-continuity-planner.test.ts`):**
+   - 8 unit tests verifying whole-block budget preference, newest-first selection, chronological ordering, omission tracking (`omittedBlockCount`), truncation disclosure (`truncated: true`), surrogate-safe UTF-16 slicing without splitting code units, DeepThink toggle respect, and exclusion tracking.
+
+4. **Deterministic Markdown Formatter (`tests/context-continuity-formatter.test.ts`):**
+   - 6 unit tests verifying boundary markers (`[StreamArchive recovered conversation context]`), divider formatting, recovery cause labels, optional DeepThink blocks, omission notices, and raw script/HTML text preservation.
+
+5. **Context Continuity Settings Persistence (`tests/context-continuity-settings.test.ts`):**
+   - 6 unit tests verifying safe defaults (`enabled: false`, `includeThinking: false`), input sanitization against malformed data, and storage round-tripping via `chrome.storage.local`.
+
+6. **Passive Network Request Identity Test (`tests/context-continuity-request-identity.test.ts`):**
+   - 5 unit tests verifying that outgoing fetch and XHR request bodies, headers, and URLs remain 100% byte-for-byte identical with Context Continuity enabled, disabled, and active.
+
+7. **Browser E2E Context Continuity Preview (`tests/browser/context-continuity-preview.spec.ts`):**
+   - Full Playwright Chromium MV3 spec verifying Settings toggle interaction, persistence in `chrome.storage.local`, multi-turn IndexedDB seeding (filtered turn + sibling branch + server-reconciled turn), ConversationView header preview button, modal statistics verification (1 eligible turn), payload verification, exclusion listing (`wrong_branch`, `already_in_server_history`), and single-click clipboard copying.
+
 > [!IMPORTANT]
 > Automated tests confirm structural and protocol compliance. For instructions on executing real-world manual acceptance testing against live `chat.deepseek.com`, see the [Live Acceptance Testing Guide](./LIVE_ACCEPTANCE.md), [Live Acceptance Results Template](./LIVE_ACCEPTANCE_RESULTS_TEMPLATE.md), and [Inline Recovery Live Acceptance Results (2026-11-03)](./LIVE_INLINE_RECOVERY_RESULTS_2026-11-03.md).

@@ -102,3 +102,12 @@ Level 4: Floating Recovery Tray (Universal Fallback)
 The inline recovery architecture was verified against live production DeepSeek chat during the Milestone 2D.4-LA acceptance gate:
 - Real-browser live acceptance report: [`docs/LIVE_INLINE_RECOVERY_RESULTS_2026-11-03.md`](./LIVE_INLINE_RECOVERY_RESULTS_2026-11-03.md).
 - Status: **`PASS`** across Level 1 DOM insertion, React virtualization scrolling, client-side SPA route isolation, native toolbar non-tampering, and native `Regenerate` branching.
+
+---
+
+## 7. Interaction with Context Continuity (Milestone 2D.5A)
+
+When Context Continuity is enabled in Settings:
+- An optional subtle status indicator (`.streamarchive-inline-continuity-pill`) can be displayed inside the inline recovery host header to inform the user that the recovered response is active in the continuity plan.
+- **Zero Request Mutation Invariant:** Even with both Inline Recovery and Context Continuity enabled, StreamArchive modifies **zero** outgoing requests, keeping passive capture and browser safety 100% intact.
+- For full continuity details, see [CONTEXT_CONTINUITY.md](./CONTEXT_CONTINUITY.md).

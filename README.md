@@ -6,8 +6,8 @@
 
 ![Platform](https://img.shields.io/badge/platform-Chrome%20%7C%20Chromium%20MV3-4285F4?logo=googlechrome&logoColor=white)
 ![Framework](https://img.shields.io/badge/framework-WXT%20%2B%20Svelte%205-FF3E00?logo=svelte&logoColor=white)
-![Tests](https://img.shields.io/badge/unit%20tests-495%20passing-3DDC84)
-![E2E Tests](https://img.shields.io/badge/playwright%20e2e-19%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/unit%20tests-544%20passing-3DDC84)
+![E2E Tests](https://img.shields.io/badge/playwright%20e2e-20%20passing-brightgreen)
 ![Status](https://img.shields.io/badge/live%20compatibility-baseline%20accepted-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -106,6 +106,13 @@ Other frequent loss vectors include:
 - **Safe Single-Conversation Deletion:** 2-step preview modal with active stream guards, concurrency stale barriers (`updatedAt`), and atomic multi-store rollback (`tx.abort()`).
 - **Archive Maintenance & Purge:** Fast maintenance actions to clean up expired raw streams, purge all raw evidence while preserving conversations, or reset the local archive.
 - **Local Storage Scope Notice:** All deletions operate strictly inside the local browser storage and never alter data on DeepSeek servers.
+
+### 11. Branch-Aware Context Continuity & Transparent Preview (Milestone 2D.5A)
+- **Topological Lineage Derivation:** Pure topological resolver identifying the active branch path, cleanly isolating alternate sibling regenerations (`wrong_branch`) and stripping non-logical turns.
+- **Forensic Cause Invariant:** Filtered responses, network interruptions, manual stops, and template replacements participate equally under uniform structural eligibility rules.
+- **Budget Clamping & Safe Slicing:** Limits inclusion to 4 blocks (12,000 text chars, 6,000 thinking chars) with surrogate-safe UTF-16 slicing and visible omission disclosures.
+- **Transparent Side Panel Preview:** Dedicated modal with payload metrics, cause badges, collapsible exclusion audit, and single-click copy action.
+- **Strict Default OFF & Passive Invariant:** Context Continuity defaults strictly to disabled (`enabled: false`), with **zero** outgoing request modification in Phase 2D.5A.
 
 ---
 

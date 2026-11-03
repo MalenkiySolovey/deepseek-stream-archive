@@ -12,6 +12,13 @@
     saveRecoveryPresentationSettings,
   } from '../../src/presentation/settings';
   import {
+    type ContextContinuitySettings,
+    DEFAULT_CONTEXT_CONTINUITY_SETTINGS,
+    getContextContinuitySettings,
+    saveContextContinuitySettings,
+  } from '../../src/context-continuity';
+
+  import {
     MESSAGE_CREATE_PORTABLE_BACKUP_SNAPSHOT,
     MESSAGE_GET_STORAGE_USAGE_ESTIMATE,
     MESSAGE_RESTORE_PREVIEW,
@@ -110,13 +117,25 @@
   // Milestone 2D.4: Recovery Presentation State in Settings
   let recoverySettings = $state<RecoveryPresentationSettings>({ ...DEFAULT_RECOVERY_PRESENTATION_SETTINGS });
 
+  // Milestone 2D.5A: Context Continuity Settings State
+  let continuitySettings = $state<ContextContinuitySettings>({ ...DEFAULT_CONTEXT_CONTINUITY_SETTINGS });
+
   onMount(() => {
     loadRecoverySettings();
+    loadContinuitySettings();
   });
 
   async function loadRecoverySettings() {
     try {
       recoverySettings = await getRecoveryPresentationSettings();
+    } catch {
+      // default
+    }
+  }
+
+  async function loadContinuitySettings() {
+    try {
+      continuitySettings = await getContextContinuitySettings();
     } catch {
       // default
     }
@@ -132,14 +151,26 @@
     await saveRecoveryPresentationSettings(recoverySettings);
   }
 
+  async function handleContinuityEnabledChange(enabled: boolean) {
+    continuitySettings = { ...continuitySettings, enabled };
+    await saveContextContinuitySettings(continuitySettings);
+  }
+
+  async function handleContinuityIncludeThinkingChange(includeThinking: boolean) {
+    continuitySettings = { ...continuitySettings, includeThinking };
+    await saveContextContinuitySettings(continuitySettings);
+  }
+
   function switchTab(tab: ActiveTab) {
     activeTab = tab;
     if (tab === 'settings') {
       loadStorageEstimate();
       loadMaintenanceStatus();
       loadRecoverySettings();
+      loadContinuitySettings();
     }
   }
+
 
   function loadMaintenanceStatus() {
     maintenanceLoading = true;
@@ -525,6 +556,7 @@
     <nav class="tab-nav">
       <button
         class="tab-btn"
+        id="tab-archive"
         class:active={activeTab === 'archive'}
         type="button"
         onclick={() => switchTab('archive')}
@@ -533,6 +565,7 @@
       </button>
       <button
         class="tab-btn"
+        id="tab-diagnostics"
         class:active={activeTab === 'diagnostics'}
         type="button"
         onclick={() => switchTab('diagnostics')}
@@ -541,6 +574,7 @@
       </button>
       <button
         class="tab-btn"
+        id="tab-settings"
         class:active={activeTab === 'settings'}
         type="button"
         onclick={() => switchTab('settings')}
@@ -641,6 +675,48 @@
             </div>
           {/if}
         </div>
+
+        <!-- Milestone 2D.5A: Context Continuity Settings -->
+        <div class="settings-card context-continuity-card">
+          <div class="card-header-badge">
+            <h3 class="card-subtitle">🔄 {t.contextContinuityTitle}</h3>
+            <span class="experimental-pill">{t.contextContinuityExperimental}</span>
+          </div>
+          <p class="about-desc">{t.contextContinuityDesc}</p>
+
+          <div class="setting-checkbox-item">
+            <label class="checkbox-label" for="toggle-context-continuity">
+              <input
+                id="toggle-context-continuity"
+                type="checkbox"
+                checked={continuitySettings.enabled}
+                onchange={(e) => handleContinuityEnabledChange(e.currentTarget.checked)}
+              />
+              <span class="checkbox-text">
+                <strong>{t.enableContextContinuity}</strong>
+                <span class="setting-hint">{t.contextContinuityPhaseNotice}</span>
+              </span>
+            </label>
+          </div>
+
+          {#if continuitySettings.enabled}
+            <div class="setting-checkbox-item continuity-suboption">
+              <label class="checkbox-label" for="toggle-include-thinking">
+                <input
+                  id="toggle-include-thinking"
+                  type="checkbox"
+                  checked={continuitySettings.includeThinking}
+                  onchange={(e) => handleContinuityIncludeThinkingChange(e.currentTarget.checked)}
+                />
+                <span class="checkbox-text">
+                  <strong>{t.contextContinuityIncludeThinking}</strong>
+                  <span class="setting-hint">{t.contextContinuityIncludeThinkingDesc}</span>
+                </span>
+              </label>
+            </div>
+          {/if}
+        </div>
+
 
         <!-- Milestone 2E.1: Data Export & Portable Backup -->
         <div class="settings-card backup-card">
@@ -1989,7 +2065,32 @@
     margin: 0 0 0.5rem 0;
   }
 
+  /* Milestone 2D.5A: Context Continuity Styles */
+  .card-header-badge {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .experimental-pill {
+    padding: 0.15rem 0.45rem;
+    border-radius: 9999px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    background: rgba(168, 85, 247, 0.15);
+    color: #c084fc;
+    border: 1px solid rgba(168, 85, 247, 0.3);
+  }
+
+  .continuity-suboption {
+    margin-left: 1.5rem;
+    padding-top: 0.25rem;
+  }
+
   /* Milestone 2E.3: Storage & Retention Management Styles */
+
   .storage-stats-container {
     background: #0f172a;
     border: 1px solid #1e293b;

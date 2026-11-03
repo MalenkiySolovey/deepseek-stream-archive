@@ -51,6 +51,14 @@ import {
 } from '../../restore';
 import type { MaterializedPortableBackup } from '../../backup/reader';
 import type { PortableBackupStoreCounts } from '../../backup/format';
+import { buildContextContinuityPlan as buildContinuityPlanInternal } from '../../context-continuity/planner';
+import { getContextContinuitySettings } from '../../context-continuity/settings';
+import type {
+  ContextContinuityPlan,
+  ContextContinuitySettings,
+  ContextContinuityLimits,
+} from '../../context-continuity/types';
+
 import {
   buildConversationDeletionPlan as buildConversationDeletionPlanInternal,
   deleteConversationCascade as deleteConversationCascadeInternal,
@@ -1810,5 +1818,92 @@ export class IndexedDbStorageRepository implements StorageRepository {
       lastAutomaticCleanupAt: settings.lastAutomaticCleanupAt,
     };
   }
-}
 
+  // ── Milestone 2D.5A: Context Continuity Planner ──
+
+  async buildContextContinuityPlan(
+    conversationId: string,
+    options?: {
+      leafMessageId?: string;
+      branchSelections?: Record<string, number>;
+      settings?: ContextContinuitySettings;
+      limits?: Partial<ContextContinuityLimits>;
+    }
+  ): Promise<ContextContinuityPlan | null> {
+    const conversation = await this.getConversation(conversationId);
+    if (!conversation) return null;
+
+    const settings = options?.settings ?? (await getContextContinuitySettings());
+    const db = await this.getDb();
+
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(
+        [STORE_MESSAGES, STORE_REVISIONS, STORE_RECOVERY_EVENTS],
+        'readonly'
+      );
+      const msgStore = tx.objectStore(STORE_MESSAGES);
+      const revStore = tx.objectStore(STORE_REVISIONS);
+      const recStore = tx.objectStore(STORE_RECOVERY_EVENTS);
+
+      const msgIndex = msgStore.index('conversationId');
+      const msgReq = msgIndex.getAll(conversationId);
+
+      msgReq.onerror = () => reject(msgReq.error || new Error('Failed to query messages for context continuity plan'));
+      msgReq.onsuccess = () => {
+        const messages = (msgReq.result as Message[]) || [];
+        if (messages.length === 0) {
+          const plan = buildContinuityPlanInternal({
+            conversationId,
+            messages: [],
+            revisionsMap: new Map(),
+            settings,
+            limits: options?.limits,
+          });
+          resolve(plan);
+          return;
+        }
+
+        const revisionsMap = new Map<string, ResponseRevision[]>();
+        const recoveryEventsMap = new Map<string, RecoveryEvent[]>();
+        let pending = messages.length;
+
+        const checkDone = () => {
+          pending--;
+          if (pending === 0) {
+            const plan = buildContinuityPlanInternal({
+              conversationId,
+              messages,
+              revisionsMap,
+              recoveryEventsMap,
+              branchOptions: {
+                leafMessageId: options?.leafMessageId,
+                branchSelections: options?.branchSelections,
+              },
+              settings,
+              limits: options?.limits,
+            });
+            resolve(plan);
+          }
+        };
+
+        const revIndex = revStore.index('messageId');
+        const recIndex = recStore.index('messageId');
+
+        for (const msg of messages) {
+          const revReq = revIndex.getAll(msg.id);
+          revReq.onerror = () => checkDone();
+          revReq.onsuccess = () => {
+            revisionsMap.set(msg.id, (revReq.result as ResponseRevision[]) || []);
+
+            const recReq = recIndex.getAll(msg.id);
+            recReq.onerror = () => checkDone();
+            recReq.onsuccess = () => {
+              recoveryEventsMap.set(msg.id, (recReq.result as RecoveryEvent[]) || []);
+              checkDone();
+            };
+          };
+        }
+      };
+    });
+  }
+}

@@ -123,7 +123,17 @@ export function mountInlineRecovery(
   badge.className = `streamarchive-inline-badge ${labelInfo.className}`;
   badge.textContent = `${labelInfo.icon} ${labelInfo.badgeLabel}`;
   header.appendChild(badge);
+
+  // Optional Context Continuity status indicator (Section 46)
+  if (options?.continuityStatus) {
+    const continuityPill = document.createElement('span');
+    continuityPill.className = 'streamarchive-inline-continuity-pill';
+    continuityPill.textContent = `🔄 Context: ${options.continuityStatus}`;
+    header.appendChild(continuityPill);
+  }
+
   root.appendChild(header);
+
 
   // DeepThink reasoning block (collapsed by default if enabled & present)
   const showThinking = options?.showThinkingInline !== false;

@@ -41,6 +41,11 @@ import {
   MESSAGE_EXECUTE_RAW_RETENTION,
   MESSAGE_CLEAR_RAW_EVIDENCE,
   MESSAGE_CLEAR_ENTIRE_ARCHIVE,
+  MESSAGE_GET_CONTEXT_CONTINUITY_SETTINGS,
+  MESSAGE_SET_CONTEXT_CONTINUITY_SETTINGS,
+  MESSAGE_BUILD_CONTEXT_CONTINUITY_PLAN,
+  MESSAGE_GET_CONTEXT_CONTINUITY_STATUS,
+
   type SaveSyntheticBatchRequest,
   type SaveSyntheticBatchResponse,
   type FoundationStatusResponse,
@@ -94,7 +99,16 @@ import {
   validatePreviewRawRetentionRequest,
   validateExecuteRawRetentionRequest,
   validateSetRetentionSettingsRequest,
+  validateGetContextContinuitySettingsRequest,
+  validateSetContextContinuitySettingsRequest,
+  validateBuildContextContinuityPlanRequest,
+  validateGetContextContinuityStatusRequest,
 } from '../src/bridge/validation';
+import {
+  getContextContinuitySettings,
+  saveContextContinuitySettings,
+} from '../src/context-continuity';
+
 import {
   getRetentionSettings,
   saveRetentionSettings,
@@ -1684,7 +1698,111 @@ export default defineBackground(() => {
       return true;
     }
 
+    // ── Milestone 2D.5A: Context Continuity Handlers ──
+
+    if (message.type === MESSAGE_GET_CONTEXT_CONTINUITY_SETTINGS) {
+      getContextContinuitySettings()
+        .then((settings) => sendResponse({ success: true, settings }))
+        .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
+      return true;
+    }
+
+    if (message.type === MESSAGE_SET_CONTEXT_CONTINUITY_SETTINGS) {
+      const validated = validateSetContextContinuitySettingsRequest(message);
+      if (!validated) {
+        sendResponse({ success: false, error: 'Invalid context continuity settings payload' });
+        return false;
+      }
+      saveContextContinuitySettings(validated.settings)
+        .then((settings) => sendResponse({ success: true, settings }))
+        .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
+      return true;
+    }
+
+    if (message.type === MESSAGE_BUILD_CONTEXT_CONTINUITY_PLAN) {
+      const validated = validateBuildContextContinuityPlanRequest(message);
+      if (!validated) {
+        sendResponse({ success: false, error: 'Invalid build context continuity plan payload' });
+        return false;
+      }
+      storageRepo
+        .buildContextContinuityPlan(validated.conversationId, {
+          leafMessageId: validated.leafMessageId,
+          branchSelections: validated.branchSelections,
+        })
+        .then((plan) => {
+          if (!plan) {
+            sendResponse({ success: false, error: 'Conversation not found' });
+          } else {
+            sendResponse({ success: true, plan });
+          }
+        })
+        .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
+      return true;
+    }
+
+    if (message.type === MESSAGE_GET_CONTEXT_CONTINUITY_STATUS) {
+      const validated = validateGetContextContinuityStatusRequest(message);
+      getContextContinuitySettings()
+        .then(async (settings) => {
+          if (!settings.enabled) {
+            sendResponse({
+              success: true,
+              status: {
+                enabled: false,
+                includeThinking: settings.includeThinking,
+                status: 'disabled',
+              },
+            });
+            return;
+          }
+
+          if (validated?.conversationId) {
+            const plan = await storageRepo.buildContextContinuityPlan(validated.conversationId, { settings });
+            if (!plan || plan.eligibleBlockCount === 0) {
+              sendResponse({
+                success: true,
+                status: {
+                  enabled: true,
+                  includeThinking: settings.includeThinking,
+                  status: 'no_eligible_context',
+                  eligibleBlocksCount: 0,
+                  excludedBlocksCount: plan?.excludedBlockCount ?? 0,
+                  totalTextChars: 0,
+                  totalThinkingChars: 0,
+                },
+              });
+            } else {
+              sendResponse({
+                success: true,
+                status: {
+                  enabled: true,
+                  includeThinking: settings.includeThinking,
+                  status: plan.truncated ? 'truncated' : 'ready',
+                  eligibleBlocksCount: plan.eligibleBlockCount,
+                  excludedBlocksCount: plan.excludedBlockCount,
+                  totalTextChars: plan.totalTextChars,
+                  totalThinkingChars: plan.totalThinkingChars,
+                },
+              });
+            }
+          } else {
+            sendResponse({
+              success: true,
+              status: {
+                enabled: true,
+                includeThinking: settings.includeThinking,
+                status: 'ready',
+              },
+            });
+          }
+        })
+        .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
+      return true;
+    }
+
     return false;
+
   });
 });
 

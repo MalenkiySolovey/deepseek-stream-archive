@@ -176,5 +176,15 @@ export interface StorageRepository {
   clearRawEvidence(activeStreamCount: number): Promise<import('../../storage/retention').ArchiveCleanupResult>;
   clearEntireArchive(activeStreamCount: number): Promise<{ success: boolean; durationMs: number }>;
   getStorageMaintenanceStatus(): Promise<import('../../storage/retention').StorageMaintenanceStatus>;
-}
 
+  // Context Continuity Planner (Milestone 2D.5A)
+  buildContextContinuityPlan(
+    conversationId: string,
+    options?: {
+      leafMessageId?: string;
+      branchSelections?: Record<string, number>;
+      settings?: import('../../context-continuity/types').ContextContinuitySettings;
+      limits?: Partial<import('../../context-continuity/types').ContextContinuityLimits>;
+    }
+  ): Promise<import('../../context-continuity/types').ContextContinuityPlan | null>;
+}

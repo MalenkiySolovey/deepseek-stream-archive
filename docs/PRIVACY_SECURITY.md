@@ -260,4 +260,17 @@ StreamArchive requests **zero unnecessary permissions** (e.g. no `scripting`, no
 4. **Atomic Rollback & Failure Isolation:**
    - Single-conversation cascade deletions and whole-archive purges execute in single atomic transactions. If browser storage or transaction failure occurs, all changes roll back immediately via `tx.abort()`, preventing corrupted or partially deleted relational states.
 
+---
+
+## 12. Context Continuity Privacy & Safety Boundaries (Milestone 2D.5A)
+
+1. **Zero Outgoing Request Mutation:**
+   - Context Continuity operates in Phase 2D.5A strictly as a local derived planner. It does **not** alter outgoing fetch/XHR request payloads, does **not** append custom headers, and does **not** type into the DeepSeek textarea.
+2. **Strict Default OFF:**
+   - Context Continuity is disabled by default (`enabled: false`). DeepThink reasoning traces are also excluded by default (`includeThinking: false`).
+3. **Surrogate-Safe Truncation & Disclosure:**
+   - Hard character budgets (12,000 text chars, 6,000 thinking chars) prevent prompt overflows. Surrogate pairs are never broken, and all omissions are explicitly disclosed in the formatted preview.
+4. **Zero Persistent Relational Mutations:**
+   - Plans are transient in-memory derivations (`DB_VERSION = 8` strictly preserved). No speculative or artificial injection records are written to IndexedDB.
+
 

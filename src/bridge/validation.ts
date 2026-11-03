@@ -1110,6 +1110,93 @@ export function validateSetRetentionSettingsRequest(
   };
 }
 
+// ── Milestone 2D.5A: Context Continuity Request Validators ──
+
+export function validateGetContextContinuitySettingsRequest(
+  raw: unknown
+): import('./messages').GetContextContinuitySettingsRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_GET_CONTEXT_CONTINUITY_SETTINGS') return null;
+  return { type: 'STREAMARCHIVE_GET_CONTEXT_CONTINUITY_SETTINGS' };
+}
+
+export function validateSetContextContinuitySettingsRequest(
+  raw: unknown
+): import('./messages').SetContextContinuitySettingsRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_SET_CONTEXT_CONTINUITY_SETTINGS') return null;
+  if (!isRecord(raw.settings)) return null;
+
+  const settings: Partial<import('../context-continuity/types').ContextContinuitySettings> = {};
+  if (typeof raw.settings.enabled === 'boolean') {
+    settings.enabled = raw.settings.enabled;
+  }
+  if (typeof raw.settings.includeThinking === 'boolean') {
+    settings.includeThinking = raw.settings.includeThinking;
+  }
+
+  return {
+    type: 'STREAMARCHIVE_SET_CONTEXT_CONTINUITY_SETTINGS',
+    settings,
+  };
+}
+
+export function validateBuildContextContinuityPlanRequest(
+  raw: unknown
+): import('./messages').BuildContextContinuityPlanRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_BUILD_CONTEXT_CONTINUITY_PLAN') return null;
+  if (
+    typeof raw.conversationId !== 'string' ||
+    raw.conversationId.trim().length === 0 ||
+    raw.conversationId.length > MAX_ID_CHARS
+  ) {
+    return null;
+  }
+
+  const leafMessageId =
+    typeof raw.leafMessageId === 'string' &&
+    raw.leafMessageId.trim().length > 0 &&
+    raw.leafMessageId.length <= MAX_ID_CHARS
+      ? raw.leafMessageId.trim()
+      : undefined;
+
+  let branchSelections: Record<string, number> | undefined = undefined;
+  if (isRecord(raw.branchSelections)) {
+    branchSelections = {};
+    for (const [k, v] of Object.entries(raw.branchSelections)) {
+      if (typeof k === 'string' && typeof v === 'number' && Number.isInteger(v) && v >= 0) {
+        branchSelections[k] = v;
+      }
+    }
+  }
+
+  return {
+    type: 'STREAMARCHIVE_BUILD_CONTEXT_CONTINUITY_PLAN',
+    conversationId: raw.conversationId.trim(),
+    leafMessageId,
+    branchSelections,
+  };
+}
+
+export function validateGetContextContinuityStatusRequest(
+  raw: unknown
+): import('./messages').GetContextContinuityStatusRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_GET_CONTEXT_CONTINUITY_STATUS') return null;
+
+  const conversationId =
+    typeof raw.conversationId === 'string' &&
+    raw.conversationId.trim().length > 0 &&
+    raw.conversationId.length <= MAX_ID_CHARS
+      ? raw.conversationId.trim()
+      : undefined;
+
+  return {
+    type: 'STREAMARCHIVE_GET_CONTEXT_CONTINUITY_STATUS',
+    conversationId,
+  };
+}
 
 
 

@@ -53,6 +53,13 @@ export const MESSAGE_EXECUTE_RAW_RETENTION = 'STREAMARCHIVE_EXECUTE_RAW_RETENTIO
 export const MESSAGE_CLEAR_RAW_EVIDENCE = 'STREAMARCHIVE_CLEAR_RAW_EVIDENCE' as const;
 export const MESSAGE_CLEAR_ENTIRE_ARCHIVE = 'STREAMARCHIVE_CLEAR_ENTIRE_ARCHIVE' as const;
 
+// ── Milestone 2D.5A: Context Continuity Messages ──
+export const MESSAGE_GET_CONTEXT_CONTINUITY_SETTINGS = 'STREAMARCHIVE_GET_CONTEXT_CONTINUITY_SETTINGS' as const;
+export const MESSAGE_SET_CONTEXT_CONTINUITY_SETTINGS = 'STREAMARCHIVE_SET_CONTEXT_CONTINUITY_SETTINGS' as const;
+export const MESSAGE_BUILD_CONTEXT_CONTINUITY_PLAN = 'STREAMARCHIVE_BUILD_CONTEXT_CONTINUITY_PLAN' as const;
+export const MESSAGE_GET_CONTEXT_CONTINUITY_STATUS = 'STREAMARCHIVE_GET_CONTEXT_CONTINUITY_STATUS' as const;
+
+
 
 export type ObservationState = 'not_observed' | 'observed' | 'failed' | 'unsupported';
 
@@ -583,6 +590,63 @@ export interface ClearEntireArchiveResponse {
   error?: string;
 }
 
+// ── Milestone 2D.5A: Context Continuity Request & Response Interfaces ──
+
+export interface GetContextContinuitySettingsRequest {
+  type: typeof MESSAGE_GET_CONTEXT_CONTINUITY_SETTINGS;
+}
+
+export interface GetContextContinuitySettingsResponse {
+  success: boolean;
+  settings?: import('../context-continuity/types').ContextContinuitySettings;
+  error?: string;
+}
+
+export interface SetContextContinuitySettingsRequest {
+  type: typeof MESSAGE_SET_CONTEXT_CONTINUITY_SETTINGS;
+  settings: Partial<import('../context-continuity/types').ContextContinuitySettings>;
+}
+
+export interface SetContextContinuitySettingsResponse {
+  success: boolean;
+  settings?: import('../context-continuity/types').ContextContinuitySettings;
+  error?: string;
+}
+
+export interface BuildContextContinuityPlanRequest {
+  type: typeof MESSAGE_BUILD_CONTEXT_CONTINUITY_PLAN;
+  conversationId: string;
+  leafMessageId?: string;
+  branchSelections?: Record<string, number>;
+}
+
+export interface BuildContextContinuityPlanResponse {
+  success: boolean;
+  plan?: import('../context-continuity/types').ContextContinuityPlan;
+  error?: string;
+}
+
+export interface ContextContinuityStatusSummary {
+  enabled: boolean;
+  includeThinking: boolean;
+  status: 'disabled' | 'ready' | 'no_eligible_context' | 'truncated' | 'degraded';
+  eligibleBlocksCount?: number;
+  excludedBlocksCount?: number;
+  totalTextChars?: number;
+  totalThinkingChars?: number;
+}
+
+export interface GetContextContinuityStatusRequest {
+  type: typeof MESSAGE_GET_CONTEXT_CONTINUITY_STATUS;
+  conversationId?: string;
+}
+
+export interface GetContextContinuityStatusResponse {
+  success: boolean;
+  status?: ContextContinuityStatusSummary;
+  error?: string;
+}
+
 export type ExtensionInternalMessage =
   | SaveSyntheticBatchRequest
   | GetFoundationStatusRequest
@@ -622,6 +686,9 @@ export type ExtensionInternalMessage =
   | PreviewRawRetentionRequest
   | ExecuteRawRetentionRequest
   | ClearRawEvidenceRequest
-  | ClearEntireArchiveRequest;
-
+  | ClearEntireArchiveRequest
+  | GetContextContinuitySettingsRequest
+  | SetContextContinuitySettingsRequest
+  | BuildContextContinuityPlanRequest
+  | GetContextContinuityStatusRequest;
 

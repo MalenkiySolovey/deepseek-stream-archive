@@ -167,4 +167,10 @@ If a sequence gap or integrity-threatening warning (`malformed_json`, `unknown_o
 ### 6.5 Live Inline Compatibility Certification (2026-11-03)
 During the live acceptance gate recorded in [`docs/LIVE_INLINE_RECOVERY_RESULTS_2026-11-03.md`](./LIVE_INLINE_RECOVERY_RESULTS_2026-11-03.md), the DOM capability probes (`probe:dom-anchor-identity`, `probe:dom-inline-insertion`, and `probe:dom-toolbar-separation`) confirmed that production DeepSeek maintains stable `data-message-id` attributes and independent `.ds-actions-toolbar` elements. Level 1 inline insertion operates without host DOM corruption, and native toolbar operations (`Regenerate`, `Copy`, `Like`, `Dislike`) retain full native listener integrity.
 
+### 6.6 Context Continuity Compatibility & Network Invariance (Milestone 2D.5A)
+To guarantee 100% forward and backward compatibility with DeepSeek's evolving web client and server backend:
+1. **Zero Outgoing Request Mutation:** Context Continuity in Phase 2D.5A strictly derives plans for user inspection and copying without mutating outgoing HTTP request payloads or headers.
+2. **Topological Tree Immunity:** Plans resolve active branches from canonical DAG relationships (`parentId`), rendering the planner completely immune to DeepSeek virtual list DOM unmounting or frontend CSS changes.
+3. **Forensic Cause Uniformity:** Because recovery cause is treated strictly as descriptive metadata rather than an eligibility filter, future changes in DeepSeek's rejection strings or error codes do not break continuity evaluation.
+
 

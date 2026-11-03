@@ -6,7 +6,9 @@
     MESSAGE_GET_CONVERSATION_EXPORT,
     MESSAGE_PREVIEW_CONVERSATION_DELETE,
     MESSAGE_DELETE_CONVERSATION,
+    MESSAGE_BUILD_CONTEXT_CONTINUITY_PLAN,
     type GetArchiveConversationRequest,
+
     type GetArchiveConversationResponse,
     type GetRevisionContentRequest,
     type GetRevisionContentResponse,
@@ -29,7 +31,11 @@
     type ResponseRevision,
   } from '../../../src/core/models';
   import SafeMarkdown from './SafeMarkdown.svelte';
+  import ContextContinuityPreviewModal from './ContextContinuityPreviewModal.svelte';
+  import { getContextContinuitySettings } from '../../../src/context-continuity/settings';
+  import type { ContextContinuityPlan, ContextContinuitySettings } from '../../../src/context-continuity/types';
   import { translations, type SupportedLocale } from './i18n';
+
   import {
     buildConversationMarkdown,
     buildConversationJson,
@@ -229,9 +235,58 @@
     await performExport();
   }
 
+  // Milestone 2D.5A: Context Continuity Preview State
+  let showContinuityModal = $state(false);
+  let continuityPlan = $state<ContextContinuityPlan | null>(null);
+  let isBuildingContinuityPlan = $state(false);
+  let continuityError = $state<string | null>(null);
+  let continuitySettings = $state<ContextContinuitySettings | null>(null);
+
+  async function checkContinuitySettings() {
+    try {
+      continuitySettings = await getContextContinuitySettings();
+    } catch {
+      continuitySettings = null;
+    }
+  }
+
+  async function handleOpenContinuityPreview() {
+    if (!detail) return;
+    showContinuityModal = true;
+    isBuildingContinuityPlan = true;
+    continuityError = null;
+    try {
+      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+        const res = await new Promise<any>((resolve) => {
+          chrome.runtime.sendMessage(
+            {
+              type: MESSAGE_BUILD_CONTEXT_CONTINUITY_PLAN,
+              conversationId: detail!.conversation.id,
+              branchSelections,
+            },
+            (r) => resolve(r || { success: false, error: 'No response from background' })
+          );
+        });
+        if (res && res.success && res.plan) {
+          continuityPlan = res.plan;
+        } else {
+          continuityError = res?.error || 'Failed to build continuity plan';
+        }
+      } else {
+        continuityError = 'Extension runtime unavailable';
+      }
+    } catch (err) {
+      continuityError = (err as Error).message;
+    } finally {
+      isBuildingContinuityPlan = false;
+    }
+  }
+
   onMount(() => {
     loadConversation();
+    checkContinuitySettings();
   });
+
 
   async function loadConversation() {
     loading = true;
@@ -410,6 +465,17 @@
     </div>
     {#if detail}
       <div class="header-actions">
+        {#if continuitySettings?.enabled}
+          <button
+            class="continuity-header-btn"
+            id="preview-continuity-btn"
+            type="button"
+            onclick={handleOpenContinuityPreview}
+            title={t.previewContextContinuity}
+          >
+            🔄 {t.previewContextContinuity}
+          </button>
+        {/if}
         <button
           class="export-header-btn"
           type="button"
@@ -418,6 +484,7 @@
         >
           📤 {t.exportBtn}
         </button>
+
         <button
           class="delete-header-btn"
           id="delete-conversation-btn"
@@ -842,7 +909,17 @@
       </div>
     </div>
   {/if}
+
+  <ContextContinuityPreviewModal
+    isOpen={showContinuityModal}
+    plan={continuityPlan}
+    isLoading={isBuildingContinuityPlan}
+    error={continuityError}
+    locale={locale}
+    onClose={() => { showContinuityModal = false; }}
+  />
 </div>
+
 
 <style>
   .conversation-view {
@@ -870,7 +947,29 @@
     gap: 0.5rem;
   }
 
+  .continuity-header-btn {
+    padding: 0.3rem 0.65rem;
+    border-radius: 4px;
+    background: rgba(168, 85, 247, 0.12);
+    border: 1px solid rgba(168, 85, 247, 0.3);
+    color: #c084fc;
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    transition: background 0.15s, border-color 0.15s;
+  }
+
+  .continuity-header-btn:hover {
+    background: rgba(168, 85, 247, 0.22);
+    border-color: rgba(168, 85, 247, 0.5);
+    color: #e9d5ff;
+  }
+
   .export-header-btn {
+
     padding: 0.3rem 0.65rem;
     border-radius: 4px;
     background: #1e293b;

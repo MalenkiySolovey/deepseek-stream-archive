@@ -91,7 +91,9 @@ To maintain architectural focus, StreamArchive explicitly rejects the following 
 8. **Export & Portable Backup:** High-fidelity Markdown and JSON conversation exports; compressed, versioned full-archive backups (`.streamarchive.jsonl.gz`).
 9. **Atomic Restore & Safe Merge:** Validated streaming restore with decompression bomb protection, relational DAG pre-flight, and atomic multi-store replacement or merge.
 10. **Storage Observability, Retention & Safe Deletion:** Browser storage observability (`navigator.storage.estimate()`), persistence protection (`navigator.storage.persist()`), configurable raw evidence retention (`forever`, 30, 90, 180 days) with Protected Evidence Shield, safe single-conversation cascade deletion with active stream guard, and multi-store maintenance actions.
-11. **Browser Compatibility Harness:** Playwright automated Chromium MV3 test suite with fail-closed network isolation asserting real-time streaming, recovery presentation, reconciliation, backup/restore, and retention invariants against synthetic offline fixtures.
+11. **Branch-Aware Context Continuity Planning & Transparent Preview (Milestone 2D.5A):** Pure topological DAG active branch resolution, forensic metadata cause orthogonality (filtered, interrupted, stopped, replaced responses participate equally), surrogate-safe UTF-16 character and block budget clamping, deterministic markdown formatting with clear boundary disclosures, transparent Side Panel preview modal with metrics grid and copy action, strict default OFF setting (`enabled: false`), and absolute zero outgoing request/prompt mutation.
+12. **Browser Compatibility Harness:** Playwright automated Chromium MV3 test suite with fail-closed network isolation asserting real-time streaming, recovery presentation, reconciliation, backup/restore, retention, and context continuity invariants against synthetic offline fixtures.
 
 ### Planned Enhancements:
+- **Explicit Context Delivery (Milestone 2D.5B):** User-confirmed prompt augmentation and delivery mechanisms.
 - **Multi-Browser Support (Milestone 2F):** Firefox Add-on port following WebExtension standards.

@@ -266,3 +266,20 @@ When a user explicitly deletes an individual conversation via the Side Panel int
 - **Atomic Rollback:** If any store operation encounters an error or quota failure, `tx.abort()` is called immediately, leaving the database completely unmodified.
 
 For full architectural details, see [RETENTION_AND_DELETION.md](./RETENTION_AND_DELETION.md) and [ADR 0025](./ADR/0025-retention-cleanup-and-safe-deletion.md).
+
+---
+
+## 9. Context Continuity Derived Model (Milestone 2D.5A)
+
+The canonical message tree provides pure topological lineage resolution for Context Continuity:
+
+### 9.1 Derived Non-Durable Projection
+- Plans (`ContextContinuityPlan`) are pure, non-durable in-memory projections derived on-demand from `messages`, `revisions`, and `recovery_events`.
+- **Zero Schema Migrations:** Strictly preserves `DB_VERSION = 8` without creating new stores or persistent context injection records.
+
+### 9.2 Structural Invariants
+- **Active Branch Isolation:** Evaluates `parentId` chains to determine active branch membership. Candidates belonging to alternate regeneration branches are marked `wrong_branch` and excluded.
+- **Forensic Cause Invariant:** Recovery cause is purely informational metadata. Filtered responses, interrupted network responses, user stop halts, and template replacements participate equally in continuity evaluation.
+- **Safe Clamping:** Enforces strict limits (`maxBlocks: 4`, `maxTextChars: 12000`, `maxThinkingChars: 6000`) with surrogate-safe UTF-16 slicing and visible omission disclosures.
+
+For full architectural details, see [CONTEXT_CONTINUITY.md](./CONTEXT_CONTINUITY.md) and [ADR 0027](./ADR/0027-context-continuity-planning.md).

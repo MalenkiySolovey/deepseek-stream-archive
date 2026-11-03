@@ -18,9 +18,11 @@ export interface ReversibleHostMutation {
 export interface InlineRecoveryPresentationOptions {
   showThinkingInline: boolean;
   locale?: 'en' | 'ru';
+  continuityStatus?: string;
   onCopyAnswer?: (text: string) => Promise<boolean> | boolean | void;
   onCopyCode?: (code: string) => Promise<boolean> | boolean | void;
 }
+
 
 export interface InlineRecoveryRenderParams {
   message: PageRecoveryMessageSummary;
