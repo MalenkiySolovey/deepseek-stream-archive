@@ -73,4 +73,5 @@ jobs:
         with:
           name: deepseek-stream-archive-release-candidate
           path: .output/deepseek-stream-archive-*-chrome.zip
+          include-hidden-files: true
           retention-days: 30
