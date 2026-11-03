@@ -39,7 +39,7 @@ Checks that depend strictly on non-deterministic server-side safety triggers fro
 > **Safety & Ethics Policy:** Do **NOT** deliberately submit hazardous, illegal, sexually explicit, hate speech, or policy-violating prompts to trigger server-side filters.
 > - If an authentic filter is naturally encountered during ordinary research or engineering queries, record observations thoroughly.
 > - If no natural filter occurs during the testing session, mark the check as **`NOT OBSERVED LIVE`** or **`N/A`**.
-> - Recording **`NOT OBSERVED LIVE`** or **`N/A`** for conditional checks **does NOT constitute a failure**, because full deterministic verification of content filter replacement and recovery overlay mechanics is mathematically proven by the automated compatibility test suite ([`tests/browser/filter-replacement.spec.ts`](file:///c:/Users/Malenkiy_Solovey/Desktop/Codex/DeepSeek%20StreamArchive/workbench/tests/browser/filter-replacement.spec.ts)).
+> - Recording **`NOT OBSERVED LIVE`** or **`N/A`** for conditional checks **does NOT constitute a failure**, because verification of content filter replacement and recovery overlay mechanics is provided by the automated compatibility test suite ([`tests/browser/filter-replacement.spec.ts`](../tests/browser/filter-replacement.spec.ts)).
 
 ---
 
@@ -70,7 +70,6 @@ When logging DevTools output, console traces, or screenshots into acceptance rep
 
 1. **Build the Production Extension:**
    ```powershell
-   cd workbench
    pnpm run build
    ```
    Verify that `.output/chrome-mv3` contains `manifest.json`, `background.js`, `content-scripts/content.js`, `content-scripts/interceptor.js`, and `sidepanel.html`.
@@ -79,7 +78,7 @@ When logging DevTools output, console traces, or screenshots into acceptance rep
    - Open `chrome://extensions/`
    - Enable **Developer mode** (toggle in upper right).
    - Click **Load unpacked** and select:
-     `C:\Users\Malenkiy_Solovey\Desktop\Codex\DeepSeek StreamArchive\workbench\.output\chrome-mv3`
+     `.output/chrome-mv3`
    - Confirm extension details:
      - Version: `0.1.0`
      - Permissions: strictly `storage`, `sidePanel`
@@ -142,7 +141,7 @@ When logging DevTools output, console traces, or screenshots into acceptance rep
    - `PASS`: Observed naturally and verified all recovery mechanics.
    - `FAIL`: Observed naturally but pre-filter tokens lost or DOM corrupted.
    - `NOT OBSERVED LIVE`: No natural filter occurred during test session.
-   - **Automated Evidence:** Verified by [`tests/browser/filter-replacement.spec.ts`](file:///c:/Users/Malenkiy_Solovey/Desktop/Codex/DeepSeek%20StreamArchive/workbench/tests/browser/filter-replacement.spec.ts).
+   - **Automated Evidence:** Verified by [`tests/browser/filter-replacement.spec.ts`](../tests/browser/filter-replacement.spec.ts).
    - **Release Impact:** Does not fail mandatory live baseline.
 
 ---
@@ -223,7 +222,7 @@ When logging DevTools output, console traces, or screenshots into acceptance rep
 4. **Verdict:**
    - `PASS`: Observed naturally and pre-filter revision preserved.
    - `FAIL`: Observed naturally but server canned text overwrote pre-filter revision.
-   - `N/A — NOT OBSERVED LIVE`: No natural filter occurred during test session. Automated verification provided by [`tests/browser/history-reconciliation.spec.ts`](file:///c:/Users/Malenkiy_Solovey/Desktop/Codex/DeepSeek%20StreamArchive/workbench/tests/browser/history-reconciliation.spec.ts).
+   - `N/A — NOT OBSERVED LIVE`: No natural filter occurred during test session. Automated verification provided by [`tests/browser/history-reconciliation.spec.ts`](../tests/browser/history-reconciliation.spec.ts).
 
 ---
 
@@ -321,7 +320,7 @@ The verdict **`LIVE COMPATIBILITY BASELINE ACCEPTED`** may be granted if and onl
 > [!NOTE]
 > **Why "LIVE COMPATIBILITY BASELINE ACCEPTED" instead of "ACCEPTED FOR PRODUCTION USE"?**
 > Achieving the live compatibility baseline confirms that the extension binary operates correctly and non-destructively against the current production DeepSeek web application.
-> It does **not** signify that the project is packaged or released for general public distribution. Chrome Web Store publishing, packaging pipelines, privacy disclosure filings, and support policies belong to Milestone 2E and subsequent release engineering phases.
+> It does **not** signify that the project is packaged or released for general public distribution. Chrome Web Store publishing, packaging pipelines, privacy disclosure filings, and support policies are managed under the release engineering guidelines.
 
 ---
 

@@ -281,7 +281,7 @@ describe('CanonicalRevisionRecorder', () => {
     expect(snapshot.identityState).toBe('provisional');
   });
 
-  // --- Milestone v0.1.0 Core Correctness Regressions ---
+  // --- Pre-Filter Content Recovery Regressions ---
 
   it('recovers meaningful previous revision when filter arrives after destructive answer_replace', () => {
     const recorder = new CanonicalRevisionRecorder({

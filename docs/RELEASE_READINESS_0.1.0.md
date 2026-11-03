@@ -73,9 +73,9 @@ All automated gates run without regressions on the release candidate branch:
 
 ## 5. Live Acceptance & Smoke Verification Summary
 
-- **Milestone 2D.4-LA (Inline Recovery Gate)**:  
+- **Inline Recovery Verification**:
   Verified on live `chat.deepseek.com` with real filtered response. Closed Shadow DOM banner mounted cleanly without disturbing DeepSeek layout or React fiber nodes. **Status: PASS**.
-- **Milestone 2D.5B-LA (Context Continuity Gate)**:  
+- **Context Continuity Verification**:
   Verified on live `chat.deepseek.com` with multi-turn prompt augmentation. Delivery cleanly prepends structured context, presents collapsible disclosure to user, and succeeds transparently. **Status: PASS**.
 - **Data Lifecycle & Backup Verification**:  
   Verified atomic backup restore (`.streamarchive.jsonl.gz`), human export (Markdown/JSON), and retention cleanup without database corruption. **Status: PASS**.
@@ -85,7 +85,7 @@ All automated gates run without regressions on the release candidate branch:
 ## 6. Known Limitations & Upstream Boundaries
 
 1. **Host Scope**: Extension strictly operates on `https://chat.deepseek.com/*`. It does not support third-party DeepSeek API clients or alternative frontends.
-2. **Browser Support**: Targeted strictly for Chromium 114+ (Chrome, Brave, Edge). Firefox / multi-browser support is deferred to Milestone 2G.
+2. **Browser Support**: Targeted strictly for Chromium 114+ (Chrome, Brave, Edge). Firefox / multi-browser support is deferred to future releases.
 3. **Fail-Open Operating Model**: In the event of internal extension faults or unexpected DeepSeek DOM changes, the extension fails open to avoid breaking user interactions with native DeepSeek.
 
 ---

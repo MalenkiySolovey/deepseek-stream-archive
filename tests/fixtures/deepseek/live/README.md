@@ -24,7 +24,7 @@ The extension and test framework distinguish between the following compatibility
 
 > [!CAUTION]
 > **NEVER COMMIT RAW NETWORK DUMPS CONTAINING SENSITIVE DATA.**
-> All fixtures contributed to this directory must strictly comply with `workbench/docs/PRIVACY_SECURITY.md`.
+> All fixtures contributed to this directory must strictly comply with `docs/PRIVACY_SECURITY.md`.
 
 Before saving or submitting any live fixture:
 1. **Strip Authentication Tokens**:

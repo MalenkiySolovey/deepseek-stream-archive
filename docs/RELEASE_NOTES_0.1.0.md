@@ -63,5 +63,5 @@ When using web-based AI clients, network dropouts, tab crashes, or server-side p
 ## 4. Known Boundaries & Limitations
 
 1. **Host Scope**: Operates strictly on `https://chat.deepseek.com/*`. Third-party DeepSeek API clients or alternative frontends are not supported.
-2. **Browser Requirements**: Google Chrome or Chromium-based browsers version 114+ (supports Manifest V3 Side Panel API). Firefox compatibility is scheduled for Milestone 2G.
+2. **Browser Requirements**: Google Chrome or Chromium-based browsers version 114+ (supports Manifest V3 Side Panel API). Firefox is not supported in version 0.1.0.
 3. **Pre-Transmission Content**: Tokens filtered on the server before being transmitted over the network cannot be recovered.

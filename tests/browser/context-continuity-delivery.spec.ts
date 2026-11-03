@@ -1,6 +1,6 @@
 import { test, expect } from './extension-fixture';
 
-test.describe('E2E Browser Compatibility: Explicit Context Delivery & Prompt Augmentation (Milestone 2D.5B)', () => {
+test.describe('E2E Browser Compatibility: Explicit Context Delivery & Prompt Augmentation', () => {
   test('verifies strict default OFF preserves original outgoing request untouched', async ({
     page,
   }) => {

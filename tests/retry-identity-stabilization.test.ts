@@ -15,7 +15,7 @@ import {
 import { closeExtensionDatabase } from '../src/storage/db';
 import type { DeepSeekParsedHistory } from '../src/adapters/deepseek/history/types';
 
-describe('Milestone 2D.3: Live Retry Identity Stabilization & Branch Integrity', () => {
+describe('Live Retry Identity Stabilization & Branch Integrity', () => {
   let fakeFactory: IDBFactory;
   let storage: IndexedDbStorageRepository;
 

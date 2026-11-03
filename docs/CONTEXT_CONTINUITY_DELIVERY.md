@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-**Milestone 2D.5B** delivers the execution phase of StreamArchive's Context Continuity architecture. While Milestone 2D.5A introduced branch-aware planning, bound clamping, and transparent preview, Milestone 2D.5B allows locally recovered assistant responses (from content filters, network drops, or client aborts) to be explicitly delivered into subsequent DeepSeek model turns without manual copy-pasting.
+StreamArchive's Context Continuity architecture enables locally recovered assistant responses (from content filters, network drops, or client aborts) to be explicitly delivered into subsequent DeepSeek model turns without manual copy-pasting.
 
 ```text
 [Locally Recovered Assistant Response]
@@ -117,7 +117,7 @@ When passive history synchronization ingests user turns containing continuity ma
 
 ---
 
-## 5. Live Acceptance & Native Bubble Presentation (Milestone 2D.5B-LA)
+## 5. Live Verification & Native Bubble Presentation
 
 Context Continuity has been verified against live production DeepSeek (`https://chat.deepseek.com/`) on 2026-11-03:
 - **Live Acceptance Report:** [`docs/LIVE_CONTEXT_CONTINUITY_RESULTS_2026-11-03.md`](./LIVE_CONTEXT_CONTINUITY_RESULTS_2026-11-03.md).

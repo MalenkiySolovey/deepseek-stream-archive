@@ -1173,7 +1173,7 @@ export default defineBackground(() => {
           runtimeRevisionsCommittedCount += validated.checkpoint.revisions.length;
           lastPersistedAt = Date.now();
 
-          // Milestone 2D.5B: Advance continuity receipt lifecycle on canonical checkpoint
+          // Advance continuity receipt lifecycle on canonical checkpoint
           const targetConvId =
             validated.checkpoint.conversation?.id || validated.checkpoint.message.conversationId;
           storageRepo
@@ -1504,7 +1504,7 @@ export default defineBackground(() => {
       return true;
     }
 
-    // 21. Handle Get Conversation Export Model (Milestone 2E.1)
+    // 21. Handle Get Conversation Export Model
     if (message.type === MESSAGE_GET_CONVERSATION_EXPORT) {
       const validated = validateGetConversationExportRequest(message);
       if (!validated) {
@@ -1527,7 +1527,7 @@ export default defineBackground(() => {
       return true;
     }
 
-    // 22. Handle Create Portable Backup Snapshot (Milestone 2E.1)
+    // 22. Handle Create Portable Backup Snapshot
     if (message.type === MESSAGE_CREATE_PORTABLE_BACKUP_SNAPSHOT) {
       const validated = validateCreatePortableBackupSnapshotRequest(message);
       if (!validated) {
@@ -1546,7 +1546,7 @@ export default defineBackground(() => {
       return true;
     }
 
-    // 23. Handle Get Storage Usage Estimate (Milestone 2E.1)
+    // 23. Handle Get Storage Usage Estimate
     if (message.type === MESSAGE_GET_STORAGE_USAGE_ESTIMATE) {
       if (typeof navigator !== 'undefined' && navigator.storage && typeof navigator.storage.estimate === 'function') {
         navigator.storage
@@ -1567,7 +1567,7 @@ export default defineBackground(() => {
       return true;
     }
 
-    // 24. Handle Restore Preview & Preflight (Milestone 2E.2)
+    // 24. Handle Restore Preview & Preflight
     if (message.type === MESSAGE_RESTORE_PREVIEW) {
       const validated = validateRestorePreviewRequest(message);
       if (!validated) {
@@ -1603,7 +1603,7 @@ export default defineBackground(() => {
       return true;
     }
 
-    // 25. Handle Execute Restore (Milestone 2E.2)
+    // 25. Handle Execute Restore
     if (message.type === MESSAGE_EXECUTE_RESTORE) {
       const validated = validateExecuteRestoreRequest(message);
       if (!validated) {
@@ -1651,7 +1651,7 @@ export default defineBackground(() => {
       return true;
     }
 
-    // ── Milestone 2E.3: Retention, Cleanup & Safe Deletion Handlers ──
+    // ── Retention, Cleanup & Safe Deletion Handlers ──
 
     if (message.type === MESSAGE_GET_STORAGE_MAINTENANCE_STATUS) {
       storageRepo
@@ -1755,7 +1755,7 @@ export default defineBackground(() => {
       return true;
     }
 
-    // ── Milestone 2D.5A: Context Continuity Handlers ──
+    // ── Context Continuity Handlers ──
 
     if (message.type === MESSAGE_GET_CONTEXT_CONTINUITY_SETTINGS) {
       getContextContinuitySettings()
@@ -1858,7 +1858,7 @@ export default defineBackground(() => {
       return true;
     }
 
-    // ── Milestone 2D.5B: Continuity Delivery Receipts & Arming ──
+    // ── Continuity Delivery Receipts & Arming ──
 
     if (message.type === MESSAGE_RECORD_CONTINUITY_RECEIPT) {
       const validated = validateRecordContinuityReceiptRequest(message);

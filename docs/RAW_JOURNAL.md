@@ -215,9 +215,9 @@ The Raw Journal acts as the forensic evidence foundation for the Canonical Model
 
 ---
 
-## 7. Raw Evidence Retention & Safe Lifecycle Management (Milestone 2E.3)
+## 7. Raw Evidence Retention & Safe Lifecycle Management
 
-While the Raw Journal serves as an immutable forensic record during generation, unmanaged retention of raw chunks across thousands of streams can lead to storage pressure. Milestone 2E.3 provides governed lifecycle management:
+While the Raw Journal serves as an immutable forensic record during generation, unmanaged retention of raw chunks across thousands of streams can lead to storage pressure. StreamArchive provides governed lifecycle management:
 
 ### 7.1 Retention Modes & Default Permanence
 Configured via `chrome.storage.local` under the `rawRetention` key:

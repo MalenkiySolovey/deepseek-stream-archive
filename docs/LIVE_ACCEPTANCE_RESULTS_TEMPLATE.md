@@ -63,7 +63,7 @@
 ---
 
 ### Scenario 2: Safety Filter Trigger Mid-Stream (Conditional)
-*Note: Do NOT intentionally submit harmful prompts. Rely on natural engineering/research prompts or mark `NOT OBSERVED LIVE` if no filter triggers during natural interaction. Deterministic filter behavior is verified by automated Playwright harness ([`tests/browser/filter-replacement.spec.ts`](file:///c:/Users/Malenkiy_Solovey/Desktop/Codex/DeepSeek%20StreamArchive/workbench/tests/browser/filter-replacement.spec.ts)). Marking `NOT OBSERVED LIVE` does not fail the mandatory baseline.*
+*Note: Do NOT intentionally submit harmful prompts. Rely on natural engineering/research prompts or mark `NOT OBSERVED LIVE` if no filter triggers during natural interaction. Deterministic filter behavior is verified by automated Playwright harness ([`tests/browser/filter-replacement.spec.ts`](../tests/browser/filter-replacement.spec.ts)). Marking `NOT OBSERVED LIVE` does not fail the mandatory baseline.*
 - **Filter Event Observed:** `[ ] Yes / [ ] Not Encountered During Session`
 - **DeepSeek Web UI Behavior:** `[ ] Replaced with canned template / [ ] Aborted / [ ] N/A`
 - **Recovery Overlay Badge:** `[ ] Rendered above message / [ ] Rendered in floating tray / [ ] N/A`
@@ -203,7 +203,7 @@
 > [!NOTE]
 > **Baseline Acceptance vs. Production Release:**
 > Granting `LIVE COMPATIBILITY BASELINE ACCEPTED` confirms compatibility with the live DeepSeek web application under test.
-> General distribution readiness (packaging, store listing, privacy compliance disclosures) belongs to Milestone 2E and subsequent release engineering phases.
+> General distribution readiness (packaging, store listing, privacy compliance disclosures) is managed under the release engineering guidelines.
 
 **Tester Signature:** __________________________________
 **Date:** ____________________

@@ -353,7 +353,7 @@ The automated regression corpus contains **318 tests across 48 test files (100% 
 
 ---
 
-## 16. Tier 14: Non-Destructive In-Page Recovery Overlay (Milestone 2D.2)
+## 16. Tier 14: Non-Destructive In-Page Recovery Overlay
 
 1. **Overlay Portal Isolation (`tests/recovery-overlay-portal.test.ts`):**
    - Verifies closed Shadow DOM attachment and scoped stylesheet containment.
@@ -368,7 +368,7 @@ The automated regression corpus contains **318 tests across 48 test files (100% 
 
 ---
 
-## 17. Tier 15: Trust Boundary, Durable Finalization & Live Readiness Gate (Milestone 2D.2.1)
+## 17. Tier 15: Trust Boundary, Durable Finalization & Live Readiness Gate
 
 1. **Terminal Checkpoint Finalization & Retry Queue (`tests/canonical-checkpoint-integrity.test.ts`):**
    - Verifies terminal checkpoint retry backoff survives coordinator disposal until terminal outcome (`committed` or `failed`).
@@ -398,7 +398,7 @@ The automated regression corpus contains **318 tests across 48 test files (100% 
 
 ---
 
-## 18. Tier 16: Harness Credibility, MV3 Lifecycle & Route Isolation Hardening (Milestone 2D.2.3)
+## 18. Tier 16: Harness Credibility, MV3 Lifecycle & Route Isolation Hardening
 
 The regression corpus stands at **373 Vitest tests across 54 test files (100% green)** plus **8 Playwright Chromium MV3 end-to-end specifications (9 tests)** with strict fail-closed network isolation:
 
@@ -435,7 +435,7 @@ The regression corpus stands at **373 Vitest tests across 54 test files (100% gr
 
 ---
 
-## 19. Tier 17: Live Retry Identity Stabilization & Sibling Branch Integrity (Milestone 2D.3)
+## 19. Tier 17: Live Retry Identity Stabilization & Sibling Branch Integrity
 
 The automated regression corpus stands at **379 Vitest tests across 55 test files (100% green)** plus **9 Playwright Chromium MV3 end-to-end specifications (10 tests)** under strict fail-closed network isolation:
 
@@ -456,7 +456,7 @@ The automated regression corpus stands at **379 Vitest tests across 55 test file
 
 ---
 
-## 20. Tier 18: Human Export & Portable Backup Verification (Milestone 2E.1)
+## 20. Tier 18: Human Export & Portable Backup Verification
 
 The automated regression corpus stands at **405 Vitest tests across 59 test files (100% green)** plus **11 Playwright Chromium MV3 end-to-end specifications (12 tests)** under strict fail-closed network isolation:
 
@@ -498,7 +498,7 @@ The automated regression corpus stands at **405 Vitest tests across 59 test file
 
 ---
 
-## 21. Tier 19: Import, Validation & Atomic Restore Verification (Milestone 2E.2)
+## 21. Tier 19: Import, Validation & Atomic Restore Verification
 
 The automated regression corpus stands at **452 Vitest tests across 66 test files (100% green)** plus **13 Playwright Chromium MV3 end-to-end specifications (14 tests)** under strict fail-closed network isolation:
 
@@ -545,7 +545,7 @@ The automated regression corpus stands at **452 Vitest tests across 66 test file
 
 ---
 
-## 11. Storage Observability, Retention & Safe Deletion Test Suite (Milestone 2E.3)
+## 11. Storage Observability, Retention & Safe Deletion Test Suite
 
 1. **Pure Retention Policy Unit Suite (`tests/retention-policy.test.ts`):**
    - 10 unit tests verifying deterministic evaluation of `evaluateRawStreamRetention` with clock injection:
@@ -588,7 +588,7 @@ The automated regression corpus stands at **452 Vitest tests across 66 test file
 
 ---
 
-## 12. Inline Recovery Presentation Test Suite (Milestone 2D.4)
+## 12. Inline Recovery Presentation Test Suite
 
 1. **Safe Markdown Tokenizer & DOM Fragment Parser (`tests/safe-markdown-parser.test.ts`):**
    - 6 unit tests verifying tokenization and pure DOM node rendering without `innerHTML`:
@@ -625,7 +625,7 @@ The automated regression corpus stands at **452 Vitest tests across 66 test file
 
 ---
 
-## 13. Context Continuity Planning & Transparent Preview Test Suites (Milestone 2D.5A)
+## 13. Context Continuity Planning & Transparent Preview Test Suites
 
 StreamArchive includes 6 dedicated test suites bringing the automated regression corpus to **544 unit tests across 81 files** and **20 Playwright E2E browser tests**:
 
@@ -656,7 +656,7 @@ StreamArchive includes 6 dedicated test suites bringing the automated regression
 
 ---
 
-## 14. Context Continuity Delivery & Prompt Augmentation Test Suites (Milestones 2D.5B & 2D.5B-LA)
+## 14. Context Continuity Delivery & Prompt Augmentation Test Suites
 
 Automated regression coverage expanded to **578 unit/integration tests across 86 files** and **24 Playwright Chromium MV3 E2E tests across 19 specs**:
 
@@ -679,7 +679,7 @@ Automated regression coverage expanded to **578 unit/integration tests across 86
      - Automatic delivery mode continuously augments without manual button clicks.
      - Fail-open invariant preserves original request on session or parent mismatch.
 
-6. **Live Production Acceptance Gate (Milestone 2D.5B-LA):**
+6. **Live Production Compatibility Testing:**
    - Formal verification against live `https://chat.deepseek.com/` documented in [`docs/LIVE_CONTEXT_CONTINUITY_RESULTS_2026-11-03.md`](./LIVE_CONTEXT_CONTINUITY_RESULTS_2026-11-03.md).
 
 > [!IMPORTANT]

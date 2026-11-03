@@ -1112,7 +1112,7 @@ export function validateSetRetentionSettingsRequest(
   };
 }
 
-// ── Milestone 2D.5A: Context Continuity Request Validators ──
+// ── Context Continuity Request Validators ──
 
 export function validateGetContextContinuitySettingsRequest(
   raw: unknown

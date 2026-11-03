@@ -5,7 +5,7 @@ import { mountCleanUserTurn, OWNED_INLINE_HOSTS } from '../src/presentation/inli
 import { InlineRecoveryLedger } from '../src/presentation/inline-recovery/ledger';
 import { formatContinuityPrompt } from '../src/adapters/deepseek/request/marker';
 
-describe('Clean User-Turn Context Continuity Presentation (Milestone 2D.5B-LA, Sections 45-46)', () => {
+describe('Clean User-Turn Context Continuity Presentation', () => {
   let root: HTMLElement;
   let ledger: InlineRecoveryLedger;
 

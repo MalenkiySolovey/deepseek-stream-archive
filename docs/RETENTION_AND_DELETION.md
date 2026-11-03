@@ -1,10 +1,10 @@
-# Retention, Cleanup & Safe Deletion Architecture (Milestone 2E.3)
+# Retention, Cleanup & Safe Deletion Architecture
 
 ## 1. Overview & Core Philosophy
 
 DeepSeek StreamArchive is designed as a local-first, crash-durable forensic recorder and recovery extension. While early milestones established non-destructive stream capture and immutable history reconstruction, unmanaged storage growth presents eviction and quota risks in browser environments.
 
-Milestone 2E.3 introduces controlled lifecycle management for local archive data without compromising forensic or canonical guarantees:
+StreamArchive introduces controlled lifecycle management for local archive data without compromising forensic or canonical guarantees:
 
 ```text
 Storage Observability & Persistence Truth

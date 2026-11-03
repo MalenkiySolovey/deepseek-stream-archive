@@ -735,7 +735,7 @@ export default defineContentScript({
         await processSyntheticPayload(payload);
       }
 
-      // 6. Handle Context Continuity Dispatched (Milestone 2D.5B)
+      // 6. Handle Context Continuity Dispatched
       if (envelope.type === 'continuity.dispatched') {
         const payload = validateContinuityDispatchedPayload(envelope.payload);
         if (payload) {
@@ -762,7 +762,7 @@ export default defineContentScript({
         }
       }
 
-      // 7. Handle Context Continuity Skipped (Milestone 2D.5B)
+      // 7. Handle Context Continuity Skipped
       if (envelope.type === 'continuity.skipped') {
         const payload = validateContinuitySkippedPayload(envelope.payload);
         if (payload) {

@@ -66,7 +66,7 @@
 
   let t = $derived(translations[locale]);
 
-  // Milestone 2E.1: Backup State in Settings
+  // Backup State in Settings
   type BackupProgressState = 'idle' | 'preparing' | 'compressing' | 'saving' | 'complete' | 'error';
   let backupState = $state<BackupProgressState>('idle');
   let backupError = $state<string | null>(null);
@@ -80,7 +80,7 @@
     compressedBytes: number;
   } | null>(null);
 
-  // Milestone 2E.2: Restore State in Settings
+  // Restore State in Settings
   type RestoreProgressState = 'idle' | 'reading' | 'validating' | 'ready' | 'restoring' | 'verifying' | 'complete' | 'error';
   let restoreState = $state<RestoreProgressState>('idle');
   let restoreMode = $state<RestoreMode>('replace');
@@ -92,7 +92,7 @@
   let selectedBackupFileName = $state<string | null>(null);
   let cachedBackupBytes = $state<Uint8Array | null>(null);
 
-  // Milestone 2E.3: Storage & Retention State
+  // Storage & Retention State
   let maintenanceStatus = $state<StorageMaintenanceStatus | null>(null);
   let maintenanceLoading = $state<boolean>(false);
   let maintenanceError = $state<string | null>(null);
@@ -114,10 +114,10 @@
   let clearArchiveLoading = $state<boolean>(false);
   let clearArchiveFeedback = $state<string | null>(null);
 
-  // Milestone 2D.4: Recovery Presentation State in Settings
+  // Recovery Presentation State in Settings
   let recoverySettings = $state<RecoveryPresentationSettings>({ ...DEFAULT_RECOVERY_PRESENTATION_SETTINGS });
 
-  // Milestone 2D.5A: Context Continuity Settings State
+  // Context Continuity Settings State
   let continuitySettings = $state<ContextContinuitySettings>({ ...DEFAULT_CONTEXT_CONTINUITY_SETTINGS });
 
   onMount(() => {
@@ -406,7 +406,7 @@
     }
   }
 
-  // Milestone 2E.2: Restore Functions
+  // Restore Functions
 
   async function handleFileSelected(e: Event) {
     const target = e.target as HTMLInputElement;
@@ -628,7 +628,7 @@
           </label>
         </div>
 
-        <!-- Milestone 2D.4: Recovery Presentation Settings -->
+        <!-- Recovery Presentation Settings -->
         <div class="settings-card recovery-presentation-card">
           <h3 class="card-subtitle">🛡️ {t.recoveryPresentationTitle}</h3>
           <p class="about-desc">{t.recoveryPresentationDesc}</p>
@@ -681,7 +681,7 @@
           {/if}
         </div>
 
-        <!-- Milestone 2D.5A: Context Continuity Settings -->
+        <!-- Context Continuity Settings -->
         <div class="settings-card context-continuity-card">
           <div class="card-header-badge">
             <h3 class="card-subtitle">🔄 {t.contextContinuityTitle}</h3>
@@ -754,7 +754,7 @@
         </div>
 
 
-        <!-- Milestone 2E.1: Data Export & Portable Backup -->
+        <!-- Data Export & Portable Backup -->
         <div class="settings-card backup-card">
           <h3 class="card-subtitle">📦 {t.backupSectionTitle}</h3>
           <p class="about-desc">{t.backupCardDesc}</p>
@@ -834,7 +834,7 @@
           {/if}
         </div>
 
-        <!-- Milestone 2E.2: Restore Archive Card -->
+        <!-- Restore Archive Card -->
         <div class="settings-card" id="restore-settings-card">
           <h3 class="card-subtitle">{t.restoreCardTitle}</h3>
           <p class="about-desc">{t.restoreCardDesc}</p>
@@ -1058,7 +1058,7 @@
           {/if}
         </div>
 
-        <!-- Milestone 2E.3: Storage & Retention Management -->
+        <!-- Storage & Retention Management -->
         <div class="settings-card" id="storage-management-card">
           <h3 class="card-subtitle">💾 {t.storageManagementTitle}</h3>
           <p class="about-desc">{t.storageManagementDesc}</p>
@@ -1268,7 +1268,7 @@
       </div>
     {/if}
 
-    <!-- Milestone 2E.3: Maintenance Modals -->
+    <!-- Maintenance Modals -->
     {#if showCleanupModal}
       <div
         class="modal-backdrop"
@@ -1754,7 +1754,7 @@
     font-weight: bold;
   }
 
-  /* Milestone 2E.1: Backup Styles */
+  /* Backup Styles */
   .storage-estimate-badge {
     background: #1e293b;
     border: 1px solid #334155;
@@ -1880,7 +1880,7 @@
     color: #6ee7b7;
   }
 
-  /* Milestone 2E.2: Restore Styles */
+  /* Restore Styles */
   .backup-btn.secondary {
     background: #334155;
     color: #f8fafc;
@@ -2104,7 +2104,7 @@
     margin: 0 0 0.5rem 0;
   }
 
-  /* Milestone 2D.5A: Context Continuity Styles */
+  /* Context Continuity Styles */
   .card-header-badge {
     display: flex;
     align-items: center;
@@ -2145,7 +2145,7 @@
     letter-spacing: 0.05em;
   }
 
-  /* Milestone 2E.3: Storage & Retention Management Styles */
+  /* Storage & Retention Management Styles */
 
   .storage-stats-container {
     background: #0f172a;

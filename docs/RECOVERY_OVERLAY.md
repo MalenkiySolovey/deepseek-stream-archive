@@ -61,9 +61,9 @@ The **Non-Destructive In-Page Recovery Overlay** allows users to view, copy, and
 
 ---
 
-## 7. Dual Presentation Modes: Overlay vs. Inline (Milestone 2D.4)
+## 7. Dual Presentation Modes: Overlay vs. Inline
 
-Starting in Milestone 2D.4, users can choose between two presentation modes in Side Panel Settings (`chrome.storage.local` key `streamarchive_recovery_presentation`):
+Users can choose between two presentation modes in Side Panel Settings (`chrome.storage.local` key `streamarchive_recovery_presentation`):
 
 1. **Overlay Mode (Default):**
    - Strictly conforms to the zero host-DOM mutation invariant above.

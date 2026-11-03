@@ -25,11 +25,10 @@ Before creating the listing, ensure your Google account fulfills Google's publis
 ## 2. Uploading the Release Package
 
 1. In the [Developer Dashboard](https://chrome.google.com/webstore/devconsole), click **Add new item** (top-right).
-2. Drag and drop or browse to select the verified release candidate package:
+2. Drag and drop or browse to select the verified release package:
    ```text
-   C:\Users\Malenkiy_Solovey\Desktop\Codex\DeepSeek StreamArchive\workbench\.output\deepseek-stream-archive-0.1.0-chrome.zip
+   .output/deepseek-stream-archive-0.1.0-chrome.zip
    ```
-   *(Or the identical copy in `release-test\chrome-extension\`)*.
 3. Verify the upload completes with zero package errors.
 4. Confirm the dashboard displays:
    - **Extension Name**: `DeepSeek StreamArchive`
@@ -57,12 +56,12 @@ Reference document: [`docs/CHROME_WEB_STORE_LISTING.md`](./CHROME_WEB_STORE_LIST
 - **Language**: Select **English** (Default). Add **Russian** localization in the *Add translation* section using the Russian copy from Section 2 of `docs/CHROME_WEB_STORE_LISTING.md`.
 
 ### 3.2 Visual Store Assets
-Reference document: [`docs/STORE_ASSET_STAGING_0.1.0.md`](./STORE_ASSET_STAGING_0.1.0.md)
+Reference document: [`docs/STORE_ASSETS.md`](./STORE_ASSETS.md)
 
 - **Store Icon**:
-  - Upload `workbench/public/icons/icon-128.png` (128×128 PNG).
-- **Screenshots (1280×800 PNG)**:
-  Upload the 5 staged screenshots located in `release-test\screenshots\`:
+  - Upload `public/icons/icon-128.png` (128×128 PNG).
+- **Screenshots**:
+  Upload the screenshots located in `docs/assets/screenshots/`:
   1. `01-archive-browser-1280x800.png` — *Archive Browser & Local Conversation Tree*
   2. `02-inline-recovery-1280x800.png` — *In-Page Inline Recovered Response*
   3. `03-revision-history-1280x800.png` — *Revision Timeline & Multi-Version Preservation*

@@ -98,7 +98,7 @@ This document codifies the non-negotiable architectural invariants and developme
     - Copying code without understanding it.
     - Ignoring license/NOTICE attribution requirements.
 
-    Record every non-trivial adaptation in `workbench/THIRD_PARTY_NOTICES.md`.
+    Record every non-trivial adaptation in `THIRD_PARTY_NOTICES.md`.
 
 26. **No premature multi-platform abstraction:**
     Do not implement fake ChatGPT or Claude adapters in v0.x. Keep interfaces clean, but focus implementation entirely on DeepSeek.

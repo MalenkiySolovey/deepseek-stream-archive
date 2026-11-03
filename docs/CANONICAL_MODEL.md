@@ -198,7 +198,7 @@ When network drops occur during generation, DeepSeek's frontend automatically tr
 
 ---
 
-## 7. Export & Backup Projections (Milestone 2E.1)
+## 7. Export & Backup Projections
 
 The canonical data model provides deterministic, read-only projections for external consumption and backup:
 
@@ -251,7 +251,7 @@ The canonical data model provides deterministic, read-only projections for exter
 
 ---
 
-## 8. Retention Independence & Safe Cascade Deletion (Milestone 2E.3)
+## 8. Retention Independence & Safe Cascade Deletion
 
 ### 8.1 Independence from Raw Evidence Pruning
 Canonical domain entities (`conversations`, `messages`, `revisions`, `recovery_events`) are strictly decoupled from raw transport streams (`raw_streams`, `raw_stream_batches`):
@@ -269,13 +269,13 @@ For full architectural details, see [RETENTION_AND_DELETION.md](./RETENTION_AND_
 
 ---
 
-## 9. Context Continuity Derived Model (Milestone 2D.5A)
+## 9. Context Continuity Derived Model
 
 The canonical message tree provides pure topological lineage resolution for Context Continuity:
 
 ### 9.1 Derived Non-Durable Projection
 - Plans (`ContextContinuityPlan`) are pure, non-durable in-memory projections derived on-demand from `messages`, `revisions`, and `recovery_events`.
-- **Zero Schema Migrations:** Strictly preserves `DB_VERSION = 8` without creating new stores or persistent context injection records.
+- **Excluded from Backup:** Context Continuity operational receipts are kept strictly operational in IndexedDB and excluded from Portable Backup v1.
 
 ### 9.2 Structural Invariants
 - **Active Branch Isolation:** Evaluates `parentId` chains to determine active branch membership. Candidates belonging to alternate regeneration branches are marked `wrong_branch` and excluded.

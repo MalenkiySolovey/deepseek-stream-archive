@@ -70,7 +70,7 @@
   // Branch index per parent grouping
   let branchSelections = $state<Record<string, number>>({});
 
-  // Milestone 2E.1: Export Popover/Dialog State
+  // Export Popover/Dialog State
   let showExportModal = $state(false);
   let exportFormat = $state<'markdown' | 'json'>('markdown');
   let exportBranches = $state<'all' | 'active'>('all');
@@ -153,7 +153,7 @@
     }
   }
 
-  // Milestone 2E.3: Deletion State & Handlers
+  // Deletion State & Handlers
   let showDeleteModal = $state(false);
   let deletePlan = $state<ConversationDeletionPlan | null>(null);
   let isDeleting = $state(false);
@@ -237,7 +237,7 @@
     await performExport();
   }
 
-  // Milestone 2D.5A & 2D.5B: Context Continuity Preview & Delivery State
+  // Context Continuity Preview & Delivery State
   let showContinuityModal = $state(false);
   let continuityPlan = $state<ContextContinuityPlan | null>(null);
   let isBuildingContinuityPlan = $state(false);

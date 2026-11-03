@@ -53,13 +53,13 @@ export const MESSAGE_EXECUTE_RAW_RETENTION = 'STREAMARCHIVE_EXECUTE_RAW_RETENTIO
 export const MESSAGE_CLEAR_RAW_EVIDENCE = 'STREAMARCHIVE_CLEAR_RAW_EVIDENCE' as const;
 export const MESSAGE_CLEAR_ENTIRE_ARCHIVE = 'STREAMARCHIVE_CLEAR_ENTIRE_ARCHIVE' as const;
 
-// ── Milestone 2D.5A: Context Continuity Messages ──
+// ── Context Continuity Messages ──
 export const MESSAGE_GET_CONTEXT_CONTINUITY_SETTINGS = 'STREAMARCHIVE_GET_CONTEXT_CONTINUITY_SETTINGS' as const;
 export const MESSAGE_SET_CONTEXT_CONTINUITY_SETTINGS = 'STREAMARCHIVE_SET_CONTEXT_CONTINUITY_SETTINGS' as const;
 export const MESSAGE_BUILD_CONTEXT_CONTINUITY_PLAN = 'STREAMARCHIVE_BUILD_CONTEXT_CONTINUITY_PLAN' as const;
 export const MESSAGE_GET_CONTEXT_CONTINUITY_STATUS = 'STREAMARCHIVE_GET_CONTEXT_CONTINUITY_STATUS' as const;
 
-// ── Milestone 2D.5B: Context Continuity Delivery Messages ──
+// ── Context Continuity Delivery Messages ──
 export const MESSAGE_RECORD_CONTINUITY_RECEIPT = 'STREAMARCHIVE_RECORD_CONTINUITY_RECEIPT' as const;
 export const MESSAGE_GET_CONTINUITY_RECEIPTS = 'STREAMARCHIVE_GET_CONTINUITY_RECEIPTS' as const;
 export const MESSAGE_ARM_CONTINUITY_DELIVERY = 'STREAMARCHIVE_ARM_CONTINUITY_DELIVERY' as const;
@@ -428,7 +428,7 @@ export interface GetPageRecoveryContentResponse {
   error?: string;
 }
 
-// ── Milestone 2E.1: Export & Backup Messages ──
+// ── Export & Backup Messages ──
 
 export interface GetConversationExportRequest {
   type: typeof MESSAGE_GET_CONVERSATION_EXPORT;
@@ -489,7 +489,7 @@ export interface ExecuteRestoreResponse {
   error?: string;
 }
 
-// Milestone 2E.3: Retention, Cleanup & Safe Deletion Messages
+// ── Retention, Cleanup & Safe Deletion Messages ──
 
 export interface GetStorageMaintenanceStatusRequest {
   type: typeof MESSAGE_GET_STORAGE_MAINTENANCE_STATUS;
@@ -596,7 +596,7 @@ export interface ClearEntireArchiveResponse {
   error?: string;
 }
 
-// ── Milestone 2D.5A: Context Continuity Request & Response Interfaces ──
+// ── Context Continuity Request & Response Interfaces ──
 
 export interface GetContextContinuitySettingsRequest {
   type: typeof MESSAGE_GET_CONTEXT_CONTINUITY_SETTINGS;

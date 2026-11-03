@@ -23,11 +23,11 @@ MAJOR.MINOR.PATCH[.BUILD]
 
 ## 2. Release Progression Policy
 
-| Version Tier | Purpose & Milestone Scope | Release Stage |
+| Version Tier | Purpose & Scope | Release Stage |
 |:---:|---|:---:|
-| **`0.1.0`** | **Initial Preview & Chrome Release Candidate (Milestone 2F)**.<br>Full functional parity: stream capture, recovery, inline presentation, export, backup/restore, retention, and Context Continuity. | Current RC |
-| **`0.1.x`** | Post-acceptance patches, store review adjustments, and emergency bug fixes. | Hotfix / Patch |
-| **`0.2.0`** | Multi-browser compatibility and Firefox Add-on support (Milestone 2G). | Feature Expansion |
+| **`0.1.0`** | **Initial Public Release for Chrome / Chromium**.<br>Full functional parity: stream capture, recovery, inline presentation, export, backup/restore, retention, and Context Continuity. | Public Release |
+| **`0.1.x`** | Post-release patches, store review adjustments, and bug fixes. | Hotfix / Patch |
+| **`0.2.0`** | Multi-browser compatibility and Firefox Add-on support. | Feature Expansion |
 | **`1.0.0`** | General Availability (GA) following production store deployment and multi-browser stability. | Public GA |
 
 *Policy Rule:* The version must **not** be arbitrarily bumped to `1.0.0` until the extension is proven in live public store distribution and multi-browser environments.

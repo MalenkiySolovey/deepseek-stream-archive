@@ -55,7 +55,7 @@ test.describe('E2E Browser Compatibility: Content Filter Replacement & In-Page R
     await expect(container).toBeAttached();
   });
 
-  test('preserves pre-filter content when destructive clearing patch arrives before CONTENT_FILTER status (Milestone v0.1.0 core correctness)', async ({
+  test('preserves pre-filter content when destructive clearing patch arrives before CONTENT_FILTER status', async ({
     page,
     router,
     readIndexedDb,

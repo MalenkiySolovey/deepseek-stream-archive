@@ -82,7 +82,7 @@ window.fetch = function(url, options) {
 };
 ```
 - **Consequence:** Mutating outgoing requests behind the user's back alters server contracts, introduces unpredictable prompt injection vulnerabilities, breaks model instruction hierarchy, and violates user consent.
-- **StreamArchive Solution (Milestone 2D.5A, ADR 0027):** Outgoing network requests remain 100% untouched byte-for-byte. StreamArchive constructs a pure, derived, transparent continuity plan in memory, displaying payload metrics, exclusion reasons, and bounds in the Side Panel, allowing the user to review and manually copy context with complete sovereignty.
+- **StreamArchive Solution (Context Continuity, ADR 0027):** Outgoing network requests remain 100% untouched byte-for-byte. StreamArchive constructs a pure, derived, transparent continuity plan in memory, displaying payload metrics, exclusion reasons, and bounds in the Side Panel, allowing the user to review and manually copy context with complete sovereignty.
 
 ---
 

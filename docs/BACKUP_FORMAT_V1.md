@@ -7,7 +7,7 @@
 > **MIME Content-Type:** `application/gzip`  
 > **Encoding:** UTF-8  
 > **Compression:** gzip (RFC 1952)  
-> **Target Release:** Milestone 2E.1  
+> **Target Release:** v0.1.0
 
 ---
 
@@ -161,7 +161,7 @@ The final line of the file must be a JSON object with `"kind": "footer"`.
 
 ---
 
-## 8. Conforming Import & Validation Specification (Milestone 2E.2)
+## 8. Conforming Import & Validation Specification
 
 A conforming reader/validator (implemented in `src/backup/reader.ts` and `src/restore/integrity.ts`) MUST:
 1. Enforce streaming decompression bounds (`MAX_IMPORT_COMPRESSED_BYTES = 50 MiB`, `MAX_IMPORT_DECOMPRESSED_BYTES = 250 MiB`, `MAX_IMPORT_RECORDS = 500,000`, `MAX_IMPORT_LINE_CHARS = 10 MiB`) to prevent memory exhaustion and gzip bombs.
@@ -175,7 +175,7 @@ A conforming reader/validator (implemented in `src/backup/reader.ts` and `src/re
 9. Verify footer counts match actual parsed records exactly.
 10. Reject any extra lines following the footer.
 
-For full restoration semantics and execution details, see [docs/IMPORT_AND_RESTORE.md](file:///c:/Users/Malenkiy_Solovey/Desktop/Codex/DeepSeek%20StreamArchive/workbench/docs/IMPORT_AND_RESTORE.md).
+For full restoration semantics and execution details, see [docs/IMPORT_AND_RESTORE.md](./IMPORT_AND_RESTORE.md).
 
 ---
 

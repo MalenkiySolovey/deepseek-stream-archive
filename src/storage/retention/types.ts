@@ -1,5 +1,5 @@
 /**
- * Types and interfaces for Milestone 2E.3: Retention, Cleanup & Safe Deletion.
+ * Types and interfaces for Retention, Cleanup & Safe Deletion.
  */
 
 import type { PortableBackupStoreCounts } from '../../backup/format';

@@ -1,4 +1,4 @@
-# Context Continuity & Branch-Aware Planning (Milestone 2D.5A)
+# Context Continuity & Branch-Aware Planning
 
 ## 1. Overview
 
@@ -11,7 +11,7 @@ While DeepSeek's server-side history retains only the censored boilerplate or tr
 ## 2. Core Architectural Guarantees
 
 ### Absolute Passive Transport Invariant
-- **ZERO outgoing request modifications:** In Milestone 2D.5A, StreamArchive modifies **no** outgoing fetch/XHR request payloads, adds **no** custom HTTP headers, and tampers with **no** network transport buffers.
+- **ZERO unsolicited outgoing request modifications:** By default, StreamArchive modifies **no** outgoing fetch/XHR request payloads, adds **no** custom HTTP headers, and tampers with **no** network transport buffers unless Context Continuity is explicitly armed by the user.
 - **ZERO composer / DOM typing:** StreamArchive does **not** inject text into DeepSeek's textarea or manipulate React internal fibers (`__reactFiber` / `__reactProps`).
 - **Passive capture integrity:** Raw SSE stream capture and canonical event processing remain 100% passive and forensic.
 
@@ -19,9 +19,9 @@ While DeepSeek's server-side history retains only the censored boilerplate or tr
 - **Invariant:** Recovery cause (`content_filter`, `template_response`, `network_interruption`, `user_stop`, `client_abort`, `other`, `unknown`) is purely informational forensic metadata, **NOT** an eligibility gate.
 - Filtered responses, interrupted network responses, manually stopped responses, and client-aborted responses participate under the **identical structural eligibility rules**.
 
-### Derived Non-Durable Plans (`DB_VERSION = 8`)
+### Derived Non-Durable Plans
 - Plans are derived purely on-demand in memory.
-- **Zero IndexedDB migrations:** Schema remains strictly at `DB_VERSION = 8`.
+- **Excluded from Backup:** Operational receipts and dispatch states are strictly operational in IndexedDB and excluded from Portable Backup.
 - **Zero synthetic database entries:** No mock records or speculative events are written to IndexedDB.
 - A single read-only transaction queries `[messages, revisions, recovery_events]` to prevent N+1 transactional round-trips.
 
@@ -119,9 +119,9 @@ Partial response captured before socket closure.
 
 ---
 
-## 8. Milestone Roadmap
+## 8. Capability Summary
 
-| Milestone | Scope | Status |
+| Capability | Scope | Status |
 | :--- | :--- | :--- |
-| **Milestone 2D.5A** | Branch-aware planning, pure derived state, zero network modification, Side Panel transparent preview & copy. | **Complete** |
-| **Milestone 2D.5B** | Explicit context delivery / request augmentation, user-confirmed automatic prompt bridging. | *Future* |
+| **Context Continuity Planning** | Branch-aware planning, pure derived state, zero network modification, Side Panel transparent preview & copy. | **Complete** |
+| **Explicit Context Delivery** | Explicit user-controlled prompt augmentation, `manual_next` single-use arming, and clean user-turn presentation. | **Complete** |

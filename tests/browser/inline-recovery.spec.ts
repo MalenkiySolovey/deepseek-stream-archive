@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-test.describe('E2E Browser Compatibility: Inline Recovered Responses in DeepSeek Chat (Milestone 2D.4)', () => {
+test.describe('E2E Browser Compatibility: Inline Recovered Responses in DeepSeek Chat', () => {
   test('renders inline recovery inside DeepSeek message when inline mode is enabled', async ({
     page,
     router,

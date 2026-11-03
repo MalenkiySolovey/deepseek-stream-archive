@@ -5,7 +5,7 @@ import {
 } from '../src/storage/retention/policy';
 import type { RawStreamRecord } from '../src/storage/raw-journal/types';
 
-describe('Raw Evidence Retention Policy Engine (Milestone 2E.3)', () => {
+describe('Raw Evidence Retention Policy Engine', () => {
   const baseStream: RawStreamRecord = {
     id: 'prod-1:stream-1',
     producerSessionId: 'prod-1',

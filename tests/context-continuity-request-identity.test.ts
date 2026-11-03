@@ -5,7 +5,7 @@ import { saveContextContinuitySettings } from '../src/context-continuity/setting
 import { buildContextContinuityPlan } from '../src/context-continuity/planner';
 import type { Message, ResponseRevision, RecoveryEvent } from '../src/core/models';
 
-describe('Passive Transport Byte-Identity Invariant (Milestone 2D.5A)', () => {
+describe('Passive Transport Byte-Identity Invariant', () => {
   let uninstallFetch: () => void = () => {};
   let uninstallXhr: () => void = () => {};
   let originalGlobalWindow: any;

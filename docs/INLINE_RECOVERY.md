@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-Milestone 2D.4 introduces **Inline Recovered Responses** in DeepSeek Chat as an optional user-facing mode (`RecoveryDisplayMode: 'overlay' | 'inline'`).
+StreamArchive provides **Inline Recovered Responses** in DeepSeek Chat as an optional user-facing mode (`RecoveryDisplayMode: 'overlay' | 'inline'`).
 
 When enabled in Side Panel Settings, locally preserved answers (rescued prior to DeepSeek content filtering or network interruptions) are rendered directly inside the assistant message block in the chat interface, eliminating the need to read recovered text in floating modals.
 
@@ -37,7 +37,7 @@ When enabled in Side Panel Settings, locally preserved answers (rescued prior to
 
 ## 2. Native Action Toolbar Compatibility Matrix
 
-A critical design requirement of Milestone 2D.4 is **Zero Host Toolbar Tampering**. DeepSeek's native action toolbar is never cloned, simulated, or covered.
+A critical design requirement is **Zero Host Toolbar Tampering**. DeepSeek's native action toolbar is never cloned, simulated, or covered.
 
 | DeepSeek Action | Location | Behavior in Inline Mode | Compatibility Guarantee |
 |:---|:---|:---|:---|
@@ -99,13 +99,13 @@ Level 4: Floating Recovery Tray (Universal Fallback)
 
 ## 6. Live Compatibility Verification
 
-The inline recovery architecture was verified against live production DeepSeek chat during the Milestone 2D.4-LA acceptance gate:
+The inline recovery architecture was verified against live production DeepSeek chat:
 - Real-browser live acceptance report: [`docs/LIVE_INLINE_RECOVERY_RESULTS_2026-11-03.md`](./LIVE_INLINE_RECOVERY_RESULTS_2026-11-03.md).
 - Status: **`PASS`** across Level 1 DOM insertion, React virtualization scrolling, client-side SPA route isolation, native toolbar non-tampering, and native `Regenerate` branching.
 
 ---
 
-## 7. Interaction with Context Continuity (Milestone 2D.5A)
+## 7. Interaction with Context Continuity
 
 When Context Continuity is enabled in Settings:
 - An optional subtle status indicator (`.streamarchive-inline-continuity-pill`) can be displayed inside the inline recovery host header to inform the user that the recovered response is active in the continuity plan.

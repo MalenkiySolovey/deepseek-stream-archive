@@ -1,6 +1,6 @@
 import { test, expect } from './extension-fixture';
 
-test.describe('E2E Browser Compatibility: Context Continuity Planner & Transparent Preview (Milestone 2D.5A)', () => {
+test.describe('E2E Browser Compatibility: Context Continuity Planner & Transparent Preview', () => {
   test('verifies default OFF setting, enables continuity, and renders branch-aware preview modal', async ({
     loadSidepanel,
   }) => {

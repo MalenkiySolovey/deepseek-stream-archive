@@ -16,7 +16,7 @@ import {
 import type { Conversation, Message, ResponseRevision, RecoveryEvent } from '../src/core/models';
 import type { RawStreamRecord, RawStreamBatch } from '../src/storage/raw-journal/types';
 
-describe('Safe Conversation Cascade Deletion (Milestone 2E.3)', () => {
+describe('Safe Conversation Cascade Deletion', () => {
   let db: IDBDatabase;
 
   beforeEach(async () => {

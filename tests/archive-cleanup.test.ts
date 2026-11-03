@@ -21,7 +21,7 @@ import {
 import type { Conversation, Message, ResponseRevision, RecoveryEvent } from '../src/core/models';
 import type { RawStreamRecord, RawStreamBatch } from '../src/storage/raw-journal/types';
 
-describe('Archive Maintenance & Safe Cleanup Engine (Milestone 2E.3)', () => {
+describe('Archive Maintenance & Safe Cleanup Engine', () => {
   let db: IDBDatabase;
   const NOW = 10000000000; // Reference clock
   const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;

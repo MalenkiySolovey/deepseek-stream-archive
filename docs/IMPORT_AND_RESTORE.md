@@ -1,7 +1,7 @@
 # Import & Atomic Restore Architecture Guide
 
 > **DeepSeek StreamArchive**  
-> Status: Milestone 2E.2 Guide  
+> Status: Architecture Guide
 > Scope: Safe Import, Validation & Atomic Restore of Portable Backup v1  
 
 ---

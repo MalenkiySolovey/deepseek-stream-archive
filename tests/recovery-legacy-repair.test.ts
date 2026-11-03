@@ -11,7 +11,7 @@ import { IndexedDbStorageRepository } from '../src/storage/repositories/storage-
 import { evaluateContinuityEligibility } from '../src/context-continuity/eligibility';
 import { buildConversationMarkdown, buildConversationJson } from '../src/export';
 
-describe('Pre-Filter Recovery Correctness & Read-Time Legacy Repair (Milestone v0.1.0)', () => {
+describe('Pre-Filter Recovery Correctness & Read-Time Legacy Repair', () => {
   let fakeFactory: IDBFactory;
   let storage: IndexedDbStorageRepository;
 

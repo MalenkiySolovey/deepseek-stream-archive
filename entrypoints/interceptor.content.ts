@@ -192,7 +192,7 @@ export default defineContentScript({
       }
     };
 
-    // ── Milestone 2D.5B: Context Continuity Delivery Envelope (MAIN world) ──
+    // ── Context Continuity Delivery Envelope (MAIN world) ──
     let activeEnvelope: ContextDeliveryEnvelope | null = null;
 
     window.addEventListener(STREAMARCHIVE_CONTINUITY_ARM_EVENT, (event: any) => {

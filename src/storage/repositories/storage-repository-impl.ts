@@ -1734,7 +1734,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
     });
   }
 
-  // ── Milestone 2E.1: Export & Portable Backup Methods ──
+  // ── Export & Portable Backup Methods ──
 
   async getConversationExportModel(conversationId: string): Promise<ConversationExportModel | null> {
     const conversation = await this.getConversation(conversationId);
@@ -1765,7 +1765,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
     return createSnapshotInternal(db, options);
   }
 
-  // ── Milestone 2E.2: Restore & Safe Merge Methods ──
+  // ── Restore & Safe Merge Methods ──
 
   async validateAndPreflightRestore(
     input: ArrayBuffer | Uint8Array | Blob | ReadableStream<Uint8Array>,
@@ -1790,7 +1790,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
     return getCurrentStoreCountsInternal(db);
   }
 
-  // ── Milestone 2E.3: Retention, Cleanup & Safe Deletion Methods ──
+  // ── Retention, Cleanup & Safe Deletion Methods ──
 
   async buildConversationDeletionPlan(conversationId: string, activeStreamKeys: Set<string>): Promise<ConversationDeletionPlan> {
     const db = await this.getDb();
@@ -1858,7 +1858,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
     };
   }
 
-  // ── Milestone 2D.5A & 2D.5B: Context Continuity Planner & Delivery Receipts ──
+  // ── Context Continuity Planner & Delivery Receipts ──
 
   async buildContextContinuityPlan(
     conversationId: string,

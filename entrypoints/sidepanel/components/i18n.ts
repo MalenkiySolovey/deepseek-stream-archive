@@ -66,7 +66,7 @@ export const translations = {
     aboutDesc: 'Local-first, crash-durable forensic recorder and recovery extension for DeepSeek web streams.',
     storageNotice: 'All data is stored locally in your browser IndexedDB with zero external tracking.',
 
-    // Milestone 2D.4: Recovery Presentation
+    // Recovery Presentation
     recoveryPresentationTitle: 'Recovery Presentation',
     recoveryPresentationDesc: 'Choose where recovered DeepSeek responses appear when viewing chats.',
     recoveryDisplayMode: 'Recovery Display Mode',
@@ -77,7 +77,7 @@ export const translations = {
     recoveryShowThinkingInline: 'Show DeepThink reasoning inline',
     recoveryShowThinkingInlineDesc: 'Displays the recovered reasoning chain in a collapsible box above the answer.',
 
-    // Milestone 2D.5A & 2D.5B: Context Continuity
+    // Context Continuity
     contextContinuityTitle: 'Context Continuity',
     contextContinuityExperimental: 'Experimental',
     contextContinuityDesc: 'Restores locally preserved responses into subsequent queries when context is missing from DeepSeek.',
@@ -120,7 +120,7 @@ export const translations = {
     continuityNoEligible: 'No eligible recovered responses found on the active branch.',
 
 
-    // Milestone 2E.1: Export & Backup
+    // Export & Backup
     exportConversation: 'Export Conversation',
     exportBtn: 'Export',
     exportFormat: 'Format',
@@ -158,7 +158,7 @@ export const translations = {
     backupSummaryBatches: 'Raw Batches',
     backupSummarySize: 'Compressed Size',
 
-    // Milestone 2E.2: Restore & Safe Merge
+    // Restore & Safe Merge
     restoreSectionTitle: 'Restore Archive from Backup',
     restoreCardTitle: 'Restore & Safe Merge',
     restoreCardDesc: 'Safely restore or merge your conversations and raw journal from a .streamarchive.jsonl.gz backup file.',
@@ -192,7 +192,7 @@ export const translations = {
     restoreSummaryBackup: 'In Backup',
     restoreReloadTabsNotice: 'Restoration succeeded! For an exact view, close or reload open DeepSeek chat tabs.',
 
-    // Milestone 2E.3: Retention, Cleanup & Safe Deletion
+    // Retention, Cleanup & Safe Deletion
     deleteConversation: 'Delete from Archive',
     deleteBtn: 'Delete',
     deleteModalTitle: 'Delete Conversation from Archive',
@@ -326,7 +326,7 @@ export const translations = {
     aboutDesc: 'Локальный, устойчивый к сбоям журнал и инструмент восстановления стримов DeepSeek.',
     storageNotice: 'Все данные хранятся исключительно локально в браузере (IndexedDB) без отправки на сторонние серверы.',
 
-    // Milestone 2D.4: Recovery Presentation
+    // Recovery Presentation
     recoveryPresentationTitle: 'Отображение восстановленных ответов',
     recoveryPresentationDesc: 'Выберите способ отображения спасённых ответов прямо в интерфейсе DeepSeek.',
     recoveryDisplayMode: 'Режим отображения',
@@ -337,7 +337,7 @@ export const translations = {
     recoveryShowThinkingInline: 'Показывать рассуждения DeepThink',
     recoveryShowThinkingInlineDesc: 'Отображает восстановленную цепочку мыслей в сворачиваемом блоке над ответом.',
 
-    // Milestone 2D.5A & 2D.5B: Context Continuity
+    // Context Continuity
     contextContinuityTitle: 'Восстановление контекста',
     contextContinuityExperimental: 'Экспериментально',
     contextContinuityDesc: 'Восстанавливает локально сохранённые ответы в последующих запросах, если они отсутствуют в контексте DeepSeek.',
@@ -380,7 +380,7 @@ export const translations = {
     continuityNoEligible: 'На активной ветке диалога нет подходящих спасённых ответов.',
 
 
-    // Milestone 2E.1: Export & Backup
+    // Export & Backup
     exportConversation: 'Экспорт диалога',
     exportBtn: 'Экспорт',
     exportFormat: 'Формат',
@@ -418,7 +418,7 @@ export const translations = {
     backupSummaryBatches: 'Сырых батчей',
     backupSummarySize: 'Размер сжатого файла',
 
-    // Milestone 2E.2: Restore & Safe Merge
+    // Restore & Safe Merge
     restoreSectionTitle: 'Восстановление архива из копии',
     restoreCardTitle: 'Восстановление и безопасное слияние',
     restoreCardDesc: 'Безопасное восстановление или слияние диалогов и сырого журнала из файла резервной копии .streamarchive.jsonl.gz.',
@@ -452,7 +452,7 @@ export const translations = {
     restoreSummaryBackup: 'В копии',
     restoreReloadTabsNotice: 'Восстановление успешно! Чтобы синхронизировать страницу, перезагрузите открытые вкладки DeepSeek.',
 
-    // Milestone 2E.3: Retention, Cleanup & Safe Deletion
+    // Retention, Cleanup & Safe Deletion
     deleteConversation: 'Удалить из архива',
     deleteBtn: 'Удалить',
     deleteModalTitle: 'Удаление диалога из архива',

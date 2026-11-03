@@ -165,7 +165,7 @@ describe('DeepSeek Censorship & Filter Detection (Detect-Before-Apply)', () => {
     expect(decoder.getProjectedContent().answer).toBe('The server constant is CONTENT_FILTER in the codebase.');
   });
 
-  // --- Milestone v0.1.0 Core Correctness Regressions ---
+  // --- Pre-Filter Content Recovery Regressions ---
 
   it('preserves meaningful answer across intermediate destructive patch that clears content before CONTENT_FILTER status arrives', () => {
     const decoder = new DeepSeekProtocolDecoder('stream_destructive_intermediate', 'sess_live_bug');

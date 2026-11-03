@@ -151,11 +151,11 @@ export interface StorageRepository {
     unmatchedCapturesCount: number;
   }>;
 
-  // Export & Portable Backup operations (Milestone 2E.1)
+  // Export & Portable Backup operations
   getConversationExportModel(conversationId: string): Promise<import('../../export/types').ConversationExportModel | null>;
   createPortableBackupSnapshot(options?: import('../../backup/snapshot').CreateSnapshotOptions): Promise<import('../../backup/snapshot').PortableBackupSnapshot>;
 
-  // Restore & Safe Merge operations (Milestone 2E.2)
+  // Restore & Safe Merge operations
   validateAndPreflightRestore(
     input: ArrayBuffer | Uint8Array | Blob | ReadableStream<Uint8Array>,
     activeStreamsCount: number,
@@ -168,7 +168,7 @@ export interface StorageRepository {
   ): Promise<import('../../restore/types').RestoreResult>;
   getCurrentStoreCounts(): Promise<import('../../backup/format').PortableBackupStoreCounts>;
 
-  // Retention, Cleanup & Safe Deletion (Milestone 2E.3)
+  // Retention, Cleanup & Safe Deletion
   buildConversationDeletionPlan(conversationId: string, activeStreamKeys: Set<string>): Promise<import('../../storage/retention').ConversationDeletionPlan>;
   deleteConversationCascade(plan: import('../../storage/retention').ConversationDeletionPlan, activeStreamKeys: Set<string>): Promise<void>;
   buildRawRetentionPlan(mode: import('../../storage/retention').RawRetentionMode, activeStreamKeys: Set<string>, now?: number): Promise<import('../../storage/retention').RawRetentionPlan>;
@@ -177,7 +177,7 @@ export interface StorageRepository {
   clearEntireArchive(activeStreamCount: number): Promise<{ success: boolean; durationMs: number }>;
   getStorageMaintenanceStatus(): Promise<import('../../storage/retention').StorageMaintenanceStatus>;
 
-  // Context Continuity Planner (Milestone 2D.5A)
+  // Context Continuity Planner
   buildContextContinuityPlan(
     conversationId: string,
     options?: {
@@ -189,7 +189,7 @@ export interface StorageRepository {
     }
   ): Promise<import('../../context-continuity/types').ContextContinuityPlan | null>;
 
-  // Context Continuity Delivery Receipts (Milestone 2D.5B)
+  // Context Continuity Delivery Receipts
   recordContinuityReceipt(receipt: import('../../context-continuity/types').ContextContinuityReceipt): Promise<void>;
   updateContinuityReceipt(id: string, updates: Partial<import('../../context-continuity/types').ContextContinuityReceipt>): Promise<void>;
   getContinuityReceipt(id: string): Promise<import('../../context-continuity/types').ContextContinuityReceipt | null>;

@@ -110,7 +110,6 @@ The harness currently comprises 8 automated test specifications in `tests/browse
 ### Prerequisites
 Build the production extension bundle before executing the harness:
 ```bash
-cd workbench
 pnpm run build
 ```
 

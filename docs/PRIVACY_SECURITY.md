@@ -140,7 +140,7 @@ DeepSeek StreamArchive handles highly confidential user information: complete co
 
 ---
 
-## 7. In-Page Presentation & Rendering Security (Milestone 2D.4)
+## 7. In-Page Presentation & Rendering Security
 
 1. **Closed Shadow DOM Isolation:**
    Both overlay portals and inline recovery hosts are mounted using `attachShadow({ mode: 'closed' })`. This prevents page scripts from querying, reading, or tampering with recovered response contents via `document.querySelector` or `.shadowRoot`.
@@ -192,7 +192,7 @@ StreamArchive requests **zero unnecessary permissions** (e.g. no `scripting`, no
 
 ---
 
-## 9. Export & Backup Security Boundary (Milestone 2E.1)
+## 9. Export & Backup Security Boundary
 
 1. **Zero Network Transmission:**
    - Conversation export (Markdown and JSON) and Portable Archive Backup (`.streamarchive.jsonl.gz`) operate **strictly 100% client-side**.
@@ -221,7 +221,7 @@ StreamArchive requests **zero unnecessary permissions** (e.g. no `scripting`, no
 
 ---
 
-## 10. Import & Restore Security Model (Milestone 2E.2)
+## 10. Import & Restore Security Model
 
 1. **Decompression Bomb Protection:**
    - Gzip stream reading enforces deterministic safety bounds: `MAX_IMPORT_COMPRESSED_BYTES = 50 MiB`, `MAX_IMPORT_DECOMPRESSED_BYTES = 250 MiB`, `MAX_IMPORT_RECORDS = 500,000`, `MAX_IMPORT_LINE_CHARS = 10 MiB`.
@@ -242,7 +242,7 @@ StreamArchive requests **zero unnecessary permissions** (e.g. no `scripting`, no
 
 ---
 
-## 11. Retention & Deletion Privacy Boundaries (Milestone 2E.3)
+## 11. Retention & Deletion Privacy Boundaries
 
 1. **Local-Only Deletion Scope:**
    - Deletion of conversations, raw streams, or the entire archive operates **exclusively within local browser storage** (IndexedDB and `chrome.storage.local`).
@@ -262,15 +262,15 @@ StreamArchive requests **zero unnecessary permissions** (e.g. no `scripting`, no
 
 ---
 
-## 12. Context Continuity Privacy & Safety Boundaries (Milestone 2D.5A)
+## 12. Context Continuity Privacy & Safety Boundaries
 
 1. **Zero Outgoing Request Mutation:**
-   - Context Continuity operates in Phase 2D.5A strictly as a local derived planner. It does **not** alter outgoing fetch/XHR request payloads, does **not** append custom headers, and does **not** type into the DeepSeek textarea.
+   - Context Continuity planning operates strictly as a local derived planner. It does **not** alter outgoing fetch/XHR request payloads by default, does **not** append custom headers, and does **not** type into the DeepSeek textarea.
 2. **Strict Default OFF:**
    - Context Continuity is disabled by default (`enabled: false`). DeepThink reasoning traces are also excluded by default (`includeThinking: false`).
 3. **Surrogate-Safe Truncation & Disclosure:**
    - Hard character budgets (12,000 text chars, 6,000 thinking chars) prevent prompt overflows. Surrogate pairs are never broken, and all omissions are explicitly disclosed in the formatted preview.
 4. **Zero Persistent Relational Mutations:**
-   - Plans are transient in-memory derivations (`DB_VERSION = 8` strictly preserved). No speculative or artificial injection records are written to IndexedDB.
+   - Plans are transient in-memory derivations. Operational receipts are strictly excluded from portable backups.
 
 

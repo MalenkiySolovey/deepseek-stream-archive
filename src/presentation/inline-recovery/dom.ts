@@ -249,7 +249,7 @@ export function mountInlineRecovery(
 /**
  * Mounts a clean non-destructive presentation for user turns that contain Context Continuity markers.
  *
- * Requirements (Milestone 2D.5B-LA, Sections 45-46):
+ * Presentation requirements:
  * - Renders original clean user prompt
  * - Displays Context Continuity trust badge
  * - Collapsible included context toggle

@@ -679,7 +679,7 @@ export class StreamArchiveOverlayPortal {
       }
     }
 
-    // 4. Reconcile user turns containing Context Continuity markers (Milestone 2D.5B-LA, Sections 45-46)
+    // 4. Reconcile user turns containing Context Continuity markers
     this.reconcileUserContinuityTurns();
   }
 

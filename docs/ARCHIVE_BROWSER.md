@@ -61,7 +61,7 @@ entrypoints/sidepanel/
 
 ---
 
-## 4. Storage Management & Safe Deletion UI (Milestone 2E.3)
+## 4. Storage Management & Safe Deletion UI
 
 ### 4.1 Single-Conversation Deletion Flow
 - Accessible directly from `ConversationView` header via the **Delete** button.
