@@ -397,11 +397,19 @@ export default defineBackground(() => {
     if (message.type === MESSAGE_RECORD_RECOVERY_DIAGNOSTIC) {
       const req = validateRecordRecoveryDiagnosticRequest(message);
       if (req) {
-        if (req.kind === 'inline_success') {
+        if (req.reason) {
+          runtimeRecoveryDiagnostics.lastReason = req.reason;
+          if (!runtimeRecoveryDiagnostics.reasonsBreakdown) {
+            runtimeRecoveryDiagnostics.reasonsBreakdown = {};
+          }
+          runtimeRecoveryDiagnostics.reasonsBreakdown[req.reason] =
+            (runtimeRecoveryDiagnostics.reasonsBreakdown[req.reason] || 0) + 1;
+        }
+        if (req.kind === 'inline_success' || req.reason === 'inline_rendering_succeeded') {
           runtimeRecoveryDiagnostics.successfulInlineRendersCount++;
         } else if (req.kind === 'fallback_render') {
           runtimeRecoveryDiagnostics.fallbackRenderCount++;
-        } else if (req.kind === 'dom_mapping_error') {
+        } else if (req.kind === 'dom_mapping_error' || req.reason === 'dom_anchor_not_found') {
           runtimeRecoveryDiagnostics.domMappingErrorsCount++;
         }
         sendResponse({ received: true });
@@ -1616,7 +1624,9 @@ export default defineBackground(() => {
         return false;
       }
       storageRepo
-        .getConversationExportModel(validated.conversationId)
+        .getConversationExportModel(validated.conversationId, {
+          includeRevisions: validated.includeRevisions,
+        })
         .then((exportModel) => {
           if (!exportModel) {
             sendResponse({ success: false, error: 'conversation_not_found' });

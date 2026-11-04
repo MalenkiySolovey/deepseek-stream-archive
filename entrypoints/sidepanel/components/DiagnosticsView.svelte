@@ -271,6 +271,12 @@
           <span class="m-lbl">{t.diagDomMappingErrors}</span>
         </div>
       </div>
+      {#if status.runtimeRecovery?.lastReason}
+        <div class="recovery-diagnostic-reason-row">
+          <span class="reason-tag">Latest Status:</span>
+          <code>{status.runtimeRecovery.lastReason}</code>
+        </div>
+      {/if}
     </div>
 
     <!-- Foundation & Transport -->
@@ -590,5 +596,24 @@
   .diag-action-btn:hover {
     background: #334155;
     color: #7dd3fc;
+  }
+
+  .recovery-diagnostic-reason-row {
+    margin-top: 0.5rem;
+    padding: 0.35rem 0.5rem;
+    background: #0f172a;
+    border: 1px solid #1e293b;
+    border-radius: 0.25rem;
+    font-size: 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .reason-tag {
+    color: #94a3b8;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    font-weight: 600;
   }
 </style>

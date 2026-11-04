@@ -127,10 +127,24 @@ export interface DurableArchiveEvidence {
   lastPersistedAt?: number;
 }
 
+export type RecoveryDiagnosticReason =
+  | 'recovery_record_absent'
+  | 'recovery_revision_missing'
+  | 'recovery_revision_empty'
+  | 'remote_identity_unresolved'
+  | 'dom_anchor_not_found'
+  | 'inline_target_not_found'
+  | 'recovery_content_failed'
+  | 'inline_rendering_succeeded'
+  | 'fallback_render'
+  | 'dom_mapping_error';
+
 export interface RuntimeRecoveryDiagnostics {
   successfulInlineRendersCount: number;
   fallbackRenderCount: number;
   domMappingErrorsCount: number;
+  lastReason?: RecoveryDiagnosticReason;
+  reasonsBreakdown?: Record<string, number>;
 }
 
 export interface FoundationStatusResponse {
@@ -150,7 +164,8 @@ export interface FoundationStatusResponse {
 
 export interface RecordRecoveryDiagnosticRequest {
   type: typeof MESSAGE_RECORD_RECOVERY_DIAGNOSTIC;
-  kind: 'inline_success' | 'fallback_render' | 'dom_mapping_error';
+  kind?: 'inline_success' | 'fallback_render' | 'dom_mapping_error';
+  reason?: RecoveryDiagnosticReason;
 }
 
 export interface RecordRecoveryDiagnosticResponse {
@@ -463,6 +478,7 @@ export interface GetPageRecoveryContentResponse {
 export interface GetConversationExportRequest {
   type: typeof MESSAGE_GET_CONVERSATION_EXPORT;
   conversationId: string;
+  includeRevisions?: boolean;
 }
 
 export interface GetConversationExportResponse {

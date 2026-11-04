@@ -22,16 +22,17 @@ import type { RawStreamRecord, RawStreamBatch } from '../storage/raw-journal/typ
 
 /**
  * Defensive Bounded Import Limits:
- * Derived from the 100 MiB source database ceiling + NDJSON serialization overhead:
- * - 100 MiB raw text compresses to ~15-25 MiB in gzip. Max compressed input: 50 MiB.
- * - Maximum decompressed text: 250 MiB (prevents gzip bomb memory exhaustion).
- * - Maximum records: 500,000 (prevents micro-record object explosion).
- * - Maximum line length: 10 MiB (prevents single-line memory exhaustion).
+ * Sized to accommodate large historical archives (e.g. 163+ MiB raw, up to 2 GiB uncompressed)
+ * with robust decompression bomb protection:
+ * - Maximum compressed input: 500 MiB (prevents multi-gigabyte raw payload ingestion).
+ * - Maximum decompressed text: 2048 MiB (2 GiB) (prevents gzip bomb memory exhaustion).
+ * - Maximum records: 5,000,000 (prevents micro-record object explosion).
+ * - Maximum line length: 50 MiB (allows massive thinking chains or responses).
  */
-export const MAX_IMPORT_COMPRESSED_BYTES = 50 * 1024 * 1024; // 50 MiB
-export const MAX_IMPORT_DECOMPRESSED_BYTES = 250 * 1024 * 1024; // 250 MiB
-export const MAX_IMPORT_RECORDS = 500_000;
-export const MAX_IMPORT_LINE_CHARS = 10 * 1024 * 1024; // 10 MiB
+export const MAX_IMPORT_COMPRESSED_BYTES = 500 * 1024 * 1024; // 500 MiB
+export const MAX_IMPORT_DECOMPRESSED_BYTES = 2048 * 1024 * 1024; // 2048 MiB (2 GiB)
+export const MAX_IMPORT_RECORDS = 5_000_000;
+export const MAX_IMPORT_LINE_CHARS = 50 * 1024 * 1024; // 50 MiB
 
 export interface ReadPortableBackupOptions {
   maxCompressedBytes?: number;

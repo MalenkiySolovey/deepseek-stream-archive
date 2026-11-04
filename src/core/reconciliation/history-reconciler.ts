@@ -197,15 +197,14 @@ export class HistoryReconciler {
             return false;
           }
 
-          // 3. Content MUST match between the candidate generation and the history generation:
+          // 3. Content matching & Filtered message handling
           const candText = (cand.content || '').trim();
           const histText = (hm.text || '').trim();
-          if (candText !== histText) {
-            return false;
-          }
 
-          // 4. Disambiguation under this confirmed parent:
-          // Candidates under same confirmed parent with matching content
+          const isCandFiltered = cand.status === 'filtered';
+          const isHmFiltered = hm.status === 'filtered' || hm.isFiltered || Boolean(hm.templateResponse);
+
+          // All candidates under this confirmed parent
           const candidatesUnderParent = unmatchedProvisionalAssistant.filter((c) =>
             Boolean(
               (parentUser && c.parentId && c.parentId === parentUser.id) ||
@@ -213,6 +212,36 @@ export class HistoryReconciler {
               (parentUser && c.parentId && !existingMessages.some((m) => m.id === c.parentId) && c.content && hm.text && c.content.trim() === hm.text.trim())
             )
           );
+
+          if (isCandFiltered || isHmFiltered) {
+            // When a message is filtered, DeepSeek replaces server content with a canned template response.
+            // Consequently, candidate text (the pre-filter content) and server text (the template response)
+            // will NEVER match by content equality.
+            const filteredCandidates = candidatesUnderParent.filter(
+              (c) => c.status === 'filtered' || c.status === 'interrupted' || c.status === 'streaming'
+            );
+            const filteredServer = messages.filter(
+              (m) =>
+                m.role === 'assistant' &&
+                (m.parentId || undefined) === (hm.parentId || undefined) &&
+                (m.status === 'filtered' || m.isFiltered || Boolean(m.templateResponse))
+            );
+
+            // Disambiguation for filtered messages under same parent:
+            if (filteredCandidates.length === 1 && filteredServer.length === 1) {
+              return cand.id === filteredCandidates[0]!.id;
+            }
+            if (candidatesUnderParent.length === 1 && filteredServer.length === 1) {
+              return cand.id === candidatesUnderParent[0]!.id;
+            }
+            return false;
+          }
+
+          if (candText !== histText) {
+            return false;
+          }
+
+          // 4. Disambiguation under this confirmed parent for normal messages:
           const sameTextCandidatesUnderParent = candidatesUnderParent.filter(
             (c) => (c.content || '').trim() === histText
           );

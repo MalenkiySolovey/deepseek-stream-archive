@@ -38,6 +38,7 @@
     type ConversationTreeNode,
     type ArchiveViewSelection,
   } from '../../../src/core/conversation-tree';
+  import { IndexedDbStorageRepository } from '../../../src/storage/repositories/storage-repository-impl';
   import SafeMarkdown from './SafeMarkdown.svelte';
   import ContextContinuityPreviewModal from './ContextContinuityPreviewModal.svelte';
   import { getContextContinuitySettings } from '../../../src/context-continuity/settings';
@@ -92,24 +93,46 @@
     isExporting = true;
     exportStatusMessage = null;
     try {
-      const res = await new Promise<GetConversationExportResponse>((resolve) => {
-        if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-          const req: GetConversationExportRequest = {
-            type: MESSAGE_GET_CONVERSATION_EXPORT,
-            conversationId: detail!.conversation.id,
-          };
-          chrome.runtime.sendMessage(req, (r) => {
-            resolve(r || { success: false, error: 'No response from background worker' });
-          });
-        } else {
-          resolve({ success: false, error: 'Extension runtime unavailable' });
-        }
-      });
+      let exportModel: ConversationExportModel | null = null;
 
-      if (!res.success || !res.exportModel) {
-        exportStatusMessage = `${t.exportError}: ${res.error || 'Failed to retrieve conversation export model'}`;
-        isExporting = false;
-        return;
+      // 1. Primary: Direct sidepanel IndexedDB access (fast, zero IPC limits, handles thousands of turns)
+      try {
+        const repo = new IndexedDbStorageRepository();
+        exportModel = await repo.getConversationExportModel(detail.conversation.id, {
+          includeRevisions: exportIncludeRevisions,
+        });
+      } catch {
+        // Fall back to background worker message
+      }
+
+      // 2. Secondary fallback: Request from background worker with options & lastError handling
+      if (!exportModel) {
+        const res = await new Promise<GetConversationExportResponse>((resolve) => {
+          if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+            const req: GetConversationExportRequest = {
+              type: MESSAGE_GET_CONVERSATION_EXPORT,
+              conversationId: detail!.conversation.id,
+              includeRevisions: exportIncludeRevisions,
+            };
+            chrome.runtime.sendMessage(req, (r) => {
+              const lastErr = chrome.runtime?.lastError;
+              if (lastErr) {
+                resolve({ success: false, error: lastErr.message || 'Background worker communication error' });
+              } else {
+                resolve(r || { success: false, error: 'No response from background worker' });
+              }
+            });
+          } else {
+            resolve({ success: false, error: 'Extension runtime unavailable' });
+          }
+        });
+
+        if (!res.success || !res.exportModel) {
+          exportStatusMessage = `${t.exportError}: ${res.error || 'Failed to retrieve conversation export model'}`;
+          isExporting = false;
+          return;
+        }
+        exportModel = res.exportModel;
       }
 
       const options: ConversationExportOptions = {
@@ -126,11 +149,11 @@
       let ext: string;
 
       if (exportFormat === 'markdown') {
-        content = buildConversationMarkdown(res.exportModel, options);
+        content = buildConversationMarkdown(exportModel, options);
         mimeType = 'text/markdown;charset=utf-8';
         ext = 'md';
       } else {
-        content = buildConversationJson(res.exportModel, options);
+        content = buildConversationJson(exportModel, options);
         mimeType = 'application/json;charset=utf-8';
         ext = 'json';
       }

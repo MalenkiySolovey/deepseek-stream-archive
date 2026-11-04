@@ -1393,6 +1393,23 @@ export class IndexedDbStorageRepository implements StorageRepository {
                 const hasDirectContent =
                   rev && (rev.text.trim().length > 0 || (rev.thinking && rev.thinking.trim().length > 0));
 
+                let effectiveRemoteId = m.remoteId;
+                if (!effectiveRemoteId) {
+                  // Read-time healing: if m is missing remoteId, check if another assistant message
+                  // under the same confirmed parent received the remoteId from server history
+                  const peer = messages.find(
+                    (p) =>
+                      p.id !== m.id &&
+                      p.role === 'assistant' &&
+                      Boolean(p.remoteId) &&
+                      ((p.parentId && m.parentId && p.parentId === m.parentId) ||
+                        (p.remoteParentId && m.remoteParentId && p.remoteParentId === m.remoteParentId))
+                  );
+                  if (peer?.remoteId) {
+                    effectiveRemoteId = peer.remoteId;
+                  }
+                }
+
                 if (rev && rev.isLastGood && rev.messageId === m.id && hasDirectContent) {
                   const presKind =
                     authEvent.kind === 'network_interruption'
@@ -1400,7 +1417,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
                       : 'pre_filter_recovery';
                   results.push({
                     messageId: m.id,
-                    remoteId: m.remoteId,
+                    remoteId: effectiveRemoteId,
                     role: m.role,
                     status: m.status,
                     hasLastGood: true,
@@ -1433,7 +1450,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
                         : 'pre_filter_recovery';
                     results.push({
                       messageId: m.id,
-                      remoteId: m.remoteId,
+                      remoteId: effectiveRemoteId,
                       role: m.role,
                       status: m.status,
                       hasLastGood: true,
@@ -1822,28 +1839,101 @@ export class IndexedDbStorageRepository implements StorageRepository {
 
   // ── Export & Portable Backup Methods ──
 
-  async getConversationExportModel(conversationId: string): Promise<ConversationExportModel | null> {
-    const conversation = await this.getConversation(conversationId);
-    if (!conversation) return null;
+  async getConversationExportModel(
+    conversationId: string,
+    options?: { includeRevisions?: boolean }
+  ): Promise<ConversationExportModel | null> {
+    const db = await this.getDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(
+        [STORE_CONVERSATIONS, STORE_MESSAGES, STORE_REVISIONS, STORE_RECOVERY_EVENTS],
+        'readonly'
+      );
+      const convStore = tx.objectStore(STORE_CONVERSATIONS);
+      const msgStore = tx.objectStore(STORE_MESSAGES);
+      const revStore = tx.objectStore(STORE_REVISIONS);
+      const recStore = tx.objectStore(STORE_RECOVERY_EVENTS);
 
-    const messages = await this.listMessagesByConversation(conversationId);
-    messages.sort((a, b) => a.createdAt - b.createdAt);
+      const convReq = convStore.get(conversationId);
+      convReq.onerror = () => reject(convReq.error || new Error('Failed to get conversation'));
+      convReq.onsuccess = () => {
+        const conversation = convReq.result as Conversation | undefined;
+        if (!conversation) {
+          resolve(null);
+          return;
+        }
 
-    const messageDetails: ConversationExportModel['messages'] = [];
-    for (const msg of messages) {
-      const revisions = await this.listRevisionsByMessage(msg.id);
-      const recoveryEvents = await this.listRecoveryEvents(msg.id);
-      messageDetails.push({
-        message: msg,
-        revisions,
-        recoveryEvents,
-      });
-    }
+        const msgIndex = msgStore.index('conversationId');
+        const msgReq = msgIndex.getAll(conversationId);
+        msgReq.onerror = () => reject(msgReq.error || new Error('Failed to list messages'));
+        msgReq.onsuccess = () => {
+          const messages = (msgReq.result as Message[]) || [];
+          messages.sort((a, b) => a.createdAt - b.createdAt);
 
-    return {
-      conversation,
-      messages: messageDetails,
-    };
+          if (messages.length === 0) {
+            resolve({ conversation, messages: [] });
+            return;
+          }
+
+          const revIndex = revStore.index('messageId');
+          const recIndex = recStore.index('messageId');
+          const includeRevs = options?.includeRevisions ?? true;
+
+          const messageDetails: ConversationExportModel['messages'] = [];
+          let pending = messages.length;
+
+          for (const msg of messages) {
+            const recReq = recIndex.getAll(msg.id);
+            recReq.onerror = () => checkMsgDone();
+            recReq.onsuccess = () => {
+              const recoveryEvents = (recReq.result as RecoveryEvent[]) || [];
+
+              const revReq = revIndex.getAll(msg.id);
+              revReq.onerror = () => checkMsgDone();
+              revReq.onsuccess = () => {
+                const revs = (revReq.result as ResponseRevision[]) || [];
+                revs.sort((a, b) => a.revisionIndex - b.revisionIndex);
+
+                if (!includeRevs) {
+                  // Fast path: Only retain preferred revision and lastGood revision
+                  // rather than loading hundreds or thousands of intermediate streaming snapshots
+                  const preferred = selectPreferredRevision(msg, revs);
+                  const lastGood = revs.find((r) => r.isLastGood);
+                  const boundedRevisions: ResponseRevision[] = [];
+                  if (preferred) boundedRevisions.push(preferred);
+                  if (lastGood && lastGood.id !== preferred?.id) boundedRevisions.push(lastGood);
+
+                  messageDetails.push({
+                    message: msg,
+                    revisions: boundedRevisions,
+                    recoveryEvents,
+                  });
+                } else {
+                  messageDetails.push({
+                    message: msg,
+                    revisions: revs,
+                    recoveryEvents,
+                  });
+                }
+                checkMsgDone();
+              };
+            };
+
+            function checkMsgDone() {
+              pending--;
+              if (pending === 0) {
+                // Ensure messageDetails are strictly in original chronological order
+                messageDetails.sort((a, b) => a.message.createdAt - b.message.createdAt);
+                resolve({
+                  conversation: conversation!,
+                  messages: messageDetails,
+                });
+              }
+            }
+          }
+        };
+      };
+    });
   }
 
   async createPortableBackupSnapshot(options?: CreateSnapshotOptions): Promise<PortableBackupSnapshot> {

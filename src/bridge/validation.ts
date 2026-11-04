@@ -1000,6 +1000,7 @@ export function validateGetConversationExportRequest(
   return {
     type: 'STREAMARCHIVE_GET_CONVERSATION_EXPORT',
     conversationId: raw.conversationId.trim(),
+    includeRevisions: typeof raw.includeRevisions === 'boolean' ? raw.includeRevisions : undefined,
   };
 }
 
@@ -1428,21 +1429,40 @@ export function validatePersistUserTurnRequest(
   };
 }
 
+const VALID_RECOVERY_DIAGNOSTIC_REASONS = new Set([
+  'recovery_record_absent',
+  'recovery_revision_missing',
+  'recovery_revision_empty',
+  'remote_identity_unresolved',
+  'dom_anchor_not_found',
+  'inline_target_not_found',
+  'recovery_content_failed',
+  'inline_rendering_succeeded',
+  'fallback_render',
+  'dom_mapping_error',
+]);
+
 export function validateRecordRecoveryDiagnosticRequest(
   raw: unknown
 ): import('./messages').RecordRecoveryDiagnosticRequest | null {
   if (!isRecord(raw)) return null;
   if (raw.type !== 'STREAMARCHIVE_RECORD_RECOVERY_DIAGNOSTIC') return null;
-  if (
-    raw.kind !== 'inline_success' &&
-    raw.kind !== 'fallback_render' &&
-    raw.kind !== 'dom_mapping_error'
-  ) {
+
+  const validKinds = new Set(['inline_success', 'fallback_render', 'dom_mapping_error']);
+  const kind = typeof raw.kind === 'string' && validKinds.has(raw.kind) ? (raw.kind as any) : undefined;
+  const reason =
+    typeof raw.reason === 'string' && VALID_RECOVERY_DIAGNOSTIC_REASONS.has(raw.reason)
+      ? (raw.reason as any)
+      : undefined;
+
+  if (!kind && !reason) {
     return null;
   }
+
   return {
     type: 'STREAMARCHIVE_RECORD_RECOVERY_DIAGNOSTIC',
-    kind: raw.kind,
+    kind,
+    reason,
   };
 }
 

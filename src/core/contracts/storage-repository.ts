@@ -163,7 +163,10 @@ export interface StorageRepository {
   }>;
 
   // Export & Portable Backup operations
-  getConversationExportModel(conversationId: string): Promise<import('../../export/types').ConversationExportModel | null>;
+  getConversationExportModel(
+    conversationId: string,
+    options?: { includeRevisions?: boolean }
+  ): Promise<import('../../export/types').ConversationExportModel | null>;
   createPortableBackupSnapshot(options?: import('../../backup/snapshot').CreateSnapshotOptions): Promise<import('../../backup/snapshot').PortableBackupSnapshot>;
 
   // Restore & Safe Merge operations

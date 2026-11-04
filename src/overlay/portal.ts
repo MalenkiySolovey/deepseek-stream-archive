@@ -613,14 +613,14 @@ export class StreamArchiveOverlayPortal {
                     this.inlineLedger.registerHandle(msg.messageId, handle);
                     this.inlineSucceededCount++;
                     this.inlineFallbackReason = null;
-                    this.reportRecoveryDiagnostic('inline_success');
+                    this.reportRecoveryDiagnostic('inline_rendering_succeeded', 'inline_success');
                   } else {
                     // Fallback to anchored badge if closed shadow DOM or mount failed
                     this.inlineFallbackReason = 'shadow_root_or_mount_failed';
                     if (anchor.rect.top > -200 && anchor.rect.top < window.innerHeight + 200) {
                       this.renderAnchoredBadge(msg, anchor.rect);
                     }
-                    this.reportRecoveryDiagnostic('fallback_render');
+                    this.reportRecoveryDiagnostic('fallback_render', 'fallback_render');
                   }
                 }
               } else {
@@ -635,7 +635,7 @@ export class StreamArchiveOverlayPortal {
               if (anchor.rect.top > -200 && anchor.rect.top < window.innerHeight + 200) {
                 this.renderAnchoredBadge(msg, anchor.rect);
               }
-              this.reportRecoveryDiagnostic('fallback_render');
+              this.reportRecoveryDiagnostic('inline_target_not_found', 'fallback_render');
             }
           }
         }
@@ -648,8 +648,10 @@ export class StreamArchiveOverlayPortal {
             }
           }
           unanchoredMessages.push(msg);
-          this.inlineFallbackReason = 'dom_anchor_not_found';
-          this.reportRecoveryDiagnostic('dom_mapping_error');
+          const reason: import('../bridge/messages').RecoveryDiagnosticReason =
+            !lookupId || !msg.remoteId ? 'remote_identity_unresolved' : 'dom_anchor_not_found';
+          this.inlineFallbackReason = reason;
+          this.reportRecoveryDiagnostic(reason, 'dom_mapping_error');
         }
       }
     } else {
@@ -734,13 +736,17 @@ export class StreamArchiveOverlayPortal {
     }
   }
 
-  private reportRecoveryDiagnostic(kind: 'inline_success' | 'fallback_render' | 'dom_mapping_error'): void {
+  private reportRecoveryDiagnostic(
+    reason?: import('../bridge/messages').RecoveryDiagnosticReason,
+    kind?: 'inline_success' | 'fallback_render' | 'dom_mapping_error'
+  ): void {
     try {
       if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
         chrome.runtime
           .sendMessage({
             type: MESSAGE_RECORD_RECOVERY_DIAGNOSTIC,
-            kind,
+            kind: kind || (reason === 'inline_rendering_succeeded' ? 'inline_success' : 'dom_mapping_error'),
+            reason,
           })
           .catch(() => {});
       }
