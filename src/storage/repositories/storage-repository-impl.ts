@@ -32,6 +32,7 @@ import {
   type HistoryStagingManifestRecord,
 } from '../schema';
 import { openExtensionDatabase, createDurableWriteTransaction } from '../db';
+import { recordStorageMutation, getStorageMutationEpoch } from '../mutation-tracker';
 import {
   computeCanonicalCheckpointFingerprint,
   serializeHistoryStagingBatchForFingerprint,
@@ -80,6 +81,10 @@ import {
 export class IndexedDbStorageRepository implements StorageRepository {
   constructor(private readonly idbFactory?: IDBFactory) {}
 
+  getMutationEpoch(): number {
+    return getStorageMutationEpoch();
+  }
+
   private async getDb(): Promise<IDBDatabase> {
     return openExtensionDatabase(this.idbFactory);
   }
@@ -95,7 +100,10 @@ export class IndexedDbStorageRepository implements StorageRepository {
       const req = operation(store);
 
       req.onerror = () => reject(req.error || new Error(`Write request failed on store ${storeName}`));
-      tx.oncomplete = () => resolve();
+      tx.oncomplete = () => {
+        recordStorageMutation();
+        resolve();
+      };
       tx.onerror = () => reject(tx.error || new Error(`Write transaction failed on store ${storeName}`));
       tx.onabort = () => reject(tx.error || new Error(`Write transaction aborted on store ${storeName}`));
     });
@@ -156,7 +164,10 @@ export class IndexedDbStorageRepository implements StorageRepository {
       for (const msg of messages) {
         store.put(msg);
       }
-      tx.oncomplete = () => resolve();
+      tx.oncomplete = () => {
+        recordStorageMutation();
+        resolve();
+      };
       tx.onerror = () => reject(tx.error || new Error('Failed to save batch of messages'));
       tx.onabort = () => reject(tx.error || new Error('Save messages transaction aborted'));
     });
@@ -235,7 +246,10 @@ export class IndexedDbStorageRepository implements StorageRepository {
       for (const rev of revisions) {
         store.put(rev);
       }
-      tx.oncomplete = () => resolve();
+      tx.oncomplete = () => {
+        recordStorageMutation();
+        resolve();
+      };
       tx.onerror = () => reject(tx.error || new Error('Failed to save batch of revisions'));
       tx.onabort = () => reject(tx.error || new Error('Save revisions transaction aborted'));
     });
@@ -357,7 +371,10 @@ export class IndexedDbStorageRepository implements StorageRepository {
         if (!aborted) reject(tx.error || new Error('Save canonical checkpoint transaction aborted'));
       };
       tx.oncomplete = () => {
-        if (!aborted) resolve();
+        if (!aborted) {
+          recordStorageMutation();
+          resolve();
+        }
       };
 
       const convStore = tx.objectStore(STORE_CONVERSATIONS);
@@ -612,7 +629,10 @@ export class IndexedDbStorageRepository implements StorageRepository {
         if (!aborted) reject(tx.error || new Error('Apply history reconciliation plan transaction aborted'));
       };
       tx.oncomplete = () => {
-        if (!aborted) resolve();
+        if (!aborted) {
+          recordStorageMutation();
+          resolve();
+        }
       };
 
       const convStore = tx.objectStore(STORE_CONVERSATIONS);
@@ -655,7 +675,10 @@ export class IndexedDbStorageRepository implements StorageRepository {
         if (!aborted) reject(tx.error || new Error('Apply replay promotion plan transaction aborted'));
       };
       tx.oncomplete = () => {
-        if (!aborted) resolve();
+        if (!aborted) {
+          recordStorageMutation();
+          resolve();
+        }
       };
 
       const convStore = tx.objectStore(STORE_CONVERSATIONS);
@@ -800,7 +823,10 @@ export class IndexedDbStorageRepository implements StorageRepository {
         if (!aborted) reject(tx.error || new Error('Save staging batch tx aborted'));
       };
       tx.oncomplete = () => {
-        if (!aborted) resolve();
+        if (!aborted) {
+          recordStorageMutation();
+          resolve();
+        }
       };
 
       const manifestStore = tx.objectStore(STORE_HISTORY_STAGING_MANIFESTS);
@@ -990,7 +1016,10 @@ export class IndexedDbStorageRepository implements StorageRepository {
         if (!aborted) reject(tx.error || new Error('Commit history staging plan transaction aborted'));
       };
       tx.oncomplete = () => {
-        if (!aborted) resolve();
+        if (!aborted) {
+          recordStorageMutation();
+          resolve();
+        }
       };
 
       const manifestStore = tx.objectStore(STORE_HISTORY_STAGING_MANIFESTS);
@@ -1816,7 +1845,10 @@ export class IndexedDbStorageRepository implements StorageRepository {
       msgStore.put(data.message);
       revStore.put(data.revision);
 
-      tx.oncomplete = () => resolve();
+      tx.oncomplete = () => {
+        recordStorageMutation();
+        resolve();
+      };
       tx.onerror = () => reject(tx.error || new Error('Batch transaction failed'));
       tx.onabort = () => reject(tx.error || new Error('Batch transaction aborted'));
     });
@@ -1907,24 +1939,105 @@ export class IndexedDbStorageRepository implements StorageRepository {
                 let lastGoodRev: ResponseRevision | undefined = undefined;
 
                 const stepFetchPreferred = () => {
-                  // Cursor traversal on messageId index tracks the single maximum revisionIndex in O(1) memory
-                  // avoiding materializing thousands of intermediate streaming chunks into an array
+                  // Cursor traversal on messageId index evaluates preferred revision in O(1) memory
+                  // and O(K) linear scan time (for K revisions of the message), avoiding materializing
+                  // thousands of intermediate streaming chunks into an array.
+                  // Replicates full selectPreferredRevision domain policy:
+                  // - Filters: prefers uncensored isLastGood with text -> network with text -> isLastGood with thinking -> network with thinking
+                  // - Normal: prefers history with text -> network with text -> replay with text -> latest non-empty -> fallback to max revisionIndex
                   const keyRangeClass = typeof IDBKeyRange !== 'undefined' ? IDBKeyRange : (globalThis as any)?.IDBKeyRange;
                   const range = keyRangeClass ? keyRangeClass.only(msg.id) : null;
                   const curReq = revIndex.openCursor(range);
-                  let maxRev: ResponseRevision | undefined = undefined;
+
+                  let lastGoodWithAnswer: ResponseRevision | undefined = undefined;
+                  let networkWithAnswer: ResponseRevision | undefined = undefined;
+                  let historyWithAnswer: ResponseRevision | undefined = undefined;
+                  let replayWithAnswer: ResponseRevision | undefined = undefined;
+                  let lastGoodWithThinking: ResponseRevision | undefined = undefined;
+                  let networkWithThinking: ResponseRevision | undefined = undefined;
+                  let latestHistory: ResponseRevision | undefined = undefined;
+                  let latestNetwork: ResponseRevision | undefined = undefined;
+                  let latestReplay: ResponseRevision | undefined = undefined;
+                  let anyWithContent: ResponseRevision | undefined = undefined;
+                  let absoluteMaxRev: ResponseRevision | undefined = undefined;
+                  let hasAnyLastGood = false;
 
                   curReq.onerror = () => fail(curReq.error || new Error(`Failed to query latest revision for message ${msg.id}`));
                   curReq.onsuccess = () => {
                     const cursor = curReq.result;
                     if (cursor) {
                       const rev = cursor.value as ResponseRevision;
-                      if (!maxRev || rev.revisionIndex > maxRev.revisionIndex) {
-                        maxRev = rev;
+                      const hasText = Boolean(rev.text && rev.text.trim().length > 0);
+                      const hasThinking = Boolean(rev.thinking && rev.thinking.trim().length > 0);
+
+                      if (rev.isLastGood) {
+                        hasAnyLastGood = true;
+                        if (hasText && (!lastGoodWithAnswer || rev.revisionIndex > lastGoodWithAnswer.revisionIndex)) {
+                          lastGoodWithAnswer = rev;
+                        }
+                        if (hasThinking && (!lastGoodWithThinking || rev.revisionIndex > lastGoodWithThinking.revisionIndex)) {
+                          lastGoodWithThinking = rev;
+                        }
                       }
+
+                      if (rev.source === 'history') {
+                        if (hasText && (!historyWithAnswer || rev.revisionIndex > historyWithAnswer.revisionIndex)) {
+                          historyWithAnswer = rev;
+                        }
+                        if (!latestHistory || rev.revisionIndex > latestHistory.revisionIndex) {
+                          latestHistory = rev;
+                        }
+                      } else if (rev.source === 'network') {
+                        if (hasText && (!networkWithAnswer || rev.revisionIndex > networkWithAnswer.revisionIndex)) {
+                          networkWithAnswer = rev;
+                        }
+                        if (hasThinking && (!networkWithThinking || rev.revisionIndex > networkWithThinking.revisionIndex)) {
+                          networkWithThinking = rev;
+                        }
+                        if (!latestNetwork || rev.revisionIndex > latestNetwork.revisionIndex) {
+                          latestNetwork = rev;
+                        }
+                      } else if (rev.source === 'replay') {
+                        if (hasText && (!replayWithAnswer || rev.revisionIndex > replayWithAnswer.revisionIndex)) {
+                          replayWithAnswer = rev;
+                        }
+                        if (!latestReplay || rev.revisionIndex > latestReplay.revisionIndex) {
+                          latestReplay = rev;
+                        }
+                      }
+
+                      if ((hasText || hasThinking) && (!anyWithContent || rev.revisionIndex > anyWithContent.revisionIndex)) {
+                        anyWithContent = rev;
+                      }
+
+                      if (!absoluteMaxRev || rev.revisionIndex > absoluteMaxRev.revisionIndex) {
+                        absoluteMaxRev = rev;
+                      }
+
                       cursor.continue();
                     } else {
-                      finishWithRevisions(maxRev, lastGoodRev);
+                      let preferred: ResponseRevision | undefined = undefined;
+                      if (msg.status === 'filtered' || hasAnyLastGood) {
+                        preferred =
+                          lastGoodWithAnswer ||
+                          networkWithAnswer ||
+                          lastGoodWithThinking ||
+                          networkWithThinking ||
+                          anyWithContent ||
+                          absoluteMaxRev;
+                      } else {
+                        preferred =
+                          historyWithAnswer ||
+                          networkWithAnswer ||
+                          replayWithAnswer ||
+                          latestHistory ||
+                          latestNetwork ||
+                          latestReplay ||
+                          anyWithContent ||
+                          absoluteMaxRev;
+                      }
+
+                      finishWithRevisions(preferred, lastGoodRev);
                     }
                   };
                 };
@@ -1994,12 +2107,12 @@ export class IndexedDbStorageRepository implements StorageRepository {
   }
 
   async executeRestore(
-    backup: MaterializedPortableBackup,
+    backup: MaterializedPortableBackup | ArrayBuffer | Uint8Array | Blob | ReadableStream<Uint8Array>,
     mode: RestoreMode,
     activeStreamsCount: number
   ): Promise<RestoreResult> {
     const db = await this.getDb();
-    return executeRestoreInternal(db, backup, mode, activeStreamsCount);
+    return executeRestoreInternal(db, backup as any, mode, activeStreamsCount);
   }
 
   async getCurrentStoreCounts(): Promise<PortableBackupStoreCounts> {
@@ -2174,7 +2287,10 @@ export class IndexedDbStorageRepository implements StorageRepository {
       const tx = db.transaction(STORE_CONTEXT_CONTINUITY_RECEIPTS, 'readwrite');
       const store = tx.objectStore(STORE_CONTEXT_CONTINUITY_RECEIPTS);
       const req = store.put(receipt);
-      req.onsuccess = () => resolve();
+      req.onsuccess = () => {
+        recordStorageMutation();
+        resolve();
+      };
       req.onerror = () => reject(req.error || new Error('Failed to record continuity receipt'));
     });
   }
@@ -2197,7 +2313,10 @@ export class IndexedDbStorageRepository implements StorageRepository {
           updatedAt: Date.now(),
         };
         const putReq = store.put(merged);
-        putReq.onsuccess = () => resolve();
+        putReq.onsuccess = () => {
+          recordStorageMutation();
+          resolve();
+        };
         putReq.onerror = () => reject(putReq.error || new Error(`Failed to update continuity receipt ${id}`));
       };
     });

@@ -21,12 +21,14 @@ import {
   type PortableBackupFooterRecord,
 } from './format';
 import { DB_NAME, DB_VERSION } from '../storage/schema';
+import { getStorageMutationEpoch } from '../storage/mutation-tracker';
 
 export interface StreamingBackupOptions {
   appVersion?: string;
   now?: number;
   batchSize?: number;
   getActiveStreamsCount?: () => Promise<number> | number;
+  getMutationEpoch?: () => Promise<number> | number;
   onProgress?: (progress: StreamingBackupProgress) => void;
 }
 
@@ -124,6 +126,20 @@ export function createUncompressedBackupReadableStream(
   let lastKey: IDBValidKey | null = null;
   let phase: 'manifest' | 'records' | 'footer' | 'done' = 'manifest';
   let totalRecordsProcessed = 0;
+  let startEpoch: number | null = null;
+
+  const assertStorageConsistency = async () => {
+    if (options.getActiveStreamsCount) {
+      const activeCount = await options.getActiveStreamsCount();
+      if (activeCount > 0) {
+        throw new Error('Backup aborted: active DeepSeek generation stream detected during backup.');
+      }
+    }
+    const currentEpoch = options.getMutationEpoch ? await options.getMutationEpoch() : getStorageMutationEpoch();
+    if (startEpoch !== null && currentEpoch !== startEpoch) {
+      throw new Error('Backup aborted: database was modified during backup creation. Please retry when DeepSeek is idle.');
+    }
+  };
 
   const stream = new ReadableStream<Uint8Array>({
     async pull(controller) {
@@ -136,6 +152,8 @@ export function createUncompressedBackupReadableStream(
                 throw new Error('Cannot create backup while active DeepSeek generation streams are running. Please wait for streaming to conclude.');
               }
             }
+            startEpoch = options.getMutationEpoch ? await options.getMutationEpoch() : getStorageMutationEpoch();
+
             const manifest: PortableBackupManifestRecord = {
               kind: 'manifest',
               format: PORTABLE_BACKUP_FORMAT,
@@ -166,8 +184,14 @@ export function createUncompressedBackupReadableStream(
               continue;
             }
 
+            // Verify database has not been mutated concurrently before fetching batch
+            await assertStorageConsistency();
+
             const currentStore = INCLUDED_BACKUP_STORES[storeIdx]!;
             const batchResult = await fetchCursorBatch(db, currentStore, lastKey, batchSize);
+
+            // Re-verify consistency after batch retrieval
+            await assertStorageConsistency();
 
             if (batchResult.items.length > 0) {
               let chunkStr = '';
@@ -202,6 +226,9 @@ export function createUncompressedBackupReadableStream(
           }
 
           if (phase === 'footer') {
+            // Final barrier: ensure zero database mutations occurred across the entire streaming duration
+            await assertStorageConsistency();
+
             const footer: PortableBackupFooterRecord = {
               kind: 'footer',
               complete: true,

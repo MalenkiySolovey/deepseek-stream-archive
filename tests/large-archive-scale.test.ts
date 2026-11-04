@@ -6,7 +6,7 @@ import { openExtensionDatabase } from '../src/storage/db';
 import type { Conversation, Message, ResponseRevision, RecoveryEvent } from '../src/core/models';
 import { streamBackupToWritable } from '../src/backup/streaming-backup';
 import { readPortableBackup } from '../src/backup/reader';
-import { executeRestore } from '../src/restore/restore-service';
+import { executeRestore, validateAndPreflightRestore } from '../src/restore/restore-service';
 import { WritableStream } from 'stream/web';
 
 /**
@@ -314,20 +314,41 @@ describe('Problem 3: Genuine Large Archive Benchmarks (100 MiB, 163+ MiB, 250+ M
 
     // Stream backup to bounded sink
     let totalCompressedBytes = 0;
+    const chunks: Uint8Array[] = [];
     const sink = {
       write: async (chunk: Uint8Array) => {
         totalCompressedBytes += chunk.byteLength;
+        chunks.push(new Uint8Array(chunk));
       },
       close: async () => {},
       abort: async () => {},
     };
 
-    const result = await streamBackupToWritable(db, sink, { batchSize: 50 });
+    const result = await streamBackupToWritable(db, sink, { batchSize: 100 });
 
     console.log(`[165 MiB Benchmark] Compressed size: ${totalCompressedBytes} bytes | Batches processed: ${result.counts.raw_stream_batches}`);
     expect(result.success).toBe(true);
     expect(result.counts.raw_stream_batches).toBe(1650);
     expect(totalCompressedBytes).toBeGreaterThan(15 * 1024 * 1024); // > 15 MiB compressed
+
+    // Clean restore verification into fresh database
+    const combinedBytes = new Uint8Array(totalCompressedBytes);
+    let offset = 0;
+    for (const c of chunks) {
+      combinedBytes.set(c, offset);
+      offset += c.byteLength;
+    }
+
+    const restoreFactory = new IDBFactory();
+    const restoreDb = await openExtensionDatabase(restoreFactory);
+    const { preflight } = await validateAndPreflightRestore(restoreDb, combinedBytes, 0, 'replace');
+    expect(preflight.canRestore).toBe(true);
+    expect(preflight.backupCounts.raw_stream_batches).toBe(1650);
+
+    const restoreResult = await executeRestore(restoreDb, combinedBytes, 'replace', 0);
+    expect(restoreResult.success).toBe(true);
+    expect(restoreResult.insertedCounts.raw_stream_batches).toBe(1650);
+    expect(restoreResult.insertedCounts.raw_streams).toBe(1);
   }, 90000);
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -383,11 +404,13 @@ describe('Problem 3: Genuine Large Archive Benchmarks (100 MiB, 163+ MiB, 250+ M
       rawTx.onerror = () => reject(rawTx.error);
     });
 
-    // 1. Successful bounded stream
+    // 1. Successful bounded stream & restore verification
     let totalCompressedBytes = 0;
+    const chunks: Uint8Array[] = [];
     const sink = {
       write: async (chunk: Uint8Array) => {
         totalCompressedBytes += chunk.byteLength;
+        chunks.push(new Uint8Array(chunk));
       },
       close: async () => {},
       abort: async () => {},
@@ -399,6 +422,25 @@ describe('Problem 3: Genuine Large Archive Benchmarks (100 MiB, 163+ MiB, 250+ M
     expect(result.success).toBe(true);
     expect(result.counts.raw_stream_batches).toBe(2600);
     expect(totalCompressedBytes).toBeGreaterThan(25 * 1024 * 1024); // > 25 MiB compressed
+
+    // Clean restore verification of 260 MiB archive into fresh database
+    const combinedBytes = new Uint8Array(totalCompressedBytes);
+    let offset = 0;
+    for (const c of chunks) {
+      combinedBytes.set(c, offset);
+      offset += c.byteLength;
+    }
+
+    const restoreFactory = new IDBFactory();
+    const restoreDb = await openExtensionDatabase(restoreFactory);
+    const { preflight } = await validateAndPreflightRestore(restoreDb, combinedBytes, 0, 'replace');
+    expect(preflight.canRestore).toBe(true);
+    expect(preflight.backupCounts.raw_stream_batches).toBe(2600);
+
+    const restoreResult = await executeRestore(restoreDb, combinedBytes, 'replace', 0);
+    expect(restoreResult.success).toBe(true);
+    expect(restoreResult.insertedCounts.raw_stream_batches).toBe(2600);
+    expect(restoreResult.insertedCounts.raw_streams).toBe(1);
 
     // 2. Test Behavior on Write Abort (e.g. disk failure midway through 260 MiB stream)
     let abortCalled = false;

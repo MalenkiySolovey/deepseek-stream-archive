@@ -105,6 +105,9 @@ export interface PaginatedArchiveConversations {
 }
 
 export interface StorageRepository {
+  // Mutation generation & storage consistency
+  getMutationEpoch(): number;
+
   // Conversation operations
   saveConversation(conversation: Conversation): Promise<void>;
   getConversation(id: string): Promise<Conversation | null>;
@@ -176,7 +179,7 @@ export interface StorageRepository {
     mode?: import('../../restore/types').RestoreMode
   ): Promise<{ preflight: import('../../restore/types').RestorePreflight; backup?: import('../../backup/reader').MaterializedPortableBackup }>;
   executeRestore(
-    backup: import('../../backup/reader').MaterializedPortableBackup,
+    backup: import('../../backup/reader').MaterializedPortableBackup | ArrayBuffer | Uint8Array | Blob | ReadableStream<Uint8Array>,
     mode: import('../../restore/types').RestoreMode,
     activeStreamsCount: number
   ): Promise<import('../../restore/types').RestoreResult>;

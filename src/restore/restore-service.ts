@@ -7,7 +7,7 @@
 
 import type { MaterializedPortableBackup } from '../backup/reader';
 import { readPortableBackup } from '../backup/reader';
-import { validateBackupReferentialIntegrity } from './integrity';
+import { validateBackupReferentialIntegrity, type BackupRelationalGraph } from './integrity';
 import { buildRestorePlan } from './plan';
 import { executeAtomicReplace } from './replace';
 import { executeAtomicMerge } from './merge';
@@ -21,6 +21,7 @@ import {
   STORE_RAW_STREAM_BATCHES,
 } from '../storage/schema';
 import type { PortableBackupStoreCounts } from '../backup/format';
+import { recordStorageMutation } from '../storage/mutation-tracker';
 
 /**
  * Reads count of records from an IndexedDB object store.
@@ -72,17 +73,83 @@ export async function getCurrentStoreCounts(db: IDBDatabase): Promise<PortableBa
 
 /**
  * Validates a backup archive and builds a preflight inspection result with current DB counts.
+ * Uses bounded inspectionOnly mode to prevent materializing large multi-megabyte archives in memory.
  */
 export async function validateAndPreflightRestore(
   db: IDBDatabase,
   input: ArrayBuffer | Uint8Array | Blob | ReadableStream<Uint8Array>,
   activeStreamsCount: number,
-  mode: RestoreMode = 'replace'
+  mode: RestoreMode = 'replace',
+  options?: { inspectionOnly?: boolean }
 ): Promise<{ preflight: RestorePreflight; backup?: MaterializedPortableBackup }> {
   const currentCounts = await getCurrentStoreCounts(db);
+  const inspectionOnly = options?.inspectionOnly ?? true;
 
-  // 1. Read & Validate Archive Envelope & Records
-  const readResult = await readPortableBackup(input);
+  let preflightInput = input;
+  let executionInput = input;
+  if (input instanceof ReadableStream) {
+    const [s1, s2] = input.tee();
+    preflightInput = s1;
+    executionInput = s2;
+  }
+
+  const relationalGraph: BackupRelationalGraph = {
+    conversations: [],
+    messages: [],
+    revisions: [],
+    recovery_events: [],
+    raw_streams: [],
+    raw_stream_batches: [],
+  };
+
+  // 1. Read & Validate Archive Envelope & Records with Bounded Memory
+  const readResult = await readPortableBackup(preflightInput, {
+    inspectionOnly,
+    onRecord: (store, record) => {
+      switch (store) {
+        case 'conversations':
+          relationalGraph.conversations.push({
+            id: record.id as string,
+            remoteId: record.remoteId as string | undefined,
+          });
+          break;
+        case 'messages':
+          relationalGraph.messages.push({
+            id: record.id as string,
+            conversationId: record.conversationId as string,
+            parentId: record.parentId as string | undefined,
+            projectionState: record.projectionState as string | undefined,
+          });
+          break;
+        case 'revisions':
+          relationalGraph.revisions.push({
+            id: record.id as string,
+            messageId: record.messageId as string,
+            isLastGood: record.isLastGood as boolean | undefined,
+          });
+          break;
+        case 'recovery_events':
+          relationalGraph.recovery_events.push({
+            id: record.id as string,
+            messageId: record.messageId as string,
+            recoveredRevisionId: record.recoveredRevisionId as string | undefined,
+          });
+          break;
+        case 'raw_streams':
+          relationalGraph.raw_streams.push({
+            id: record.id as string,
+          });
+          break;
+        case 'raw_stream_batches':
+          relationalGraph.raw_stream_batches.push({
+            id: record.id as string,
+            streamKey: record.streamKey as string,
+          });
+          break;
+      }
+    },
+  });
+
   if (!readResult.success || !readResult.backup) {
     return {
       preflight: {
@@ -103,10 +170,25 @@ export async function validateAndPreflightRestore(
     };
   }
 
-  const backup = readResult.backup;
+  const backup: MaterializedPortableBackup & { _lightweight?: boolean; _rawInput?: any } = inspectionOnly
+    ? {
+        manifest: readResult.backup.manifest,
+        footer: readResult.backup.footer,
+        records: {
+          conversations: relationalGraph.conversations as any,
+          messages: relationalGraph.messages as any,
+          revisions: relationalGraph.revisions as any,
+          recovery_events: relationalGraph.recovery_events as any,
+          raw_streams: relationalGraph.raw_streams as any,
+          raw_stream_batches: relationalGraph.raw_stream_batches as any,
+        },
+        _lightweight: true,
+        _rawInput: executionInput,
+      }
+    : readResult.backup;
 
   // 2. Validate Referential Integrity
-  const integrityResult = validateBackupReferentialIntegrity(backup);
+  const integrityResult = validateBackupReferentialIntegrity(inspectionOnly ? { records: relationalGraph } : backup);
   if (!integrityResult.valid) {
     return {
       preflight: {
@@ -124,7 +206,31 @@ export async function validateAndPreflightRestore(
   // 3. Build Restore Plan
   let plan: RestorePlan;
   try {
-    plan = await buildRestorePlan(db, backup, mode);
+    if (inspectionOnly && mode === 'replace') {
+      plan = {
+        mode: 'replace',
+        valid: true,
+        toInsert: {
+          conversations: relationalGraph.conversations as any,
+          messages: relationalGraph.messages as any,
+          revisions: relationalGraph.revisions as any,
+          recovery_events: relationalGraph.recovery_events as any,
+          raw_streams: relationalGraph.raw_streams as any,
+          raw_stream_batches: relationalGraph.raw_stream_batches as any,
+        },
+        toSkip: {
+          conversations: 0,
+          messages: 0,
+          revisions: 0,
+          recovery_events: 0,
+          raw_streams: 0,
+          raw_stream_batches: 0,
+        },
+        conflicts: [],
+      };
+    } else {
+      plan = await buildRestorePlan(db, backup, mode);
+    }
   } catch (err) {
     return {
       preflight: {
@@ -168,10 +274,11 @@ export async function validateAndPreflightRestore(
 
 /**
  * Execute restore operation and perform post-commit read-back verification.
+ * Supports both pre-materialized backup records and streaming raw input.
  */
 export async function executeRestore(
   db: IDBDatabase,
-  backup: MaterializedPortableBackup,
+  backupOrInput: MaterializedPortableBackup | ArrayBuffer | Uint8Array | Blob | ReadableStream<Uint8Array>,
   mode: RestoreMode,
   activeStreamsCount: number
 ): Promise<RestoreResult> {
@@ -179,6 +286,34 @@ export async function executeRestore(
 
   if (activeStreamsCount > 0) {
     throw new Error('Cannot restore archive while active generation streams are running.');
+  }
+
+  let backup: MaterializedPortableBackup;
+
+  const isPreMaterialized =
+    backupOrInput &&
+    typeof backupOrInput === 'object' &&
+    'manifest' in backupOrInput &&
+    'footer' in backupOrInput &&
+    'records' in backupOrInput &&
+    !(backupOrInput as any)._lightweight &&
+    Array.isArray((backupOrInput as any).records?.conversations) &&
+    ((backupOrInput as any).records?.revisions?.length > 0 ||
+      (backupOrInput as any).footer?.counts?.revisions === 0 ||
+      ((backupOrInput as any).footer?.counts?.raw_stream_batches > 0 && (backupOrInput as any).records?.raw_stream_batches?.length > 0));
+
+  if (isPreMaterialized) {
+    backup = backupOrInput as MaterializedPortableBackup;
+  } else {
+    // Read and materialize records on demand for execution
+    const rawToRead = (backupOrInput as any)?._lightweight
+      ? (backupOrInput as any)._rawInput
+      : backupOrInput;
+    const readResult = await readPortableBackup(rawToRead as any, { inspectionOnly: false });
+    if (!readResult.success || !readResult.backup) {
+      throw new Error(`Failed to read backup archive for restore: ${readResult.errors.map((e) => e.message).join('; ')}`);
+    }
+    backup = readResult.backup;
   }
 
   // Referential Integrity Barrier
@@ -211,6 +346,9 @@ export async function executeRestore(
     insertedCounts = res.insertedCounts;
     skippedCounts = res.skippedCounts;
   }
+
+  // Increment storage mutation sequence so observers/backups are notified
+  recordStorageMutation();
 
   // Post-commit read-back verification
   let verified = false;

@@ -362,42 +362,76 @@
     }
   }
 
-  async function getActiveStreamsCount(): Promise<number> {
+  interface FoundationStreamSafetyResult {
+    ok: boolean;
+    activeCount: number;
+    error?: string;
+  }
+
+  async function checkFoundationStreamSafety(): Promise<FoundationStreamSafetyResult> {
     return new Promise((resolve) => {
       if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-        chrome.runtime.sendMessage(
-          { type: MESSAGE_GET_FOUNDATION_STATUS },
-          (res: FoundationStatusResponse) => {
-            if (res && res.transport && typeof res.transport.activeStreamsCount === 'number') {
-              resolve(res.transport.activeStreamsCount);
-            } else {
-              resolve(0);
+        try {
+          chrome.runtime.sendMessage(
+            { type: MESSAGE_GET_FOUNDATION_STATUS },
+            (res: FoundationStatusResponse) => {
+              if (chrome.runtime?.lastError) {
+                resolve({
+                  ok: false,
+                  activeCount: 0,
+                  error: chrome.runtime.lastError.message || 'Background service worker unavailable.',
+                });
+                return;
+              }
+              if (res && res.transport && typeof res.transport.activeStreamsCount === 'number') {
+                resolve({
+                  ok: true,
+                  activeCount: res.transport.activeStreamsCount,
+                });
+              } else {
+                resolve({
+                  ok: false,
+                  activeCount: 0,
+                  error: 'Could not verify active DeepSeek streams status from background service.',
+                });
+              }
             }
-          }
-        );
+          );
+        } catch (err: any) {
+          resolve({
+            ok: false,
+            activeCount: 0,
+            error: err?.message || 'Failed to message background service worker.',
+          });
+        }
       } else {
-        resolve(0);
+        // Test / standalone mock environment
+        resolve({ ok: true, activeCount: 0 });
       }
     });
+  }
+
+  async function getActiveStreamsCount(): Promise<number> {
+    const safety = await checkFoundationStreamSafety();
+    if (!safety.ok) {
+      throw new Error(safety.error || 'Cannot verify active stream status.');
+    }
+    return safety.activeCount;
   }
 
   async function handleCreateBackup() {
     backupError = null;
     backupSummary = null;
 
-    const activeStreamsCount = await getActiveStreamsCount();
-    if (activeStreamsCount > 0) {
-      backupState = 'error';
-      backupError = 'Cannot create backup while active DeepSeek generation streams are running. Please wait for completion.';
-      return;
-    }
-
     const dateStr = formatDateUtc();
     const suggestedName = `deepseek-streamarchive-backup_${dateStr}.${PORTABLE_BACKUP_EXTENSION}`;
 
     // 1. Prompt for file save location immediately inside the click gesture to preserve user activation
+    // ZERO async or await before this point to guarantee user activation is never dropped!
     let fileHandle: any = null;
-    if (typeof window !== 'undefined' && 'showSaveFilePicker' in window) {
+    const hasPicker = typeof window !== 'undefined' && 'showSaveFilePicker' in window;
+
+    if (hasPicker) {
       try {
         fileHandle = await (window as any).showSaveFilePicker({
           suggestedName,
@@ -415,8 +449,28 @@
           backupState = 'idle';
           return;
         }
-        // Fall back to memory/download mechanism if picker rejected
+        // Do NOT silently fall back to loading giant memory blobs on SecurityError or picker failures!
+        backupState = 'error';
+        backupError = `File picker failed: ${err?.message || 'User activation or permissions error.'}`;
+        return;
       }
+    }
+
+    // 2. Perform safety checks AFTER file picker returns, but BEFORE fileHandle.createWritable()!
+    // This strictly prevents truncating an existing selected file on disk if background generation is running.
+    backupState = 'validating';
+
+    const streamSafety = await checkFoundationStreamSafety();
+    if (!streamSafety.ok) {
+      backupState = 'error';
+      backupError = streamSafety.error || 'Cannot verify background stream safety.';
+      return;
+    }
+
+    if (streamSafety.activeCount > 0) {
+      backupState = 'error';
+      backupError = 'Cannot create backup while active DeepSeek generation streams are running. Please wait for completion.';
+      return;
     }
 
     backupState = 'compressing';
@@ -429,7 +483,10 @@
         // Direct bounded streaming to disk (< 5 MiB peak RAM, no IPC message size limit)
         backupState = 'saving';
         const writable = await fileHandle.createWritable();
-        const result = await streamBackupToWritable(db, writable, { getActiveStreamsCount });
+        const result = await streamBackupToWritable(db, writable, {
+          getActiveStreamsCount,
+          getMutationEpoch: () => repo.getMutationEpoch(),
+        });
 
         backupState = 'complete';
         backupSummary = {
@@ -442,7 +499,10 @@
         };
       } else {
         // Fallback for environments without File System Access API
-        const { stream: compressedStream, getCounts } = createCompressedBackupReadableStream(db, { getActiveStreamsCount });
+        const { stream: compressedStream, getCounts } = createCompressedBackupReadableStream(db, {
+          getActiveStreamsCount,
+          getMutationEpoch: () => repo.getMutationEpoch(),
+        });
         const resp = new Response(compressedStream);
         const blob = await resp.blob();
 
@@ -575,7 +635,7 @@
 
       const repo = new IndexedDbStorageRepository();
       const db = await repo.getDb();
-      const result = await executeRestore(db, cachedParsedBackup, restoreMode, activeStreamsCount);
+      const result = await executeRestore(db, cachedSelectedFile || cachedParsedBackup, restoreMode, activeStreamsCount);
 
       if (!result.success) {
         restoreState = 'error';
@@ -586,6 +646,7 @@
       restoreResult = result;
       restoreState = 'complete';
       cachedParsedBackup = null;
+      cachedSelectedFile = null;
 
       // Refresh data
       loadStorageEstimate();

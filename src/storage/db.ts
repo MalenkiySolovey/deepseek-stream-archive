@@ -94,6 +94,8 @@ export function closeExtensionDatabase(idbFactory?: IDBFactory): void {
   }
 }
 
+import { recordStorageMutation } from './mutation-tracker';
+
 /**
  * Creates a readwrite transaction, preferring strict durability hint where supported.
  * Falls back to standard transaction if the environment rejects IDBTransactionOptions.
@@ -103,11 +105,24 @@ export function createDurableWriteTransaction(
   storeNames: string | string[],
   durability: 'strict' | 'relaxed' | 'default' = 'strict'
 ): IDBTransaction {
+  let tx: IDBTransaction;
   try {
-    return (db as any).transaction(storeNames, 'readwrite', { durability });
+    tx = (db as any).transaction(storeNames, 'readwrite', { durability });
   } catch {
-    return db.transaction(storeNames, 'readwrite');
+    tx = db.transaction(storeNames, 'readwrite');
   }
+
+  try {
+    if (typeof tx.addEventListener === 'function') {
+      tx.addEventListener('complete', () => {
+        recordStorageMutation();
+      });
+    }
+  } catch {
+    // ignore
+  }
+
+  return tx;
 }
 
 /**

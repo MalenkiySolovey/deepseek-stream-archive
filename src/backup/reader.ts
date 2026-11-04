@@ -221,7 +221,7 @@ export async function readPortableBackup(
   let currentStoreIndex = 0;
   let lastStoreKey: unknown = undefined;
 
-  function processLine(lineText: string, currentLineIndex: number): boolean {
+  async function processLine(lineText: string, currentLineIndex: number): Promise<boolean> {
     const trimmed = lineText.replace(/\r$/, '');
     if (trimmed.trim() === '') return true;
 
@@ -496,7 +496,7 @@ export async function readPortableBackup(
       }
 
       if (options?.onRecord) {
-        options.onRecord(storeName as IncludedBackupStoreName, valRes.record as Record<string, unknown>);
+        await options.onRecord(storeName as IncludedBackupStoreName, valRes.record as Record<string, unknown>);
       }
 
       observedCounts[storeName as IncludedBackupStoreName]++;
@@ -531,7 +531,7 @@ export async function readPortableBackup(
         const remaining = textDecoder.decode();
         lineBuffer += remaining;
         if (lineBuffer.trim().length > 0) {
-          processLine(lineBuffer, lineIndex);
+          await processLine(lineBuffer, lineIndex);
           lineIndex++;
         }
         break;
@@ -565,7 +565,7 @@ export async function readPortableBackup(
           break;
         }
 
-        const continueParsing = processLine(line, lineIndex);
+        const continueParsing = await processLine(line, lineIndex);
         lineIndex++;
         if (!continueParsing) {
           // In case of fatal errors like unsupported version, abort reading early
