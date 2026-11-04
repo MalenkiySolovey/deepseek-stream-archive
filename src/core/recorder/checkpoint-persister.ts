@@ -105,19 +105,30 @@ export async function persistCanonicalCheckpointMessage(
 
     if (checkpoint.message.role === 'assistant' && targetConvId) {
       const asstMsg = checkpoint.message;
-      const remoteParent = asstMsg.remoteParentId ? String(asstMsg.remoteParentId) : undefined;
-      const needsParentResolution =
-        !asstMsg.parentId ||
-        (remoteParent !== undefined && asstMsg.parentId === remoteParent);
+      const remoteParent = asstMsg.remoteParentId ? String(asstMsg.remoteParentId).trim() : undefined;
+
+      const existingMsgs = await storageRepo.listMessagesByConversation(targetConvId);
+
+      let needsParentResolution = !asstMsg.parentId || asstMsg.parentId === remoteParent;
+      let hasParentageConflict = false;
+
+      // Section 6: Check whether existing parentId contradicts remoteParentId
+      if (!needsParentResolution && remoteParent && asstMsg.parentId) {
+        const currentParent = existingMsgs.find((m: Message) => m.id === asstMsg.parentId);
+        if (!currentParent || (currentParent.remoteId && String(currentParent.remoteId) !== remoteParent)) {
+          needsParentResolution = true;
+          hasParentageConflict = true;
+        }
+      }
 
       if (needsParentResolution) {
-        const existingMsgs = await storageRepo.listMessagesByConversation(targetConvId);
         const resolved = resolveAssistantParent(asstMsg, existingMsgs);
 
         if (resolved.parentId) {
           asstMsg.parentId = resolved.parentId;
 
-          // If the resolved parent user message lacked remoteId and we have confirmed evidence:
+          // Section 5 (Atomicity): If the resolved parent user message lacked remoteId,
+          // attach it to checkpoint.userMessage so BOTH are saved in a SINGLE atomic transaction!
           if (resolved.confirmedUserRemoteId) {
             const parentUser = existingMsgs.find((m: Message) => m.id === resolved.parentId);
             if (parentUser && !parentUser.remoteId) {
@@ -127,16 +138,22 @@ export async function persistCanonicalCheckpointMessage(
                 existingMsgs
               );
               if (assignResult.assigned) {
-                await storageRepo.saveMessages([parentUser]);
+                checkpoint.userMessage = parentUser;
               }
             }
           }
+        } else if (hasParentageConflict) {
+          // If existing parentId directly contradicted remoteParentId and could not be resolved,
+          // do NOT silently preserve the known false parentage:
+          logger.warn(
+            `[CheckpointPersister] Assistant ${asstMsg.id} had parentId ${asstMsg.parentId} conflicting with remoteParentId ${remoteParent}; unlinking until verified parent arrives.`
+          );
+          asstMsg.parentId = undefined;
         }
       }
 
       // Enforce strict role validation on assistant parent
       if (asstMsg.parentId) {
-        const existingMsgs = await storageRepo.listMessagesByConversation(targetConvId);
         const parentMsg = existingMsgs.find((m: Message) => m.id === asstMsg.parentId);
         if (parentMsg && !isValidRoleParentage('assistant', parentMsg.role)) {
           logger.warn(

@@ -101,16 +101,60 @@ export default defineContentScript({
       }
     };
 
+    // Track active streams and their associated turn identities
+    interface ActiveStreamInfo {
+      streamId: string;
+      clientTurnId?: string;
+      hasReceivedTokens: boolean;
+      isTerminal: boolean;
+    }
+    const activeStreamMap = new Map<string, ActiveStreamInfo>();
+
     // Forward captured transport events across MAIN -> ISOLATED boundary
     const handleTransportEvent = (event: TransportEvent) => {
-      if (lastObservedTurn) {
-        if (event.type === 'chunk' && event.chunkText && event.chunkText.trim().length > 0) {
-          lastObservedTurn.hasReceivedTokens = true;
-        } else if (event.type === 'complete' && lastObservedTurn.hasReceivedTokens) {
-          // Finished receiving authoritative response; clear active turn so future prompts start fresh
-          lastObservedTurn = null;
-        }
+      let streamInfo = activeStreamMap.get(event.streamId);
+      if (!streamInfo) {
+        streamInfo = {
+          streamId: event.streamId,
+          clientTurnId: event.metadata?.clientTurnId,
+          hasReceivedTokens: false,
+          isTerminal: false,
+        };
+        activeStreamMap.set(event.streamId, streamInfo);
+      } else if (!streamInfo.clientTurnId && event.metadata?.clientTurnId) {
+        streamInfo.clientTurnId = event.metadata.clientTurnId;
       }
+
+      if (event.type === 'chunk' && event.chunkText && event.chunkText.trim().length > 0) {
+        streamInfo.hasReceivedTokens = true;
+        if (streamInfo.clientTurnId) {
+          const matchedTurn = recentObservedTurns.find((t) => t.clientTurnId === streamInfo!.clientTurnId);
+          if (matchedTurn) {
+            matchedTurn.hasReceivedTokens = true;
+          }
+        }
+        if (lastObservedTurn && lastObservedTurn.clientTurnId === streamInfo.clientTurnId) {
+          lastObservedTurn.hasReceivedTokens = true;
+        }
+      } else if (event.type === 'complete' || event.type === 'abort' || event.type === 'error') {
+        streamInfo.isTerminal = true;
+        if (streamInfo.clientTurnId) {
+          const matchedTurn = recentObservedTurns.find((t) => t.clientTurnId === streamInfo!.clientTurnId);
+          if (matchedTurn) {
+            matchedTurn.isTerminal = true;
+          }
+        }
+        if (lastObservedTurn && lastObservedTurn.clientTurnId === streamInfo.clientTurnId) {
+          lastObservedTurn.isTerminal = true;
+          // Clear active turn once authoritative response completes or if tokens were received
+          if (streamInfo.hasReceivedTokens) {
+            lastObservedTurn = null;
+          }
+        }
+        // Retain streamInfo briefly for late transport events, then cleanup
+        setTimeout(() => activeStreamMap.delete(event.streamId), 5000);
+      }
+
       dispatchBridgeEnvelope('transport.event', event);
     };
 
@@ -310,13 +354,14 @@ export default defineContentScript({
           const reqSessionId = parsed.chat_session_id ? String(parsed.chat_session_id) : undefined;
 
           let clientTurnId: string;
+          const TRANSPORT_RETRY_WINDOW_MS = 2000;
           if (
             lastObservedTurn &&
             !lastObservedTurn.hasReceivedTokens &&
             lastObservedTurn.prompt.trim() === userPromptText.trim() &&
             lastObservedTurn.sessionId === reqSessionId &&
             lastObservedTurn.parentTurnId === parentTurnId &&
-            Date.now() - lastObservedTurn.timestamp < 15000
+            Date.now() - lastObservedTurn.timestamp < TRANSPORT_RETRY_WINDOW_MS
           ) {
             clientTurnId = lastObservedTurn.clientTurnId;
           } else {
@@ -377,7 +422,8 @@ export default defineContentScript({
         const trimmed = parsed.prompt.trim();
         const now = Date.now();
         const matched = recentObservedTurns.find((turn) => {
-          if (now - turn.timestamp > TURN_MATCH_TTL_MS) return false;
+          if (now - turn.timestamp > 2500) return false;
+          if (turn.isTerminal || turn.hasReceivedTokens) return false;
           if (turn.prompt.trim() !== trimmed) return false;
           if (reqSessionId && turn.sessionId && turn.sessionId !== reqSessionId) return false;
           if (parentTurnId !== undefined && turn.parentTurnId !== undefined && turn.parentTurnId !== parentTurnId) return false;

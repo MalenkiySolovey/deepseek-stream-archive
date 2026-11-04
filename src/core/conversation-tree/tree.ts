@@ -154,10 +154,11 @@ export function buildConversationTree<T extends Message = Message>(
           pId = streamUser.id;
         }
       }
-      if (!pId) {
-        // Unambiguous legacy linear archive with exactly 1 candidate user prompt in conversation:
+      if (!pId && !m.remoteParentId && !m.parentId) {
+        // Unambiguous legacy linear archive with exactly 1 candidate user prompt in conversation
+        // where neither message has server remote IDs (pre-remoteId v0.1.0 local archives):
         const candidateUserMsgs = sortedMessages.filter((msg) => msg.role === 'user');
-        if (candidateUserMsgs.length === 1) {
+        if (candidateUserMsgs.length === 1 && !candidateUserMsgs[0]!.remoteId) {
           pId = candidateUserMsgs[0]!.id;
         }
       }
@@ -169,6 +170,36 @@ export function buildConversationTree<T extends Message = Message>(
     }
 
     resolvedParentIds.set(m.id, pId);
+  }
+
+  // 3b. Multi-pass sibling resolution to handle non-chronological delivery orders
+  let siblingPassChanged = true;
+  let siblingPassCount = 0;
+  while (siblingPassChanged && siblingPassCount < 3) {
+    siblingPassChanged = false;
+    siblingPassCount++;
+    for (const m of sortedMessages) {
+      if (!resolvedParentIds.get(m.id) && m.remoteParentId) {
+        const targetRemote = String(m.remoteParentId);
+        for (const other of sortedMessages) {
+          if (
+            other.id !== m.id &&
+            other.role === m.role &&
+            other.remoteParentId &&
+            String(other.remoteParentId) === targetRemote
+          ) {
+            const otherParent =
+              resolvedParentIds.get(other.id) ||
+              (other.parentId && idMap.has(other.parentId) ? other.parentId : null);
+            if (otherParent && idMap.has(otherParent)) {
+              resolvedParentIds.set(m.id, otherParent);
+              siblingPassChanged = true;
+              break;
+            }
+          }
+        }
+      }
+    }
   }
 
   // 4. Create Tree Nodes

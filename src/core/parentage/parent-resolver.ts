@@ -209,12 +209,7 @@ export function assignRemoteIdSafely(
     return { assigned: false };
   }
 
-  // Check if target already has this exact remoteId
-  if (targetMsg.remoteId && String(targetMsg.remoteId) === cleaned) {
-    return { assigned: true, previousRemoteId: targetMsg.remoteId };
-  }
-
-  // Check for conflicts across existing messages in the same conversation
+  // Check for conflicts across existing messages in the same conversation FIRST!
   const conflicting = existingMsgs.find(
     (m) =>
       m.id !== targetMsg.id &&
@@ -232,6 +227,11 @@ export function assignRemoteIdSafely(
       conflictWithId: conflicting.id,
       previousRemoteId: targetMsg.remoteId,
     };
+  }
+
+  // If target already has this exact remoteId and no conflict exists:
+  if (targetMsg.remoteId && String(targetMsg.remoteId) === cleaned) {
+    return { assigned: true, previousRemoteId: targetMsg.remoteId };
   }
 
   targetMsg.remoteId = cleaned;

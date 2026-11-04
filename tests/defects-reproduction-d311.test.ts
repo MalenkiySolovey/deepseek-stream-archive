@@ -233,8 +233,8 @@ describe('Audit of commit d311eb8: Reproduction of Linkage Defects', () => {
     const u1 = makeMsg({ id: 'u1', conversationId: convId, role: 'user', content: 'Prompt 1', createdAt: 1000, updatedAt: 1000 });
     const a1 = makeMsg({ id: 'a1', conversationId: convId, role: 'assistant', parentId: 'u1', content: 'Answer 1', createdAt: 1100, updatedAt: 1100 });
 
-    const u2 = makeMsg({ id: 'u2', conversationId: convId, role: 'user', parentId: 'a1', content: 'Prompt 2', createdAt: 2000, updatedAt: 2000 });
-    const a2 = makeMsg({ id: 'a2', conversationId: convId, role: 'assistant', parentId: 'u2', content: 'Answer 2', createdAt: 2100, updatedAt: 2100 });
+    const u2 = makeMsg({ id: 'u2', conversationId: convId, role: 'user', parentId: 'a1', remoteId: 'server-user-2', content: 'Prompt 2', createdAt: 2000, updatedAt: 2000 });
+    const a2 = makeMsg({ id: 'a2', conversationId: convId, role: 'assistant', parentId: 'u2', remoteParentId: 'server-user-2', content: 'Answer 2', createdAt: 2100, updatedAt: 2100 });
 
     await storageRepo.saveConversation({ id: convId, title: 'Defect 5 session', createdAt: 1000, updatedAt: 2100 });
     await storageRepo.saveMessages([u1, a1, u2, a2]);

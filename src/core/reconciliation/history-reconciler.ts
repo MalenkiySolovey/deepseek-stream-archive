@@ -98,19 +98,35 @@ export class HistoryReconciler {
       // Associate unmatched provisional user turn with authoritative history turn
       if (!existing && hm.role === 'user') {
         const matchIdx = unmatchedProvisionalUser.findIndex((cand) => {
-          // If remoteParentId and hm.parentId are both present, they MUST match
-          if (cand.remoteParentId && hm.parentId && cand.remoteParentId !== hm.parentId) {
+          // Content must always match between user turns
+          if (!cand.content || !hm.text || cand.content !== hm.text) {
             return false;
           }
-          // If both are root (no parent), content must match
-          if (!cand.remoteParentId && !hm.parentId) {
-            return Boolean(cand.content && hm.text && cand.content === hm.text);
+
+          if (hm.parentId) {
+            // Child turn: parent must be confirmed
+            if (cand.remoteParentId && cand.remoteParentId === hm.parentId) {
+              return true;
+            }
+            if (cand.parentId) {
+              const localParent = existingMessages.find((m) => m.id === cand.parentId);
+              if (localParent?.remoteId && localParent.remoteId === hm.parentId) {
+                return true;
+              }
+            }
+            // Without proven parentage, do not match child turns
+            return false;
+          } else {
+            // Root turn: cand must also be root (no parent)
+            if (cand.remoteParentId || cand.parentId) {
+              return false;
+            }
+            // Disambiguation: Ensure no other root candidate has the exact same content
+            const duplicateRoots = unmatchedProvisionalUser.filter(
+              (c) => !c.remoteParentId && !c.parentId && c.content === hm.text
+            );
+            return duplicateRoots.length === 1;
           }
-          // If content is present on both, it must match
-          if (cand.content && hm.text) {
-            return cand.content === hm.text;
-          }
-          return Boolean(cand.remoteParentId && hm.parentId && cand.remoteParentId === hm.parentId);
         });
         if (matchIdx >= 0) {
           existing = unmatchedProvisionalUser.splice(matchIdx, 1)[0]!;
@@ -136,35 +152,53 @@ export class HistoryReconciler {
             return false;
           }
 
-          // 2. Positive proof of identity:
-          // A: Confirmed parent match
+          // 2. Positive proof of identity requires confirmed parentage match or ghost parent with verified content:
           const hasParentMatch = Boolean(
             (parentUser && cand.parentId && cand.parentId === parentUser.id) ||
             (cand.remoteParentId && hm.parentId && cand.remoteParentId === hm.parentId)
           );
-          if (hasParentMatch) {
+
+          const isGhostParentWithContentMatch = Boolean(
+            parentUser &&
+            cand.parentId &&
+            !existingMessages.some((m) => m.id === cand.parentId) &&
+            cand.content &&
+            hm.text &&
+            cand.content.trim() === hm.text.trim()
+          );
+
+          if (!hasParentMatch && !isGhostParentWithContentMatch) {
+            // Invariant: Never match an assistant message without confirmed parentage or verified content proof!
+            // Identical text alone on live messages or conversation-wide uniqueness is NEVER proof of identity.
+            return false;
+          }
+
+          // 3. Among candidates sharing this confirmed parent:
+          const candidatesUnderParent = unmatchedProvisionalAssistant.filter((c) =>
+            Boolean(
+              (parentUser && c.parentId && c.parentId === parentUser.id) ||
+              (c.remoteParentId && hm.parentId && c.remoteParentId === hm.parentId) ||
+              (parentUser && c.parentId && !existingMessages.some((m) => m.id === c.parentId) && c.content && hm.text && c.content.trim() === hm.text.trim())
+            )
+          );
+
+          if (candidatesUnderParent.length === 1) {
+            // Unambiguous: exactly one provisional assistant exists under this verified parent
             return true;
           }
 
-          // B: Confirmed content match
+          // Multiple candidates under same parent (regenerate variants):
+          // Match by content fingerprint / exact text
           const candText = cand.content || '';
           if (candText.trim().length > 0 && hm.text.trim().length > 0) {
-            return candText.trim() === hm.text.trim();
+            const sameContentCandidates = candidatesUnderParent.filter(
+              (c) => (c.content || '').trim() === hm.text.trim()
+            );
+            if (sameContentCandidates.length === 1 && candText.trim() === hm.text.trim()) {
+              return true;
+            }
           }
 
-          // C: Unambiguous single provisional assistant in the entire conversation:
-          // If there is ONLY ONE provisional assistant in this conversation, and its parent is
-          // either unknown (ghost parent from legacy v0.1.0) or matches parentUser,
-          // and it does NOT point to a different known message in existingMessages:
-          if (
-            unmatchedProvisionalAssistant.length === 1 &&
-            (!cand.parentId || !existingMessages.some((m) => m.id === cand.parentId)) &&
-            (!cand.remoteParentId || (hm.parentId && cand.remoteParentId === hm.parentId))
-          ) {
-            return true;
-          }
-
-          // Invariant: Never match based on arbitrary index/order when multiple candidates exist!
           return false;
         });
         if (matchIdx >= 0) {

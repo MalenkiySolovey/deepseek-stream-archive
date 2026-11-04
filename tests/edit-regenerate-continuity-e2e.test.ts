@@ -437,6 +437,7 @@ describe('Edit & Regenerate Continuity E2E Suite', () => {
       sourceRawStreamKey: 'prod_legacy:stream_legacy',
       role: 'assistant',
       status: 'finished',
+      content: 'Authoritative answer',
       identityState: 'provisional',
       projectionState: 'provisional_logical',
       createdAt: 2100,
