@@ -23,6 +23,7 @@ import { augmentDeepSeekRequest } from '../src/adapters/deepseek/request/augment
 import {
   isDeepSeekUserGenerationEndpoint,
   parseDeepSeekRequestBody,
+  normalizeEndpointPath,
 } from '../src/adapters/deepseek/request/parser';
 import type { ContextDeliveryEnvelope } from '../src/adapters/deepseek/request/types';
 import { logger } from '../src/shared/logger';
@@ -286,7 +287,11 @@ export default defineContentScript({
       // Immediate User Prompt Persistence (Section 6)
       if (isDeepSeekUserGenerationEndpoint(url, method)) {
         const parsed = parseDeepSeekRequestBody(finalBody);
-        if (parsed && typeof parsed.prompt === 'string' && parsed.prompt.trim().length > 0) {
+        const isRegenRequest =
+          normalizeEndpointPath(url).endsWith('/api/v0/chat/regenerate') ||
+          Boolean((parsed as any)?.regenerate);
+
+        if (!isRegenRequest && parsed && typeof parsed.prompt === 'string' && parsed.prompt.trim().length > 0) {
           const userPromptText = originalUserPrompt || parsed.prompt;
           const parentTurnId =
             parsed.parent_message_id !== undefined
@@ -370,9 +375,13 @@ export default defineContentScript({
         }
       }
 
+      const isRegenRequest =
+        normalizeEndpointPath(context.url).endsWith('/api/v0/chat/regenerate') ||
+        Boolean((parsed as any)?.regenerate);
+
       return {
-        clientTurnId,
-        requestPrompt: typeof parsed.prompt === 'string' ? parsed.prompt : undefined,
+        clientTurnId: isRegenRequest ? undefined : clientTurnId,
+        requestPrompt: !isRegenRequest && typeof parsed.prompt === 'string' ? parsed.prompt : undefined,
         requestParentTurnId: parentTurnId,
         requestSessionId: reqSessionId,
       };

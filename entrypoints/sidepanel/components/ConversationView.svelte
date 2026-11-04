@@ -253,7 +253,7 @@
   let isArmed = $state(false);
 
   function getActiveLeafId(): string | undefined {
-    const list = visibleMessages();
+    const list = visibleMessages;
     return list[list.length - 1]?.id;
   }
 
@@ -430,19 +430,18 @@
     messages: ArchiveMessageSummary[];
   }
 
-  let logicalMessages = $derived<ArchiveMessageSummary[]>(() => {
+  let logicalMessages = $derived.by<ArchiveMessageSummary[]>(() => {
     if (!detail) return [];
     return detail.messages.filter((m) => isLogicalMessage(m));
   });
 
-  let unmatchedCaptures = $derived<ArchiveMessageSummary[]>(() => {
+  let unmatchedCaptures = $derived.by<ArchiveMessageSummary[]>(() => {
     if (!detail) return [];
     return detail.messages.filter((m) => isUnmatchedCapture(m));
   });
 
-  let conversationTree = $derived<ConversationTreeResult<ArchiveMessageSummary>>(() => {
-    const msgs = logicalMessages();
-    return buildConversationTree(msgs, {
+  let conversationTree = $derived.by<ConversationTreeResult<ArchiveMessageSummary>>(() => {
+    return buildConversationTree(logicalMessages, {
       conversation: detail?.conversation,
       viewSelection,
       branchSelections,
@@ -450,16 +449,12 @@
     });
   });
 
-  let visibleMessages = $derived<ArchiveMessageSummary[]>(() => {
-    return conversationTree().activePath;
-  });
+  let visibleMessages = $derived<ArchiveMessageSummary[]>(conversationTree.activePath);
 
-  let unlinkedMessages = $derived<ArchiveMessageSummary[]>(() => {
-    return conversationTree().unlinkedMessages;
-  });
+  let unlinkedMessages = $derived<ArchiveMessageSummary[]>(conversationTree.unlinkedMessages);
 
   function getSiblingInfo(msg: ArchiveMessageSummary) {
-    const tree = conversationTree();
+    const tree = conversationTree;
     const node = tree.getNode(msg.id);
     if (!node) {
       return { count: 1, current: 1, key: '', isUserBranch: false, isAssistantVariant: false };
@@ -476,7 +471,7 @@
       };
     }
     if (!isUser && node.assistantVariantCount > 1) {
-      const key = node.parent ? node.parent.message.id : '';
+      const key = node.parent ? node.parent.message.id : '__root__';
       return {
         count: node.assistantVariantCount,
         current: node.assistantVariantIndex + 1,
@@ -489,7 +484,7 @@
   }
 
   async function switchBranch(key: string, delta: number, total: number) {
-    const tree = conversationTree();
+    const tree = conversationTree;
     let siblings: ConversationTreeNode<ArchiveMessageSummary>[] = [];
     if (key === '__root__') {
       siblings = tree.roots;
@@ -527,7 +522,10 @@
     };
 
     viewSelection = updatedSelection;
-    branchSelections[key] = nextIndex;
+    branchSelections = {
+      ...branchSelections,
+      [key]: nextIndex,
+    };
 
     try {
       if (typeof chrome !== 'undefined' && chrome.storage?.local && conversationId) {
@@ -542,7 +540,7 @@
   }
 
   async function goToObservedSession() {
-    const tree = conversationTree();
+    const tree = conversationTree;
     if (!tree.observedLeafId || tree.observedPath.length === 0) return;
 
     const newSelectedChildByParent: Record<string, string> = {
@@ -569,10 +567,29 @@
 
     viewSelection = updatedSelection;
 
+    const newBranchSelections: Record<string, number> = {};
+    for (let i = 0; i < tree.observedPath.length; i++) {
+      const node = tree.getNode(tree.observedPath[i]!.id);
+      if (node) {
+        if (node.isRoot && tree.roots.length > 1) {
+          newBranchSelections['__root__'] = node.userBranchIndex;
+        } else if (node.parent) {
+          const parentKey = node.parent.message.id;
+          if (node.message.role === 'user' && node.userBranchCount > 1) {
+            newBranchSelections[parentKey] = node.userBranchIndex;
+          } else if (node.message.role === 'assistant' && node.assistantVariantCount > 1) {
+            newBranchSelections[parentKey] = node.assistantVariantIndex;
+          }
+        }
+      }
+    }
+    branchSelections = newBranchSelections;
+
     try {
       if (typeof chrome !== 'undefined' && chrome.storage?.local && conversationId) {
         await chrome.storage.local.set({
           [`archive_view_selection_${conversationId}`]: updatedSelection,
+          [`branch_selections_${conversationId}`]: { ...newBranchSelections },
         });
       }
     } catch {
@@ -657,7 +674,7 @@
         {#if detail?.conversation.remoteId}
           <span class="meta-item remote">Remote: {detail.conversation.remoteId}</span>
         {/if}
-        <span class="meta-item">{logicalMessages().length} {t.messagesCount}</span>
+        <span class="meta-item">{logicalMessages.length} {t.messagesCount}</span>
       </div>
     </div>
     {#if detail}
@@ -722,7 +739,7 @@
     </div>
   {:else}
     <div class="messages-thread">
-      {#if !conversationTree().isArchiveViewingObservedPath && conversationTree().observedLeafId}
+      {#if !conversationTree.isArchiveViewingObservedPath && conversationTree.observedLeafId}
         <div class="observed-path-banner">
           <div class="observed-path-info">
             <span class="observed-path-icon">🧭</span>
@@ -738,7 +755,7 @@
         </div>
       {/if}
 
-      {#each visibleMessages() as msg (msg.id)}
+      {#each visibleMessages as msg (msg.id)}
         {@const branchInfo = getSiblingInfo(msg)}
         {@const activeData = getActiveContent(msg)}
         {@const isAssistant = msg.role === 'assistant'}
@@ -906,19 +923,19 @@
           {/if}
         </div>
       {/each}
-      {#if unlinkedMessages().length > 0}
+      {#if unlinkedMessages.length > 0}
         <div class="unlinked-turns-section">
           <div class="unlinked-turns-header">
             <span class="unlinked-icon">⚠️</span>
             <div class="unlinked-header-text">
-              <span class="unlinked-title">{t.unlinkedTurnsTitle} ({unlinkedMessages().length})</span>
+              <span class="unlinked-title">{t.unlinkedTurnsTitle} ({unlinkedMessages.length})</span>
               <span class="unlinked-desc">{t.unlinkedTurnsDesc}</span>
             </div>
           </div>
           <div class="unlinked-turns-list">
-            {#each unlinkedMessages() as um (um.id)}
+            {#each unlinkedMessages as um (um.id)}
               {@const umData = getActiveContent(um)}
-              {@const detail = conversationTree().unlinkedDetails?.find((d) => d.message.id === um.id)}
+              {@const detail = conversationTree.unlinkedDetails?.find((d) => d.message.id === um.id)}
               <div class="unlinked-turn-card">
                 <div class="unmatched-card-meta">
                   <span class="role-badge" class:asst={um.role === 'assistant'} class:usr={um.role === 'user'}>
@@ -957,17 +974,17 @@
           </div>
         </div>
       {/if}
-      {#if unmatchedCaptures().length > 0}
+      {#if unmatchedCaptures.length > 0}
         <div class="unmatched-captures-section">
           <div class="unmatched-captures-header">
             <span class="unmatched-icon">📡</span>
             <div class="unmatched-header-text">
-              <span class="unmatched-title">{t.unmatchedCapturesTitle} ({unmatchedCaptures().length})</span>
+              <span class="unmatched-title">{t.unmatchedCapturesTitle} ({unmatchedCaptures.length})</span>
               <span class="unmatched-desc">{t.unmatchedCapturesDesc}</span>
             </div>
           </div>
           <div class="unmatched-captures-list">
-            {#each unmatchedCaptures() as um (um.id)}
+            {#each unmatchedCaptures as um (um.id)}
               {@const umData = getActiveContent(um)}
               <div class="unmatched-capture-card">
                 <div class="unmatched-card-meta">

@@ -1225,9 +1225,11 @@ export default defineBackground(() => {
             try {
               const existingMsgs = await storageRepo.listMessagesByConversation(userMsg.conversationId);
               const parentCandidate = existingMsgs.find(
-                (m) => m.remoteId && String(m.remoteId) === String(userMsg.remoteParentId)
+                (m) =>
+                  (m.remoteId && String(m.remoteId) === String(userMsg.remoteParentId)) ||
+                  m.id === userMsg.remoteParentId
               );
-              if (parentCandidate) {
+              if (parentCandidate && parentCandidate.role === 'assistant') {
                 userMsg.parentId = parentCandidate.id;
               } else {
                 const candidateAssistants = existingMsgs.filter((m) => m.role === 'assistant');

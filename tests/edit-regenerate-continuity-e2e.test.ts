@@ -7,6 +7,7 @@ import { HistoryReconciler } from '../src/core/reconciliation/history-reconciler
 import { buildConversationTree } from '../src/core/conversation-tree/tree';
 import type { Message } from '../src/core/models';
 import type { DeepSeekParsedHistory, NormalizedHistoryMessage } from '../src/adapters/deepseek/history/types';
+import { buildConversationMarkdown } from '../src/export/markdown-exporter';
 
 function makeHistMsg(partial: Partial<NormalizedHistoryMessage> & { messageId: string; role: 'user' | 'assistant'; text: string }): NormalizedHistoryMessage {
   return {
@@ -681,5 +682,357 @@ describe('Edit & Regenerate Continuity E2E Suite', () => {
     const lastGood = revs.find((r) => r.isLastGood);
     expect(lastGood).toBeDefined();
     expect(lastGood?.text).toBe('Valuable pre-filter analysis text.');
+  });
+
+  it('Scenario A: Линейная история: 3 последовательные пары User/Assistant сохраняются и связаны в неразрывную цепочку с 0 unlinked messages', async () => {
+    const conversationId = 'conv_linear_3turn_test';
+    await storageRepo.saveConversation({
+      id: conversationId,
+      remoteId: 'remote_linear_3turn',
+      title: 'Linear 3-Turn Conversation',
+      createdAt: 1000,
+      updatedAt: 1000,
+    });
+
+    // Turn 1
+    const u1 = makeTestMsg({ id: 'u1', conversationId, role: 'user', content: 'Prompt 1', remoteId: '101', createdAt: 1000, updatedAt: 1000 });
+    const a1 = makeTestMsg({ id: 'a1', conversationId, role: 'assistant', parentId: 'u1', remoteId: '102', remoteParentId: '101', createdAt: 1100, updatedAt: 1100 });
+    // Turn 2
+    const u2 = makeTestMsg({ id: 'u2', conversationId, role: 'user', parentId: 'a1', remoteId: '201', remoteParentId: '102', content: 'Prompt 2', createdAt: 2000, updatedAt: 2000 });
+    const a2 = makeTestMsg({ id: 'a2', conversationId, role: 'assistant', parentId: 'u2', remoteId: '202', remoteParentId: '201', createdAt: 2100, updatedAt: 2100 });
+    // Turn 3
+    const u3 = makeTestMsg({ id: 'u3', conversationId, role: 'user', parentId: 'a2', remoteId: '301', remoteParentId: '202', content: 'Prompt 3', createdAt: 3000, updatedAt: 3000 });
+    const a3 = makeTestMsg({ id: 'a3', conversationId, role: 'assistant', parentId: 'u3', remoteId: '302', remoteParentId: '301', createdAt: 3100, updatedAt: 3100 });
+
+    await storageRepo.saveMessages([u1, a1, u2, a2, u3, a3]);
+
+    const msgs = await storageRepo.listMessagesByConversation(conversationId);
+    expect(msgs).toHaveLength(6);
+
+    const tree = buildConversationTree(msgs);
+    expect(tree.roots).toHaveLength(1);
+    expect(tree.roots[0]!.message.id).toBe('u1');
+    expect(tree.activePath).toHaveLength(6);
+    expect(tree.activePath.map((m) => m.id)).toEqual(['u1', 'a1', 'u2', 'a2', 'u3', 'a3']);
+    expect(tree.unlinkedMessages).toHaveLength(0);
+    expect(tree.unlinkedDetails).toHaveLength(0);
+  });
+
+  it('Scenario D: Повторные Edit: 4 последовательные редакции одного сообщения сохраняют все 4 варианта веток', async () => {
+    const conversationId = 'conv_repeat_edits_test';
+    await storageRepo.saveConversation({
+      id: conversationId,
+      remoteId: 'remote_repeat_edits',
+      title: 'Repeated Edits Test',
+      createdAt: 1000,
+      updatedAt: 1000,
+    });
+
+    // Turn 1
+    const u1 = makeTestMsg({ id: 'u1', conversationId, role: 'user', content: 'Turn 1 Prompt', remoteId: '101', createdAt: 1000, updatedAt: 1000 });
+    const a1 = makeTestMsg({ id: 'a1', conversationId, role: 'assistant', parentId: 'u1', remoteId: '102', remoteParentId: '101', createdAt: 1100, updatedAt: 1100 });
+
+    // 4 successive edits of Turn 2 under a1
+    const edits = [
+      { uId: 'u2_a', aId: 'a2_a', uRem: '201a', aRem: '202a', prompt: 'Prompt 2 Version A', ans: 'Answer 2 Version A', t: 2000 },
+      { uId: 'u2_b', aId: 'a2_b', uRem: '201b', aRem: '202b', prompt: 'Prompt 2 Version B', ans: 'Answer 2 Version B', t: 3000 },
+      { uId: 'u2_c', aId: 'a2_c', uRem: '201c', aRem: '202c', prompt: 'Prompt 2 Version C', ans: 'Answer 2 Version C', t: 4000 },
+      { uId: 'u2_d', aId: 'a2_d', uRem: '201d', aRem: '202d', prompt: 'Prompt 2 Version D', ans: 'Answer 2 Version D', t: 5000 },
+    ];
+
+    const toSave: Message[] = [u1, a1];
+    for (const e of edits) {
+      toSave.push(
+        makeTestMsg({ id: e.uId, conversationId, role: 'user', parentId: 'a1', remoteId: e.uRem, remoteParentId: '102', content: e.prompt, createdAt: e.t, updatedAt: e.t }),
+        makeTestMsg({ id: e.aId, conversationId, role: 'assistant', parentId: e.uId, remoteId: e.aRem, remoteParentId: e.uRem, createdAt: e.t + 50, updatedAt: e.t + 50 })
+      );
+    }
+    await storageRepo.saveMessages(toSave);
+
+    const msgs = await storageRepo.listMessagesByConversation(conversationId);
+    expect(msgs).toHaveLength(10); // 1 root pair + 4 edited pairs
+
+    const tree = buildConversationTree(msgs);
+    expect(tree.roots).toHaveLength(1);
+    expect(tree.unlinkedMessages).toHaveLength(0);
+
+    const a1Node = tree.nodeMap.get('a1')!;
+    expect(a1Node.children).toHaveLength(4);
+    for (let i = 0; i < 4; i++) {
+      expect(a1Node.children[i]!.message.id).toBe(edits[i]!.uId);
+      expect(a1Node.children[i]!.userBranchCount).toBe(4);
+      expect(a1Node.children[i]!.userBranchIndex).toBe(i);
+    }
+
+    // Downward activePath defaults to newest branch (u2_d -> a2_d)
+    expect(tree.activePath.map((m) => m.id)).toEqual(['u1', 'a1', 'u2_d', 'a2_d']);
+
+    // Independent navigation to Version B
+    const treeVersionB = buildConversationTree(msgs, {
+      viewSelection: {
+        conversationId,
+        selectedChildByParent: { a1: 'u2_b' },
+        updatedAt: Date.now(),
+      },
+    });
+    expect(treeVersionB.activePath.map((m) => m.id)).toEqual(['u1', 'a1', 'u2_b', 'a2_b']);
+  });
+
+  it('Scenario F: Regenerate без requestPrompt: ответ перегенерируется без нового пользовательского сообщения, 0 ложных User узлов создано', async () => {
+    const conversationId = 'conv_regen_no_prompt_test';
+    await storageRepo.saveConversation({
+      id: conversationId,
+      remoteId: 'remote_regen_no_prompt',
+      title: 'Regenerate Without Request Prompt',
+      createdAt: 1000,
+      updatedAt: 1000,
+    });
+
+    const user1 = makeTestMsg({ id: 'u1', conversationId, role: 'user', content: 'What is entropy?', remoteId: '101', createdAt: 1000, updatedAt: 1000 });
+    await storageRepo.saveMessages([user1]);
+
+    // Assistant Variant 1
+    const coord1 = new CanonicalStreamCoordinator({
+      producerSessionId: 'prod_r1',
+      streamId: 'stream_r1',
+      provisionalSessionId: conversationId,
+      clientTurnId: 'u1',
+      requestPrompt: 'What is entropy?',
+      onCheckpoint: async (dto) => {
+        await storageRepo.saveCanonicalCheckpoint({
+          streamKey: dto.streamKey,
+          checkpointSeq: dto.checkpointSeq,
+          isTerminal: dto.isFinal,
+          conversation: dto.conversation,
+          userMessage: dto.userMessage,
+          message: dto.message,
+          revisions: dto.revisions,
+          recoveryEvents: dto.recoveryEvents,
+        });
+        return { success: true, streamKey: dto.streamKey, checkpointSeq: dto.checkpointSeq, persistedAt: Date.now() };
+      },
+    });
+    coord1.feedSemanticEvent({ type: 'message_id_identified', streamId: 'stream_r1', sequence: 1, timestamp: 1050, messageId: '102', requestMessageId: '101' });
+    coord1.feedSemanticEvent({ type: 'answer_delta', streamId: 'stream_r1', sequence: 2, timestamp: 1100, delta: 'Entropy is a measure of disorder.' });
+    coord1.feedSemanticEvent({ type: 'stream_finished', streamId: 'stream_r1', sequence: 3, timestamp: 1200, status: 'FINISHED' });
+    await coord1.awaitFinalPersistence();
+
+    // Regenerate call: NO requestPrompt, NO clientTurnId (mimics /api/v0/chat/regenerate)
+    const coord2 = new CanonicalStreamCoordinator({
+      producerSessionId: 'prod_r2',
+      streamId: 'stream_r2',
+      provisionalSessionId: conversationId,
+      requestParentMessageId: '101', // User message remote ID
+      onCheckpoint: async (dto) => {
+        await storageRepo.saveCanonicalCheckpoint({
+          streamKey: dto.streamKey,
+          checkpointSeq: dto.checkpointSeq,
+          isTerminal: dto.isFinal,
+          conversation: dto.conversation,
+          userMessage: dto.userMessage, // UNDEFINED on regenerate
+          message: dto.message,
+          revisions: dto.revisions,
+          recoveryEvents: dto.recoveryEvents,
+        });
+        return { success: true, streamKey: dto.streamKey, checkpointSeq: dto.checkpointSeq, persistedAt: Date.now() };
+      },
+    });
+    coord2.feedSemanticEvent({ type: 'message_id_identified', streamId: 'stream_r2', sequence: 1, timestamp: 2050, messageId: '103', requestMessageId: '101' });
+    coord2.feedSemanticEvent({ type: 'answer_delta', streamId: 'stream_r2', sequence: 2, timestamp: 2100, delta: 'Entropy quantifies the number of microscopic configurations.' });
+    coord2.feedSemanticEvent({ type: 'stream_finished', streamId: 'stream_r2', sequence: 3, timestamp: 2200, status: 'FINISHED' });
+    await coord2.awaitFinalPersistence();
+
+    const allMsgs = await storageRepo.listMessagesByConversation(conversationId);
+    // Strict assertion: exactly ONE user message in storage, TWO assistant messages
+    const userMsgs = allMsgs.filter((m) => m.role === 'user');
+    const asstMsgs = allMsgs.filter((m) => m.role === 'assistant');
+    expect(userMsgs).toHaveLength(1);
+    expect(asstMsgs).toHaveLength(2);
+
+    const tree = buildConversationTree(allMsgs);
+    expect(tree.roots).toHaveLength(1);
+    expect(tree.roots[0]!.message.id).toBe('u1');
+    expect(tree.roots[0]!.children).toHaveLength(2);
+    expect(tree.unlinkedMessages).toHaveLength(0);
+    expect(tree.unlinkedDetails).toHaveLength(0);
+  });
+
+  it('Scenario H: Edit + Regenerate: сначала Edit, затем несколько Regenerate на новой ветке, все исходные и новые варианты сохранены', async () => {
+    const conversationId = 'conv_edit_and_regen_test';
+    await storageRepo.saveConversation({
+      id: conversationId,
+      remoteId: 'remote_edit_regen',
+      title: 'Edit and Regenerate Combined DAG',
+      createdAt: 1000,
+      updatedAt: 1000,
+    });
+
+    // Turn 1
+    const u1 = makeTestMsg({ id: 'u1', conversationId, role: 'user', content: 'Turn 1', remoteId: '101', createdAt: 1000, updatedAt: 1000 });
+    const a1 = makeTestMsg({ id: 'a1', conversationId, role: 'assistant', parentId: 'u1', remoteId: '102', remoteParentId: '101', createdAt: 1100, updatedAt: 1100 });
+
+    // Turn 2 Branch A (Original)
+    const u2_a = makeTestMsg({ id: 'u2_a', conversationId, role: 'user', parentId: 'a1', remoteId: '201', remoteParentId: '102', content: 'Turn 2 Original Prompt', createdAt: 2000, updatedAt: 2000 });
+    const a2_a = makeTestMsg({ id: 'a2_a', conversationId, role: 'assistant', parentId: 'u2_a', remoteId: '202', remoteParentId: '201', createdAt: 2100, updatedAt: 2100 });
+
+    // Turn 2 Branch B (Edited)
+    const u2_b = makeTestMsg({ id: 'u2_b', conversationId, role: 'user', parentId: 'a1', remoteId: '301', remoteParentId: '102', content: 'Turn 2 Edited Prompt', createdAt: 3000, updatedAt: 3000 });
+    // Assistant Variant B1
+    const a2_b1 = makeTestMsg({ id: 'a2_b1', conversationId, role: 'assistant', parentId: 'u2_b', remoteId: '302', remoteParentId: '301', createdAt: 3100, updatedAt: 3100 });
+    // Assistant Variant B2 (Regenerated)
+    const a2_b2 = makeTestMsg({ id: 'a2_b2', conversationId, role: 'assistant', parentId: 'u2_b', remoteId: '303', remoteParentId: '301', createdAt: 3200, updatedAt: 3200 });
+    // Assistant Variant B3 (Second Regenerate)
+    const a2_b3 = makeTestMsg({ id: 'a2_b3', conversationId, role: 'assistant', parentId: 'u2_b', remoteId: '304', remoteParentId: '301', createdAt: 3300, updatedAt: 3300 });
+
+    await storageRepo.saveMessages([u1, a1, u2_a, a2_a, u2_b, a2_b1, a2_b2, a2_b3]);
+
+    const msgs = await storageRepo.listMessagesByConversation(conversationId);
+    expect(msgs).toHaveLength(8);
+
+    const tree = buildConversationTree(msgs);
+    expect(tree.roots).toHaveLength(1);
+    expect(tree.unlinkedMessages).toHaveLength(0);
+
+    const u2bNode = tree.nodeMap.get('u2_b')!;
+    expect(u2bNode.children).toHaveLength(3);
+    expect(u2bNode.children[0]!.assistantVariantCount).toBe(3);
+    expect(u2bNode.children[1]!.assistantVariantCount).toBe(3);
+    expect(u2bNode.children[2]!.assistantVariantCount).toBe(3);
+
+    // Default path follows latest (u1 -> a1 -> u2_b -> a2_b3)
+    expect(tree.activePath.map((m) => m.id)).toEqual(['u1', 'a1', 'u2_b', 'a2_b3']);
+
+    // Selecting original branch A gives u1 -> a1 -> u2_a -> a2_a
+    const treeBranchA = buildConversationTree(msgs, {
+      viewSelection: {
+        conversationId,
+        selectedChildByParent: { a1: 'u2_a' },
+        updatedAt: Date.now(),
+      },
+    });
+    expect(treeBranchA.activePath.map((m) => m.id)).toEqual(['u1', 'a1', 'u2_a', 'a2_a']);
+  });
+
+  it('Scenario J: Reload и restart: полное дерево и навигация восстанавливаются после закрытия и повторной инициализации IndexedDB', async () => {
+    const conversationId = 'conv_reload_test';
+    await storageRepo.saveConversation({
+      id: conversationId,
+      remoteId: 'remote_reload',
+      title: 'Reload Persistence Test',
+      createdAt: 1000,
+      updatedAt: 1000,
+    });
+
+    // 2 Edit branches
+    const u1 = makeTestMsg({ id: 'u1', conversationId, role: 'user', content: 'Turn 1', remoteId: '101', createdAt: 1000, updatedAt: 1000 });
+    const a1 = makeTestMsg({ id: 'a1', conversationId, role: 'assistant', parentId: 'u1', remoteId: '102', remoteParentId: '101', createdAt: 1100, updatedAt: 1100 });
+    const u2_a = makeTestMsg({ id: 'u2_a', conversationId, role: 'user', parentId: 'a1', remoteId: '201', remoteParentId: '102', content: 'Prompt 2A', createdAt: 2000, updatedAt: 2000 });
+    const a2_a = makeTestMsg({ id: 'a2_a', conversationId, role: 'assistant', parentId: 'u2_a', remoteId: '202', remoteParentId: '201', createdAt: 2100, updatedAt: 2100 });
+    const u2_b = makeTestMsg({ id: 'u2_b', conversationId, role: 'user', parentId: 'a1', remoteId: '301', remoteParentId: '102', content: 'Prompt 2B', createdAt: 3000, updatedAt: 3000 });
+    const a2_b = makeTestMsg({ id: 'a2_b', conversationId, role: 'assistant', parentId: 'u2_b', remoteId: '302', remoteParentId: '301', createdAt: 3100, updatedAt: 3100 });
+
+    await storageRepo.saveMessages([u1, a1, u2_a, a2_a, u2_b, a2_b]);
+
+    // Simulate background worker shutdown and restart with a new repository instance pointing to same DB
+    const freshRepo = new IndexedDbStorageRepository(fakeFactory);
+    const reloadedMsgs = await freshRepo.listMessagesByConversation(conversationId);
+    expect(reloadedMsgs).toHaveLength(6);
+
+    const reloadedTree = buildConversationTree(reloadedMsgs);
+    expect(reloadedTree.roots).toHaveLength(1);
+    expect(reloadedTree.unlinkedMessages).toHaveLength(0);
+    expect(reloadedTree.activePath.map((m) => m.id)).toEqual(['u1', 'a1', 'u2_b', 'a2_b']);
+  });
+
+  it('Scenario L: Branch navigation: локальное переключение веток изменяет downstream activePath без мутации IndexedDB', async () => {
+    const conversationId = 'conv_nav_no_mutate_test';
+    await storageRepo.saveConversation({
+      id: conversationId,
+      remoteId: 'remote_nav_no_mutate',
+      title: 'Navigation No-Mutate Test',
+      createdAt: 1000,
+      updatedAt: 1000,
+    });
+
+    const u1 = makeTestMsg({ id: 'u1', conversationId, role: 'user', content: 'Root', remoteId: '101', createdAt: 1000, updatedAt: 1000 });
+    const a1 = makeTestMsg({ id: 'a1', conversationId, role: 'assistant', parentId: 'u1', remoteId: '102', remoteParentId: '101', createdAt: 1100, updatedAt: 1100 });
+    const u2_a = makeTestMsg({ id: 'u2_a', conversationId, role: 'user', parentId: 'a1', remoteId: '201', remoteParentId: '102', content: 'Prompt A', createdAt: 2000, updatedAt: 2000 });
+    const a2_a = makeTestMsg({ id: 'a2_a', conversationId, role: 'assistant', parentId: 'u2_a', remoteId: '202', remoteParentId: '201', createdAt: 2100, updatedAt: 2100 });
+    const u2_b = makeTestMsg({ id: 'u2_b', conversationId, role: 'user', parentId: 'a1', remoteId: '301', remoteParentId: '102', content: 'Prompt B', createdAt: 3000, updatedAt: 3000 });
+    const a2_b = makeTestMsg({ id: 'a2_b', conversationId, role: 'assistant', parentId: 'u2_b', remoteId: '302', remoteParentId: '301', createdAt: 3100, updatedAt: 3100 });
+
+    await storageRepo.saveMessages([u1, a1, u2_a, a2_a, u2_b, a2_b]);
+
+    // Initial view selection on branch B
+    const tree1 = buildConversationTree([u1, a1, u2_a, a2_a, u2_b, a2_b], {
+      viewSelection: { conversationId, selectedChildByParent: { a1: 'u2_b' }, updatedAt: 1 },
+    });
+    expect(tree1.activePath.map((m) => m.id)).toEqual(['u1', 'a1', 'u2_b', 'a2_b']);
+
+    // User switches branch to branch A
+    const tree2 = buildConversationTree([u1, a1, u2_a, a2_a, u2_b, a2_b], {
+      viewSelection: { conversationId, selectedChildByParent: { a1: 'u2_a' }, updatedAt: 2 },
+    });
+    expect(tree2.activePath.map((m) => m.id)).toEqual(['u1', 'a1', 'u2_a', 'a2_a']);
+
+    // Verify storage was NEVER mutated by branch switching
+    const msgsInDb = await storageRepo.listMessagesByConversation(conversationId);
+    expect(msgsInDb).toHaveLength(6);
+    expect(msgsInDb.find((m) => m.id === 'u2_a')?.parentId).toBe('a1');
+    expect(msgsInDb.find((m) => m.id === 'u2_b')?.parentId).toBe('a1');
+  });
+
+  it('Scenario N: Export и backup: экспорт активной ветки и всех веток сохраняет целостную структуру дерева', async () => {
+    const conversationId = 'conv_export_branches_test';
+    const conversation = {
+      id: conversationId,
+      remoteId: 'remote_export_branches',
+      title: 'Branch Export Test',
+      createdAt: 1000,
+      updatedAt: 1000,
+    };
+    await storageRepo.saveConversation(conversation);
+
+    const u1 = makeTestMsg({ id: 'u1', conversationId, role: 'user', content: 'First question', remoteId: '101', createdAt: 1000, updatedAt: 1000 });
+    const a1 = makeTestMsg({ id: 'a1', conversationId, role: 'assistant', parentId: 'u1', remoteId: '102', remoteParentId: '101', createdAt: 1100, updatedAt: 1100 });
+    const u2_a = makeTestMsg({ id: 'u2_a', conversationId, role: 'user', parentId: 'a1', remoteId: '201', remoteParentId: '102', content: 'Alpha branch prompt', createdAt: 2000, updatedAt: 2000 });
+    const a2_a = makeTestMsg({ id: 'a2_a', conversationId, role: 'assistant', parentId: 'u2_a', remoteId: '202', remoteParentId: '201', createdAt: 2100, updatedAt: 2100 });
+    const u2_b = makeTestMsg({ id: 'u2_b', conversationId, role: 'user', parentId: 'a1', remoteId: '301', remoteParentId: '102', content: 'Beta branch prompt', createdAt: 3000, updatedAt: 3000 });
+    const a2_b = makeTestMsg({ id: 'a2_b', conversationId, role: 'assistant', parentId: 'u2_b', remoteId: '302', remoteParentId: '301', createdAt: 3100, updatedAt: 3100 });
+
+    await storageRepo.saveMessages([u1, a1, u2_a, a2_a, u2_b, a2_b]);
+
+    const allMsgs = await storageRepo.listMessagesByConversation(conversationId);
+    const model = {
+      conversation,
+      messages: allMsgs.map((m) => ({
+        message: m,
+        revisions: [],
+        recoveryEvents: [],
+      })),
+    };
+
+    // 1. Export Active Branch
+    const activeMd = buildConversationMarkdown(model, {
+      format: 'markdown',
+      branches: 'active',
+      includeReasoning: false,
+      includeRevisions: false,
+      includeRecovery: false,
+    });
+    expect(activeMd).toContain('First question');
+    expect(activeMd).toContain('Beta branch prompt'); // Default active path has latest branch
+
+    // 2. Export All Branches
+    const allMd = buildConversationMarkdown(model, {
+      format: 'markdown',
+      branches: 'all',
+      includeReasoning: false,
+      includeRevisions: false,
+      includeRecovery: false,
+    });
+    expect(allMd).toContain('First question');
+    expect(allMd).toContain('Alpha branch prompt');
+    expect(allMd).toContain('Beta branch prompt');
   });
 });
