@@ -300,6 +300,27 @@ export class HistoryReconciler {
         continue;
       }
 
+      // Invariant: Completed assistant generations (e.g. from prior regenerate branches)
+      // must NOT be degraded to unmatched_capture or have parentId wiped!
+      // They represent legitimate alternate response variants in the conversation tree.
+      if (em.status === 'finished') {
+        if (em.projectionState !== 'provisional_logical' && em.projectionState !== 'logical') {
+          const updatedMsg: Message = {
+            ...em,
+            projectionState: 'provisional_logical',
+            updatedAt: now,
+          };
+          const existingIdx = messagesToPut.findIndex((p) => p.id === em.id);
+          if (existingIdx >= 0) {
+            messagesToPut[existingIdx] = updatedMsg;
+          } else {
+            messagesToPut.push(updatedMsg);
+            messagesUpdated++;
+          }
+        }
+        continue;
+      }
+
       const hasContent =
         (em.content && em.content.trim().length > 0) ||
         currentRevs.some((r) => r.text.length > 0 || (r.thinking && r.thinking.length > 0));

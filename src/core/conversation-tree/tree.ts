@@ -53,6 +53,13 @@ export function buildConversationTree<T extends Message = Message>(
       depthMap: new Map(),
       activeMessageIds: new Set(),
       getNode: () => undefined,
+      diagnostics: {
+        userBranchGroupCount: 0,
+        assistantVariantGroupCount: 0,
+        orphanPromptsCount: 0,
+        orphanAssistantCount: 0,
+        unresolvedParentLinksCount: 0,
+      },
     };
   }
 
@@ -248,29 +255,9 @@ export function buildConversationTree<T extends Message = Message>(
   const depthMap = new Map<string, number>();
   let activeLeafId: string | null = null;
 
-  // Determine target leaf if available:
-  let targetLeafNode: ConversationTreeNode<T> | undefined;
-
+  // If explicit leaf was requested, walk upward from that leaf
   if (options?.activeLeafId && nodeMap.has(options.activeLeafId)) {
-    targetLeafNode = nodeMap.get(options.activeLeafId);
-  } else if (options?.conversation?.currentMessageId) {
-    const remoteIdStr = String(options.conversation.currentMessageId);
-    const localId = remoteIdMap.get(remoteIdStr) || remoteIdStr;
-    if (nodeMap.has(localId)) {
-      targetLeafNode = nodeMap.get(localId);
-    } else {
-      // Search by remoteId directly
-      for (const node of nodeMap.values()) {
-        if (node.message.remoteId && String(node.message.remoteId) === remoteIdStr) {
-          targetLeafNode = node;
-          break;
-        }
-      }
-    }
-  }
-
-  if (targetLeafNode) {
-    // ── Upward traversal from target leaf to root ──
+    const targetLeafNode = nodeMap.get(options.activeLeafId)!;
     const path: ConversationTreeNode<T>[] = [];
     const visited = new Set<string>();
     let curr: ConversationTreeNode<T> | null = targetLeafNode;
@@ -289,12 +276,70 @@ export function buildConversationTree<T extends Message = Message>(
       depthMap.set(node.message.id, i);
     }
   } else {
-    // ── Downward traversal using branchSelections from root ──
-    const branchSelections = options?.branchSelections || {};
-    const defaultRootIdx = 0;
-    const rootIdx = branchSelections['__root__'] ?? defaultRootIdx;
-    const clampedRootIdx = Math.max(0, Math.min(rootIdx, roots.length - 1));
+    // 7b. Subtree Metadata for intelligent downward branch selection (linear O(N))
+    const subtreeLatestTimestamp = new Map<string, number>();
+    const computeLatest = (node: ConversationTreeNode<T>): number => {
+      let latest = node.message.updatedAt || node.message.createdAt || 0;
+      for (const child of node.children) {
+        const childLatest = computeLatest(child);
+        if (childLatest > latest) {
+          latest = childLatest;
+        }
+      }
+      subtreeLatestTimestamp.set(node.message.id, latest);
+      return latest;
+    };
+    for (const root of roots) {
+      computeLatest(root);
+    }
 
+    // Downward traversal honoring branchSelections, falling back to server currentMessageId or newest subtree
+    const branchSelections = options?.branchSelections || {};
+    const serverCurrentMessageId = options?.conversation?.currentMessageId
+      ? String(options.conversation.currentMessageId)
+      : null;
+
+    const serverAncestorIds = new Set<string>();
+    if (serverCurrentMessageId) {
+      let target: ConversationTreeNode<T> | undefined = nodeMap.get(serverCurrentMessageId);
+      if (!target) {
+        for (const n of nodeMap.values()) {
+          if (n.message.remoteId && String(n.message.remoteId) === serverCurrentMessageId) {
+            target = n;
+            break;
+          }
+        }
+      }
+      let curr: ConversationTreeNode<T> | null = target ?? null;
+      while (curr) {
+        serverAncestorIds.add(curr.message.id);
+        curr = curr.parent;
+      }
+    }
+
+    // Pick root:
+    let rootIdx = 0;
+    if (branchSelections['__root__'] !== undefined) {
+      rootIdx = branchSelections['__root__'];
+    } else if (serverCurrentMessageId && serverAncestorIds.size > 0) {
+      const matchedIdx = roots.findIndex((r) => serverAncestorIds.has(r.message.id));
+      if (matchedIdx >= 0) {
+        rootIdx = matchedIdx;
+      }
+    } else if (options?.preferLatestByDefault && roots.length > 0) {
+      let bestIdx = 0;
+      let bestTime = -1;
+      for (let i = 0; i < roots.length; i++) {
+        const t = subtreeLatestTimestamp.get(roots[i]!.message.id) ?? 0;
+        if (t > bestTime) {
+          bestTime = t;
+          bestIdx = i;
+        }
+      }
+      rootIdx = bestIdx;
+    }
+
+    const clampedRootIdx = Math.max(0, Math.min(rootIdx, roots.length - 1));
     let current: ConversationTreeNode<T> | undefined = roots[clampedRootIdx];
     const visited = new Set<string>();
     let currentDepth = 0;
@@ -311,12 +356,74 @@ export function buildConversationTree<T extends Message = Message>(
         break;
       }
 
-      // Branch index: if not specified, default to 0 for deterministic stability,
-      // or latest child if preferLatestByDefault is requested
-      const defaultChildIdx = options?.preferLatestByDefault ? children.length - 1 : 0;
-      const selIdx = branchSelections[current.message.id] ?? defaultChildIdx;
-      const clampedIdx = Math.max(0, Math.min(selIdx, children.length - 1));
+      let chosenChildIdx = 0;
+      if (branchSelections[current.message.id] !== undefined) {
+        chosenChildIdx = branchSelections[current.message.id]!;
+      } else if (serverCurrentMessageId && serverAncestorIds.size > 0) {
+        const matchedChildIdx = children.findIndex((c) => serverAncestorIds.has(c.message.id));
+        if (matchedChildIdx >= 0) {
+          chosenChildIdx = matchedChildIdx;
+        } else {
+          // If no child leads to server currentMessageId, pick child with newest activity
+          let newestIdx = 0;
+          let newestTime = -1;
+          for (let i = 0; i < children.length; i++) {
+            const time = subtreeLatestTimestamp.get(children[i]!.message.id) ?? 0;
+            if (time > newestTime) {
+              newestTime = time;
+              newestIdx = i;
+            }
+          }
+          chosenChildIdx = newestIdx;
+        }
+      } else {
+        // Pick child with newest activity
+        let newestIdx = options?.preferLatestByDefault ? children.length - 1 : 0;
+        let newestTime = -1;
+        for (let i = 0; i < children.length; i++) {
+          const time = subtreeLatestTimestamp.get(children[i]!.message.id) ?? 0;
+          if (time > newestTime) {
+            newestTime = time;
+            newestIdx = i;
+          }
+        }
+        chosenChildIdx = newestIdx;
+      }
+
+      const clampedIdx = Math.max(0, Math.min(chosenChildIdx, children.length - 1));
       current = children[clampedIdx];
+    }
+  }
+
+  // 9. Compute Diagnostic Metrics
+  let userBranchGroupCount = roots.length > 1 ? 1 : 0;
+  let assistantVariantGroupCount = 0;
+
+  for (const node of nodeMap.values()) {
+    if (node.message.role === 'user' && !node.isRoot && node.userBranchIndex === 0 && node.userBranchCount > 1) {
+      userBranchGroupCount++;
+    }
+    if (node.message.role === 'assistant' && node.assistantVariantIndex === 0 && node.assistantVariantCount > 1) {
+      assistantVariantGroupCount++;
+    }
+  }
+
+  let orphanPromptsCount = 0;
+  let orphanAssistantCount = 0;
+  for (const unlinked of unlinkedMessages) {
+    if (unlinked.role === 'user') {
+      orphanPromptsCount++;
+    } else {
+      orphanAssistantCount++;
+    }
+  }
+
+  let unresolvedParentLinksCount = 0;
+  for (const m of sortedMessages) {
+    if (m.parentId && !idMap.has(m.parentId)) {
+      unresolvedParentLinksCount++;
+    } else if (m.remoteParentId && !remoteIdMap.has(String(m.remoteParentId))) {
+      unresolvedParentLinksCount++;
     }
   }
 
@@ -332,5 +439,12 @@ export function buildConversationTree<T extends Message = Message>(
     depthMap,
     activeMessageIds,
     getNode: (id: string) => nodeMap.get(id),
+    diagnostics: {
+      userBranchGroupCount,
+      assistantVariantGroupCount,
+      orphanPromptsCount,
+      orphanAssistantCount,
+      unresolvedParentLinksCount,
+    },
   };
 }

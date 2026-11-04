@@ -379,6 +379,18 @@
     loading = true;
     error = null;
     try {
+      if (typeof chrome !== 'undefined' && chrome.storage?.local && conversationId) {
+        try {
+          const stored = await chrome.storage.local.get(`branch_selections_${conversationId}`);
+          const saved = stored[`branch_selections_${conversationId}`];
+          if (saved && typeof saved === 'object') {
+            branchSelections = { ...saved };
+          }
+        } catch {
+          // ignore
+        }
+      }
+
       if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
         const req: GetArchiveConversationRequest = {
           type: MESSAGE_GET_ARCHIVE_CONVERSATION,
@@ -465,10 +477,19 @@
     return { count: 1, current: 1, key: '', isUserBranch: false, isAssistantVariant: false };
   }
 
-  function switchBranch(key: string, delta: number, total: number) {
+  async function switchBranch(key: string, delta: number, total: number) {
     const current = branchSelections[key] ?? 0;
     const next = (current + delta + total) % total;
     branchSelections[key] = next;
+    try {
+      if (typeof chrome !== 'undefined' && chrome.storage?.local && conversationId) {
+        await chrome.storage.local.set({
+          [`branch_selections_${conversationId}`]: { ...branchSelections },
+        });
+      }
+    } catch {
+      // ignore
+    }
   }
 
   function getActiveContent(msg: ArchiveMessageSummary): { text: string; thinking?: string } {

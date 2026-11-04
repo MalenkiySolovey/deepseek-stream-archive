@@ -20,6 +20,14 @@ export interface ConversationTreeNode<T extends Message = Message> {
   isLeaf: boolean;
 }
 
+export interface ConversationTreeDiagnostics {
+  userBranchGroupCount: number;
+  assistantVariantGroupCount: number;
+  orphanPromptsCount: number;
+  orphanAssistantCount: number;
+  unresolvedParentLinksCount: number;
+}
+
 export interface ConversationTreeResult<T extends Message = Message> {
   roots: ConversationTreeNode<T>[];
   activePath: T[];
@@ -30,6 +38,7 @@ export interface ConversationTreeResult<T extends Message = Message> {
   depthMap: Map<string, number>;
   activeMessageIds: Set<string>;
   getNode(id: string): ConversationTreeNode<T> | undefined;
+  diagnostics: ConversationTreeDiagnostics;
 }
 
 export interface BuildConversationTreeOptions {
