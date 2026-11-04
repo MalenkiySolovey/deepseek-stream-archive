@@ -199,14 +199,17 @@ export default defineContentScript({
     // ── Context Continuity Delivery Envelope (MAIN world) ──
     let activeEnvelope: ContextDeliveryEnvelope | null = null;
     const bodyToTurnIdMap = new Map<unknown, string>();
-    const promptToTurnIdMap = new Map<string, string>();
-    let lastObservedTurn: {
+    interface ObservedTurnContext {
       clientTurnId: string;
       prompt: string;
       parentTurnId?: string | null;
       sessionId?: string;
       timestamp: number;
-    } | null = null;
+    }
+    const recentObservedTurns: ObservedTurnContext[] = [];
+    const MAX_RECENT_TURNS = 20;
+    const TURN_MATCH_TTL_MS = 30000;
+    let lastObservedTurn: ObservedTurnContext | null = null;
 
     window.addEventListener(STREAMARCHIVE_CONTINUITY_ARM_EVENT, (event: any) => {
       try {
@@ -312,11 +315,6 @@ export default defineContentScript({
             bodyToTurnIdMap.set(body, clientTurnId);
           }
 
-          promptToTurnIdMap.set(userPromptText.trim(), clientTurnId);
-          if (parsed.prompt && parsed.prompt.trim() !== userPromptText.trim()) {
-            promptToTurnIdMap.set(parsed.prompt.trim(), clientTurnId);
-          }
-
           lastObservedTurn = {
             clientTurnId,
             prompt: userPromptText,
@@ -324,6 +322,11 @@ export default defineContentScript({
             sessionId: reqSessionId,
             timestamp: Date.now(),
           };
+
+          recentObservedTurns.unshift(lastObservedTurn);
+          if (recentObservedTurns.length > MAX_RECENT_TURNS) {
+            recentObservedTurns.pop();
+          }
 
           dispatchBridgeEnvelope('user_turn.observed', {
             clientTurnId,
@@ -345,22 +348,33 @@ export default defineContentScript({
       const parsed = parseDeepSeekRequestBody(context.body);
       if (!parsed) return undefined;
 
+      const parentTurnId =
+        parsed.parent_message_id !== undefined
+          ? (parsed.parent_message_id ? String(parsed.parent_message_id) : null)
+          : undefined;
+      const reqSessionId = parsed.chat_session_id ? String(parsed.chat_session_id) : undefined;
+
       let clientTurnId = bodyToTurnIdMap.get(context.body);
       if (!clientTurnId && typeof parsed.prompt === 'string') {
         const trimmed = parsed.prompt.trim();
-        clientTurnId = promptToTurnIdMap.get(trimmed);
-        if (!clientTurnId && lastObservedTurn && Date.now() - lastObservedTurn.timestamp < 15000) {
-          if (lastObservedTurn.prompt.trim() === trimmed) {
-            clientTurnId = lastObservedTurn.clientTurnId;
-          }
+        const now = Date.now();
+        const matched = recentObservedTurns.find((turn) => {
+          if (now - turn.timestamp > TURN_MATCH_TTL_MS) return false;
+          if (turn.prompt.trim() !== trimmed) return false;
+          if (reqSessionId && turn.sessionId && turn.sessionId !== reqSessionId) return false;
+          if (parentTurnId !== undefined && turn.parentTurnId !== undefined && turn.parentTurnId !== parentTurnId) return false;
+          return true;
+        });
+        if (matched) {
+          clientTurnId = matched.clientTurnId;
         }
       }
 
       return {
         clientTurnId,
         requestPrompt: typeof parsed.prompt === 'string' ? parsed.prompt : undefined,
-        requestParentTurnId: parsed.parent_message_id !== undefined ? (parsed.parent_message_id ? String(parsed.parent_message_id) : null) : undefined,
-        requestSessionId: parsed.chat_session_id ? String(parsed.chat_session_id) : undefined,
+        requestParentTurnId: parentTurnId,
+        requestSessionId: reqSessionId,
       };
     };
 

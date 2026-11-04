@@ -28,7 +28,7 @@ export class CanonicalRevisionRecorder implements RevisionRecorder {
   private readonly messageId: string;
   private remoteMessageId?: string;
   private readonly parentId?: string;
-  private readonly remoteParentId?: string;
+  private remoteParentId?: string;
   private readonly sourceRawStreamKey?: string;
   private readonly source: CaptureSource;
   private readonly flushIntervalMs: number;
@@ -85,6 +85,12 @@ export class CanonicalRevisionRecorder implements RevisionRecorder {
     }
   }
 
+  setRemoteParentId(id: string): void {
+    if (id && typeof id === 'string' && id.trim().length > 0) {
+      this.remoteParentId = id.trim();
+    }
+  }
+
   feedDelta(delta: { text?: string; thinking?: string }): void {
     if (delta.text) {
       this.accumulatedText += delta.text;
@@ -105,6 +111,9 @@ export class CanonicalRevisionRecorder implements RevisionRecorder {
       case 'message_id_identified':
         if (event.messageId) {
           this.setRemoteMessageId(event.messageId);
+        }
+        if (event.requestMessageId) {
+          this.setRemoteParentId(event.requestMessageId);
         }
         break;
 

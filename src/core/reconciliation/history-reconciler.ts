@@ -422,10 +422,14 @@ export class HistoryReconciler {
       if (m.remoteParentId) {
         expectedParentId = remoteToLocalMap.get(m.remoteParentId);
       }
-      if (!expectedParentId && m.parentId && remoteToLocalMap.has(m.parentId)) {
-        expectedParentId = remoteToLocalMap.get(m.parentId);
+      if (!expectedParentId && m.parentId) {
+        if (remoteToLocalMap.has(m.parentId)) {
+          expectedParentId = remoteToLocalMap.get(m.parentId);
+        } else if (combinedMessages.has(m.parentId)) {
+          expectedParentId = m.parentId;
+        }
       }
-      if (!expectedParentId && m.role === 'assistant' && m.parentId && !combinedMessages.has(m.parentId)) {
+      if (!expectedParentId && m.role === 'assistant') {
         const candidateUser = Array.from(combinedMessages.values()).find(
           (u) =>
             u.role === 'user' &&

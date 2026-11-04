@@ -183,11 +183,12 @@ export class CanonicalStreamCoordinator {
     }
 
     const deterministicMessageId = makeProvisionalMessageId(this.rawStreamKey);
+    const isNewUserTurn = Boolean(this.userMessage?.id || config.clientTurnId);
     this.recorder = new CanonicalRevisionRecorder({
       conversationId: this.provisionalSessionId,
       messageId: deterministicMessageId,
-      parentId: this.userMessage?.id || config.clientTurnId,
-      remoteParentId: config.requestParentMessageId || undefined,
+      parentId: isNewUserTurn ? (this.userMessage?.id || config.clientTurnId) : (config.requestParentMessageId || undefined),
+      remoteParentId: isNewUserTurn ? undefined : (config.requestParentMessageId || undefined),
       sourceRawStreamKey: this.rawStreamKey,
       flushIntervalMs: this.debounceMs,
       minCharsForFlush: config.minCharsForFlush ?? 50,

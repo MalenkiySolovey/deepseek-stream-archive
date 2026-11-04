@@ -5,7 +5,7 @@ import {
   type StreamArchiveBridgeEnvelope,
   type SyntheticTestPayload,
 } from './protocol';
-import type { TransportEvent, TransportKind, TransportEventType } from '../transport/types';
+import type { TransportEvent, TransportKind, TransportEventType, TransportMetadata } from '../transport/types';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -151,13 +151,45 @@ export function validateTransportEventPayload(payload: unknown): TransportEvent 
     ) {
       return null;
     }
-    result.metadata = {
+    const metadata: TransportMetadata = {
       method: payload.metadata.method,
       url: payload.metadata.url,
       status: typeof payload.metadata.status === 'number' ? payload.metadata.status : undefined,
       statusText: typeof payload.metadata.statusText === 'string' ? payload.metadata.statusText : undefined,
       contentType: typeof payload.metadata.contentType === 'string' ? payload.metadata.contentType : undefined,
     };
+
+    if (
+      typeof payload.metadata.clientTurnId === 'string' &&
+      payload.metadata.clientTurnId.trim().length > 0 &&
+      payload.metadata.clientTurnId.length <= MAX_ID_CHARS
+    ) {
+      metadata.clientTurnId = payload.metadata.clientTurnId.trim();
+    }
+
+    if (typeof payload.metadata.requestPrompt === 'string') {
+      metadata.requestPrompt = payload.metadata.requestPrompt;
+    }
+
+    if (payload.metadata.requestParentTurnId === null) {
+      metadata.requestParentTurnId = null;
+    } else if (
+      typeof payload.metadata.requestParentTurnId === 'string' &&
+      payload.metadata.requestParentTurnId.trim().length > 0 &&
+      payload.metadata.requestParentTurnId.length <= MAX_ID_CHARS
+    ) {
+      metadata.requestParentTurnId = payload.metadata.requestParentTurnId.trim();
+    }
+
+    if (
+      typeof payload.metadata.requestSessionId === 'string' &&
+      payload.metadata.requestSessionId.trim().length > 0 &&
+      payload.metadata.requestSessionId.length <= MAX_ID_CHARS
+    ) {
+      metadata.requestSessionId = payload.metadata.requestSessionId.trim();
+    }
+
+    result.metadata = metadata;
   }
 
   if (payload.reason !== undefined) {

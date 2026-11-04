@@ -114,18 +114,29 @@ export function buildConversationTree<T extends Message = Message>(
     }
 
     // For assistant messages without explicit parentage:
-    // Only resolve to preceding user message if completely unambiguous
+    // 1. Exact pairing via sourceRawStreamKey
+    // 2. Only resolve to preceding user message if completely unambiguous
     // (e.g. legacy linear v0.1.0 archive with exactly 1 candidate user prompt in conversation).
     // In branched or multi-prompt conversations, never guess chronologically.
     if (!pId && m.role === 'assistant') {
-      const candidateUserMsgs: T[] = [];
-      for (let j = i - 1; j >= 0; j--) {
-        if (sortedMessages[j]!.role === 'user') {
-          candidateUserMsgs.push(sortedMessages[j]!);
+      if (m.sourceRawStreamKey) {
+        const streamUser = sortedMessages.find(
+          (cand) => cand.role === 'user' && cand.sourceRawStreamKey === m.sourceRawStreamKey
+        );
+        if (streamUser) {
+          pId = streamUser.id;
         }
       }
-      if (candidateUserMsgs.length === 1) {
-        pId = candidateUserMsgs[0]!.id;
+      if (!pId) {
+        const candidateUserMsgs: T[] = [];
+        for (let j = i - 1; j >= 0; j--) {
+          if (sortedMessages[j]!.role === 'user') {
+            candidateUserMsgs.push(sortedMessages[j]!);
+          }
+        }
+        if (candidateUserMsgs.length === 1) {
+          pId = candidateUserMsgs[0]!.id;
+        }
       }
     }
 

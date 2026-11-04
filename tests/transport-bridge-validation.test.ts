@@ -122,4 +122,63 @@ describe('Transport Bridge Validation', () => {
 
     expect(validateTransportEventPayload(missingChunkText)).toBeNull();
   });
+
+  it('validates and preserves transport metadata fields: clientTurnId, requestPrompt, requestParentTurnId, requestSessionId', () => {
+    const eventWithMetadata: TransportEvent = {
+      producerSessionId: 'prod_1',
+      streamId: 'stream_1',
+      sequence: 1,
+      streamSequence: 0,
+      timestamp: Date.now(),
+      transport: 'fetch',
+      type: 'open',
+      metadata: {
+        method: 'POST',
+        url: 'https://chat.deepseek.com/api/v0/chat/completion',
+        status: 200,
+        statusText: 'OK',
+        contentType: 'text/event-stream',
+        clientTurnId: 'turn_user_test',
+        requestPrompt: 'Explain quantum computing',
+        requestParentTurnId: 'asst_remote_0',
+        requestSessionId: 'session_conv_123',
+      },
+    };
+
+    const validated = validateTransportEventPayload(eventWithMetadata);
+    expect(validated).not.toBeNull();
+    expect(validated?.metadata).toEqual({
+      method: 'POST',
+      url: 'https://chat.deepseek.com/api/v0/chat/completion',
+      status: 200,
+      statusText: 'OK',
+      contentType: 'text/event-stream',
+      clientTurnId: 'turn_user_test',
+      requestPrompt: 'Explain quantum computing',
+      requestParentTurnId: 'asst_remote_0',
+      requestSessionId: 'session_conv_123',
+    });
+
+    // Test with null requestParentTurnId (e.g. root prompt)
+    const eventWithNullParent: TransportEvent = {
+      ...eventWithMetadata,
+      metadata: {
+        ...eventWithMetadata.metadata!,
+        requestParentTurnId: null,
+      },
+    };
+    const validatedNullParent = validateTransportEventPayload(eventWithNullParent);
+    expect(validatedNullParent?.metadata?.requestParentTurnId).toBeNull();
+
+    // Test with oversized fields stripped safely
+    const eventWithOversized: TransportEvent = {
+      ...eventWithMetadata,
+      metadata: {
+        ...eventWithMetadata.metadata!,
+        clientTurnId: 'a'.repeat(200), // > MAX_ID_CHARS (128)
+      },
+    };
+    const validatedOversized = validateTransportEventPayload(eventWithOversized);
+    expect(validatedOversized?.metadata?.clientTurnId).toBeUndefined();
+  });
 });
