@@ -26,6 +26,7 @@ import {
   normalizeEndpointPath,
 } from '../src/adapters/deepseek/request/parser';
 import type { ContextDeliveryEnvelope } from '../src/adapters/deepseek/request/types';
+import { TurnIdentityCoordinator } from '../src/transport/request-identity';
 import { logger } from '../src/shared/logger';
 
 const TRANSPORT_HOOK_KEY = Symbol.for('__STREAMARCHIVE_MAIN_HOOK__');
@@ -102,59 +103,11 @@ export default defineContentScript({
     };
 
     // Track active streams and their associated turn identities
-    interface ActiveStreamInfo {
-      streamId: string;
-      clientTurnId?: string;
-      hasReceivedTokens: boolean;
-      isTerminal: boolean;
-    }
-    const activeStreamMap = new Map<string, ActiveStreamInfo>();
+    const turnCoordinator = new TurnIdentityCoordinator();
 
     // Forward captured transport events across MAIN -> ISOLATED boundary
     const handleTransportEvent = (event: TransportEvent) => {
-      let streamInfo = activeStreamMap.get(event.streamId);
-      if (!streamInfo) {
-        streamInfo = {
-          streamId: event.streamId,
-          clientTurnId: event.metadata?.clientTurnId,
-          hasReceivedTokens: false,
-          isTerminal: false,
-        };
-        activeStreamMap.set(event.streamId, streamInfo);
-      } else if (!streamInfo.clientTurnId && event.metadata?.clientTurnId) {
-        streamInfo.clientTurnId = event.metadata.clientTurnId;
-      }
-
-      if (event.type === 'chunk' && event.chunkText && event.chunkText.trim().length > 0) {
-        streamInfo.hasReceivedTokens = true;
-        if (streamInfo.clientTurnId) {
-          const matchedTurn = recentObservedTurns.find((t) => t.clientTurnId === streamInfo!.clientTurnId);
-          if (matchedTurn) {
-            matchedTurn.hasReceivedTokens = true;
-          }
-        }
-        if (lastObservedTurn && lastObservedTurn.clientTurnId === streamInfo.clientTurnId) {
-          lastObservedTurn.hasReceivedTokens = true;
-        }
-      } else if (event.type === 'complete' || event.type === 'abort' || event.type === 'error') {
-        streamInfo.isTerminal = true;
-        if (streamInfo.clientTurnId) {
-          const matchedTurn = recentObservedTurns.find((t) => t.clientTurnId === streamInfo!.clientTurnId);
-          if (matchedTurn) {
-            matchedTurn.isTerminal = true;
-          }
-        }
-        if (lastObservedTurn && lastObservedTurn.clientTurnId === streamInfo.clientTurnId) {
-          lastObservedTurn.isTerminal = true;
-          // Clear active turn once authoritative response completes or if tokens were received
-          if (streamInfo.hasReceivedTokens) {
-            lastObservedTurn = null;
-          }
-        }
-        // Retain streamInfo briefly for late transport events, then cleanup
-        setTimeout(() => activeStreamMap.delete(event.streamId), 5000);
-      }
-
+      turnCoordinator.handleTransportStreamEvent(event);
       dispatchBridgeEnvelope('transport.event', event);
     };
 
@@ -251,20 +204,6 @@ export default defineContentScript({
 
     // ── Context Continuity Delivery Envelope (MAIN world) ──
     let activeEnvelope: ContextDeliveryEnvelope | null = null;
-    const bodyToTurnIdMap = new Map<unknown, string>();
-    interface ObservedTurnContext {
-      clientTurnId: string;
-      prompt: string;
-      parentTurnId?: string | null;
-      sessionId?: string;
-      timestamp: number;
-      hasReceivedTokens: boolean;
-      isTerminal: boolean;
-    }
-    const recentObservedTurns: ObservedTurnContext[] = [];
-    const MAX_RECENT_TURNS = 20;
-    const TURN_MATCH_TTL_MS = 30000;
-    let lastObservedTurn: ObservedTurnContext | null = null;
 
     window.addEventListener(STREAMARCHIVE_CONTINUITY_ARM_EVENT, (event: any) => {
       try {
@@ -353,42 +292,15 @@ export default defineContentScript({
               : undefined;
           const reqSessionId = parsed.chat_session_id ? String(parsed.chat_session_id) : undefined;
 
-          let clientTurnId: string;
-          const TRANSPORT_RETRY_WINDOW_MS = 2000;
-          if (
-            lastObservedTurn &&
-            !lastObservedTurn.hasReceivedTokens &&
-            lastObservedTurn.prompt.trim() === userPromptText.trim() &&
-            lastObservedTurn.sessionId === reqSessionId &&
-            lastObservedTurn.parentTurnId === parentTurnId &&
-            Date.now() - lastObservedTurn.timestamp < TRANSPORT_RETRY_WINDOW_MS
-          ) {
-            clientTurnId = lastObservedTurn.clientTurnId;
-          } else {
-            clientTurnId =
-              typeof crypto !== 'undefined' && crypto.randomUUID
-                ? `turn_user_${crypto.randomUUID()}`
-                : `turn_user_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-          }
-
-          bodyToTurnIdMap.set(finalBody, clientTurnId);
-          if (body !== finalBody) {
-            bodyToTurnIdMap.set(body, clientTurnId);
-          }
-
-          lastObservedTurn = {
-            clientTurnId,
+          const { clientTurnId } = turnCoordinator.resolveTurnForOutgoingRequest({
             prompt: userPromptText,
-            parentTurnId,
             sessionId: reqSessionId,
-            timestamp: Date.now(),
-            hasReceivedTokens: false,
-            isTerminal: false,
-          };
-
-          recentObservedTurns.unshift(lastObservedTurn);
-          if (recentObservedTurns.length > MAX_RECENT_TURNS) {
-            recentObservedTurns.pop();
+            parentTurnId,
+            isRegenRequest: false,
+            requestBody: finalBody,
+          });
+          if (body !== finalBody) {
+            turnCoordinator.recordRequestBody(body, clientTurnId);
           }
 
           dispatchBridgeEnvelope('user_turn.observed', {
@@ -411,39 +323,21 @@ export default defineContentScript({
       const parsed = parseDeepSeekRequestBody(context.body);
       if (!parsed) return undefined;
 
+      const isRegenRequest =
+        normalizeEndpointPath(context.url).endsWith('/api/v0/chat/regenerate') ||
+        Boolean((parsed as any)?.regenerate);
+
       const parentTurnId =
         parsed.parent_message_id !== undefined
           ? (parsed.parent_message_id ? String(parsed.parent_message_id) : null)
           : undefined;
       const reqSessionId = parsed.chat_session_id ? String(parsed.chat_session_id) : undefined;
 
-      let clientTurnId = bodyToTurnIdMap.get(context.body);
-      if (!clientTurnId && typeof parsed.prompt === 'string') {
-        const trimmed = parsed.prompt.trim();
-        const now = Date.now();
-        const matched = recentObservedTurns.find((turn) => {
-          if (now - turn.timestamp > 2500) return false;
-          if (turn.isTerminal || turn.hasReceivedTokens) return false;
-          if (turn.prompt.trim() !== trimmed) return false;
-          if (reqSessionId && turn.sessionId && turn.sessionId !== reqSessionId) return false;
-          if (parentTurnId !== undefined && turn.parentTurnId !== undefined && turn.parentTurnId !== parentTurnId) return false;
-          return true;
-        });
-        if (matched) {
-          clientTurnId = matched.clientTurnId;
-        }
-      }
-
-      const isRegenRequest =
-        normalizeEndpointPath(context.url).endsWith('/api/v0/chat/regenerate') ||
-        Boolean((parsed as any)?.regenerate);
-
-      return {
-        clientTurnId: isRegenRequest ? undefined : clientTurnId,
-        requestPrompt: !isRegenRequest && typeof parsed.prompt === 'string' ? parsed.prompt : undefined,
-        requestParentTurnId: parentTurnId,
-        requestSessionId: reqSessionId,
-      };
+      return turnCoordinator.extractRequestMetadata(context, isRegenRequest, {
+        prompt: typeof parsed.prompt === 'string' ? parsed.prompt : undefined,
+        sessionId: reqSessionId,
+        parentTurnId,
+      });
     };
 
     // Install passive transport observers

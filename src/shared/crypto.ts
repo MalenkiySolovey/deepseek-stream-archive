@@ -52,7 +52,7 @@ export interface PersistedCanonicalCheckpointPayload {
     role: string;
     status: string;
     content?: string;
-    parentId?: string;
+    parentId?: string | null;
     remoteParentId?: string;
     identityState?: string;
     projectionState?: string;
@@ -68,7 +68,7 @@ export interface PersistedCanonicalCheckpointPayload {
     role: string;
     status: string;
     content?: string;
-    parentId?: string;
+    parentId?: string | null;
     remoteParentId?: string;
     identityState?: string;
     projectionState?: string;

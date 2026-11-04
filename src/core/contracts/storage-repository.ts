@@ -29,8 +29,8 @@ export interface CanonicalCheckpointData {
   isTerminal?: boolean;
   isFinal?: boolean;
   conversation?: Conversation;
-  userMessage?: Message;
-  message: Message;
+  userMessage?: Message | (Omit<Message, 'parentId'> & { parentId?: string | null });
+  message: Message | (Omit<Message, 'parentId'> & { parentId?: string | null });
   revisions: ResponseRevision[];
   recoveryEvents?: RecoveryEvent[];
 }

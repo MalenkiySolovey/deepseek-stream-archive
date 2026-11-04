@@ -122,7 +122,7 @@ export async function persistCanonicalCheckpointMessage(
       }
 
       if (needsParentResolution) {
-        const resolved = resolveAssistantParent(asstMsg, existingMsgs);
+        const resolved = resolveAssistantParent(asstMsg as Message, existingMsgs);
 
         if (resolved.parentId) {
           asstMsg.parentId = resolved.parentId;
@@ -148,7 +148,7 @@ export async function persistCanonicalCheckpointMessage(
           logger.warn(
             `[CheckpointPersister] Assistant ${asstMsg.id} had parentId ${asstMsg.parentId} conflicting with remoteParentId ${remoteParent}; unlinking until verified parent arrives.`
           );
-          asstMsg.parentId = undefined;
+          asstMsg.parentId = null;
         }
       }
 
@@ -159,7 +159,7 @@ export async function persistCanonicalCheckpointMessage(
           logger.warn(
             `[CheckpointPersister] Rejected invalid role parentage: assistant message ${asstMsg.id} cannot have ${parentMsg.role} message ${parentMsg.id} as parent`
           );
-          asstMsg.parentId = undefined;
+          asstMsg.parentId = null;
         }
       }
     }
@@ -170,10 +170,10 @@ export async function persistCanonicalCheckpointMessage(
       success: true,
       streamKey,
       checkpointSeq,
-      resolvedParentId: checkpoint.message.parentId,
+      resolvedParentId: checkpoint.message.parentId || undefined,
     };
   } catch (err) {
-    const errorMsg = err instanceof Error ? err.message : String(err);
+    const errorMsg = err instanceof Error ? err.stack || err.message : String(err);
     logger.error(`[CheckpointPersister] Error persisting canonical checkpoint: ${errorMsg}`);
     return {
       success: false,

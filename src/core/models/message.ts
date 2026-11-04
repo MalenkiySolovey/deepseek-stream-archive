@@ -94,11 +94,14 @@ export function makeProvisionalMessageId(rawStreamKey: string): string {
  */
 export function mergeCanonicalMessage(
   existing: Message | undefined,
-  incoming: Message,
+  incoming: Message | (Omit<Message, 'parentId'> & { parentId?: string | null }),
   provenance: 'live' | 'history' | 'replay'
 ): Message {
   if (!existing) {
-    return incoming;
+    return {
+      ...incoming,
+      parentId: incoming.parentId || undefined,
+    };
   }
 
   // 1. Identity State: reconciled > provisional
@@ -128,6 +131,9 @@ export function mergeCanonicalMessage(
   } else if (existing.identityState === 'reconciled' && existing.parentId && provenance === 'live') {
     // Invariant: Server history authoritative parentage must NOT be overwritten by live checkpoints
     parentId = existing.parentId;
+  } else if (incoming.parentId === null) {
+    // Explicit unlinking requested: clear parentage
+    parentId = undefined;
   } else if (
     existing.parentId &&
     incoming.parentId &&
@@ -136,9 +142,10 @@ export function mergeCanonicalMessage(
   ) {
     // Invariant: incoming has raw remoteParentId masquerading as local parentId; protect existing local parentId
     parentId = existing.parentId;
-  } else if (incoming.parentId !== undefined) {
+  } else if (typeof incoming.parentId === 'string' && incoming.parentId.trim().length > 0) {
     parentId = incoming.parentId;
   } else {
+    // Field omitted (undefined) -> preserve existing parentId
     parentId = existing.parentId;
   }
 

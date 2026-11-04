@@ -125,7 +125,31 @@ export class HistoryReconciler {
             const duplicateRoots = unmatchedProvisionalUser.filter(
               (c) => !c.remoteParentId && !c.parentId && c.content === hm.text
             );
-            return duplicateRoots.length === 1;
+            // Invariant: Server history must also contain exactly ONE root message with this content
+            const serverDuplicateRoots = messages.filter(
+              (m) => m.role === 'user' && !m.parentId && m.text === hm.text
+            );
+            if (serverDuplicateRoots.length !== 1) {
+              return false;
+            }
+            if (duplicateRoots.length === 1) {
+              return true;
+            }
+            // If multiple provisional roots exist (e.g. from network transport retries),
+            // match the unique one that has a logical assistant child:
+            const candidatesWithLogicalChild = duplicateRoots.filter(
+              (c) =>
+                existingMessages.some(
+                  (m) => m.role === 'assistant' && m.parentId === c.id && isLogicalMessage(m)
+                ) ||
+                messagesToPut.some(
+                  (m) => m.role === 'assistant' && m.parentId === c.id && isLogicalMessage(m)
+                )
+            );
+            if (candidatesWithLogicalChild.length === 1 && candidatesWithLogicalChild[0]!.id === cand.id) {
+              return true;
+            }
+            return false;
           }
         });
         if (matchIdx >= 0) {
@@ -173,7 +197,15 @@ export class HistoryReconciler {
             return false;
           }
 
-          // 3. Among candidates sharing this confirmed parent:
+          // 3. Content MUST match between the candidate generation and the history generation:
+          const candText = (cand.content || '').trim();
+          const histText = (hm.text || '').trim();
+          if (candText !== histText) {
+            return false;
+          }
+
+          // 4. Disambiguation under this confirmed parent:
+          // Candidates under same confirmed parent with matching content
           const candidatesUnderParent = unmatchedProvisionalAssistant.filter((c) =>
             Boolean(
               (parentUser && c.parentId && c.parentId === parentUser.id) ||
@@ -181,25 +213,24 @@ export class HistoryReconciler {
               (parentUser && c.parentId && !existingMessages.some((m) => m.id === c.parentId) && c.content && hm.text && c.content.trim() === hm.text.trim())
             )
           );
+          const sameTextCandidatesUnderParent = candidatesUnderParent.filter(
+            (c) => (c.content || '').trim() === histText
+          );
 
-          if (candidatesUnderParent.length === 1) {
-            // Unambiguous: exactly one provisional assistant exists under this verified parent
-            return true;
-          }
+          // Server history messages under same parent with identical content (e.g. Regenerate responses with identical text)
+          const sameTextServerUnderParent = messages.filter(
+            (m) =>
+              m.role === 'assistant' &&
+              (m.parentId || undefined) === (hm.parentId || undefined) &&
+              (m.text || '').trim() === histText
+          );
 
-          // Multiple candidates under same parent (regenerate variants):
-          // Match by content fingerprint / exact text
-          const candText = cand.content || '';
-          if (candText.trim().length > 0 && hm.text.trim().length > 0) {
-            const sameContentCandidates = candidatesUnderParent.filter(
-              (c) => (c.content || '').trim() === hm.text.trim()
-            );
-            if (sameContentCandidates.length === 1 && candText.trim() === hm.text.trim()) {
-              return true;
-            }
-          }
-
-          return false;
+          // Invariant: If there are multiple regenerate variants with identical text under the same parent
+          // (either locally or on the server), do NOT guess! Keep records separate until proven.
+          return (
+            sameTextCandidatesUnderParent.length === 1 &&
+            sameTextServerUnderParent.length === 1
+          );
         });
         if (matchIdx >= 0) {
           existing = unmatchedProvisionalAssistant.splice(matchIdx, 1)[0]!;
@@ -350,9 +381,53 @@ export class HistoryReconciler {
       }
 
       if (em.role === 'user') {
-        // Preserving alternate user edit branches:
-        // If the user prompt has content, it is a legitimate user turn in an alternate branch.
-        // It must NOT be degraded to attempt_only or have its parentId wiped!
+        // Distinguish genuine alternate user edit branches from unfulfilled technical transport retries:
+        // A technical transport retry:
+        // 1. Has NO logical assistant children in this conversation
+        // 2. An identical reconciled user turn exists in the conversation with identical parentage (both root or identical parent)
+        const hasLogicalAssistant =
+          existingMessages.some(
+            (a) => a.role === 'assistant' && a.parentId === em.id && isLogicalMessage(a)
+          ) ||
+          messagesToPut.some(
+            (a) => a.role === 'assistant' && a.parentId === em.id && isLogicalMessage(a)
+          );
+
+        const emParentKey = em.parentId || em.remoteParentId || '__root__';
+        const hasReconciledDuplicateTurn =
+          existingMessages.some((other) => {
+            if (other.id === em.id || other.role !== 'user' || other.identityState !== 'reconciled') return false;
+            if (other.content?.trim() !== em.content?.trim()) return false;
+            const otherParentKey = other.parentId || other.remoteParentId || '__root__';
+            return otherParentKey === emParentKey;
+          }) ||
+          messagesToPut.some((other) => {
+            if (other.id === em.id || other.role !== 'user' || other.identityState !== 'reconciled') return false;
+            if (other.content?.trim() !== em.content?.trim()) return false;
+            const otherParentKey = other.parentId || other.remoteParentId || '__root__';
+            return otherParentKey === emParentKey;
+          });
+
+        if (!hasLogicalAssistant && hasReconciledDuplicateTurn) {
+          if (em.projectionState !== 'attempt_only') {
+            const updatedMsg: Message = {
+              ...em,
+              projectionState: 'attempt_only',
+              parentId: undefined,
+              updatedAt: now,
+            };
+            const existingIdx = messagesToPut.findIndex((p) => p.id === em.id);
+            if (existingIdx >= 0) {
+              messagesToPut[existingIdx] = updatedMsg;
+            } else {
+              messagesToPut.push(updatedMsg);
+              messagesUpdated++;
+            }
+          }
+          continue;
+        }
+
+        // Genuine user turn (e.g. alternate user edit branch with content):
         if (em.content && em.content.trim().length > 0) {
           if (em.projectionState !== 'provisional_logical' && em.projectionState !== 'logical') {
             const updatedMsg: Message = {
