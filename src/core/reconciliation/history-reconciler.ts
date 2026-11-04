@@ -80,6 +80,10 @@ export class HistoryReconciler {
     const unmatchedProvisionalUser = existingMessages.filter(
       (m) => m.role === 'user' && !m.remoteId && m.identityState !== 'reconciled'
     );
+    // Index unmatched provisional assistant messages for linking to authoritative server history
+    const unmatchedProvisionalAssistant = existingMessages.filter(
+      (m) => m.role === 'assistant' && !m.remoteId && m.identityState !== 'reconciled'
+    );
 
     let messagesCreated = 0;
     let messagesUpdated = 0;
@@ -110,6 +114,31 @@ export class HistoryReconciler {
         });
         if (matchIdx >= 0) {
           existing = unmatchedProvisionalUser.splice(matchIdx, 1)[0]!;
+          existing.remoteId = hm.messageId;
+          existingByRemoteId.set(hm.messageId, existing);
+        }
+      }
+
+      // Associate unmatched provisional assistant turn with authoritative history turn
+      if (!existing && hm.role === 'assistant') {
+        const parentUser = hm.parentId ? existingByRemoteId.get(hm.parentId) : undefined;
+        const matchIdx = unmatchedProvisionalAssistant.findIndex((cand) => {
+          // Parent linkage check:
+          if (cand.remoteParentId && hm.parentId && cand.remoteParentId !== hm.parentId) {
+            return false;
+          }
+          if (
+            parentUser &&
+            cand.parentId &&
+            cand.parentId !== parentUser.id &&
+            existingMessages.some((m) => m.id === cand.parentId)
+          ) {
+            return false;
+          }
+          return true;
+        });
+        if (matchIdx >= 0) {
+          existing = unmatchedProvisionalAssistant.splice(matchIdx, 1)[0]!;
           existing.remoteId = hm.messageId;
           existingByRemoteId.set(hm.messageId, existing);
         }
@@ -389,9 +418,26 @@ export class HistoryReconciler {
         continue;
       }
 
+      let expectedParentId: string | undefined;
       if (m.remoteParentId) {
-        const expectedParentId = remoteToLocalMap.get(m.remoteParentId);
-        if (expectedParentId && expectedParentId !== m.id) {
+        expectedParentId = remoteToLocalMap.get(m.remoteParentId);
+      }
+      if (!expectedParentId && m.parentId && remoteToLocalMap.has(m.parentId)) {
+        expectedParentId = remoteToLocalMap.get(m.parentId);
+      }
+      if (!expectedParentId && m.role === 'assistant' && m.parentId && !combinedMessages.has(m.parentId)) {
+        const candidateUser = Array.from(combinedMessages.values()).find(
+          (u) =>
+            u.role === 'user' &&
+            ((m.sourceRawStreamKey && u.sourceRawStreamKey === m.sourceRawStreamKey) ||
+              (m.remoteParentId && u.remoteId === m.remoteParentId))
+        );
+        if (candidateUser) {
+          expectedParentId = candidateUser.id;
+        }
+      }
+
+      if (expectedParentId && expectedParentId !== m.id) {
           const parentMsg = combinedMessages.get(expectedParentId);
           // Invariant: Assistant message parent MUST be a user message!
           // User message parent MUST be an assistant message (or null).
@@ -427,7 +473,6 @@ export class HistoryReconciler {
           }
         }
       }
-    }
 
     const plan: HistoryReconciliationPlan = {
       conversation,

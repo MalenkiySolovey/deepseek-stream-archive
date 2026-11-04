@@ -106,12 +106,29 @@ export function installXhrCapture(options: XhrCaptureOptions): () => void {
     };
     xhrStateMap.set(xhr, state);
 
+    let sendArgs = args;
+    if (options.onRequest) {
+      try {
+        const transformed = options.onRequest({
+          method: state.metadata?.method || 'POST',
+          url: state.rawUrl || state.metadata?.url || '',
+          body: args[0],
+          xhr,
+        });
+        if (transformed && transformed.body !== undefined) {
+          sendArgs = [transformed.body];
+        }
+      } catch {
+        // Fail-open
+      }
+    }
+
     if (options.onRequestMetadata) {
       try {
         const extra = options.onRequestMetadata({
           method: state.metadata?.method || 'POST',
           url: state.rawUrl || state.metadata?.url || '',
-          body: args[0],
+          body: sendArgs[0],
         });
         if (extra) {
           state.metadata = {
@@ -168,9 +185,11 @@ export function installXhrCapture(options: XhrCaptureOptions): () => void {
             status: xhr.status,
             statusText: xhr.statusText,
             contentType: xhr.getResponseHeader('content-type') || 'text/event-stream',
+            clientTurnId: state.metadata?.clientTurnId,
             requestPrompt: state.metadata?.requestPrompt,
             requestParentTurnId: state.metadata?.requestParentTurnId,
             requestSessionId: state.metadata?.requestSessionId,
+            ...state.metadata,
           };
 
           onEvent({
@@ -297,23 +316,6 @@ export function installXhrCapture(options: XhrCaptureOptions): () => void {
         });
         xhr.addEventListener('abort', () => handleTerminal('abort', 'User aborted'));
         xhr.addEventListener('error', () => handleTerminal('error', 'Network error'));
-      } catch {
-        // Fail-open
-      }
-    }
-
-    let sendArgs = args;
-    if (options.onRequest) {
-      try {
-        const transformed = options.onRequest({
-          method: state.metadata?.method || 'GET',
-          url: state.rawUrl || state.metadata?.url || '',
-          body: args[0],
-          xhr,
-        });
-        if (transformed && transformed.body !== undefined) {
-          sendArgs = [transformed.body];
-        }
       } catch {
         // Fail-open
       }

@@ -1219,6 +1219,27 @@ export default defineBackground(() => {
               updatedAt: userMsg.updatedAt,
             });
           }
+
+          // Resolve parent link if remoteParentId was provided
+          if (userMsg.remoteParentId && !userMsg.parentId) {
+            try {
+              const existingMsgs = await storageRepo.listMessagesByConversation(userMsg.conversationId);
+              const parentCandidate = existingMsgs.find(
+                (m) => m.remoteId && String(m.remoteId) === String(userMsg.remoteParentId)
+              );
+              if (parentCandidate) {
+                userMsg.parentId = parentCandidate.id;
+              } else {
+                const candidateAssistants = existingMsgs.filter((m) => m.role === 'assistant');
+                if (candidateAssistants.length === 1) {
+                  userMsg.parentId = candidateAssistants[0]!.id;
+                }
+              }
+            } catch {
+              // fail-open: tree resolution will perform fallback
+            }
+          }
+
           await storageRepo.saveMessages([userMsg]);
           sendResponse({
             success: true,

@@ -187,6 +187,7 @@ export class CanonicalStreamCoordinator {
       conversationId: this.provisionalSessionId,
       messageId: deterministicMessageId,
       parentId: this.userMessage?.id || config.clientTurnId,
+      remoteParentId: config.requestParentMessageId || undefined,
       sourceRawStreamKey: this.rawStreamKey,
       flushIntervalMs: this.debounceMs,
       minCharsForFlush: config.minCharsForFlush ?? 50,
@@ -241,6 +242,10 @@ export class CanonicalStreamCoordinator {
 
   feedSemanticEvent(event: DeepSeekSemanticEvent): void {
     if (this.isDisposed || this.isTerminalCommitted || this.state === 'failed') return;
+
+    if (event.type === 'message_id_identified' && event.requestMessageId && this.userMessage) {
+      this.userMessage.remoteId = event.requestMessageId;
+    }
 
     this.recorder.feedSemanticEvent(event);
 

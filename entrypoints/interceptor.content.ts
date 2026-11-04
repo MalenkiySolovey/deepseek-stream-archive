@@ -199,6 +199,14 @@ export default defineContentScript({
     // ── Context Continuity Delivery Envelope (MAIN world) ──
     let activeEnvelope: ContextDeliveryEnvelope | null = null;
     const bodyToTurnIdMap = new Map<unknown, string>();
+    const promptToTurnIdMap = new Map<string, string>();
+    let lastObservedTurn: {
+      clientTurnId: string;
+      prompt: string;
+      parentTurnId?: string | null;
+      sessionId?: string;
+      timestamp: number;
+    } | null = null;
 
     window.addEventListener(STREAMARCHIVE_CONTINUITY_ARM_EVENT, (event: any) => {
       try {
@@ -276,25 +284,50 @@ export default defineContentScript({
       if (isDeepSeekUserGenerationEndpoint(url, method)) {
         const parsed = parseDeepSeekRequestBody(finalBody);
         if (parsed && typeof parsed.prompt === 'string' && parsed.prompt.trim().length > 0) {
-          const clientTurnId =
-            typeof crypto !== 'undefined' && crypto.randomUUID
-              ? `turn_user_${crypto.randomUUID()}`
-              : `turn_user_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+          const userPromptText = originalUserPrompt || parsed.prompt;
+          const parentTurnId =
+            parsed.parent_message_id !== undefined
+              ? (parsed.parent_message_id ? String(parsed.parent_message_id) : null)
+              : undefined;
+          const reqSessionId = parsed.chat_session_id ? String(parsed.chat_session_id) : undefined;
+
+          let clientTurnId: string;
+          if (
+            lastObservedTurn &&
+            lastObservedTurn.prompt.trim() === userPromptText.trim() &&
+            lastObservedTurn.sessionId === reqSessionId &&
+            lastObservedTurn.parentTurnId === parentTurnId &&
+            Date.now() - lastObservedTurn.timestamp < 15000
+          ) {
+            clientTurnId = lastObservedTurn.clientTurnId;
+          } else {
+            clientTurnId =
+              typeof crypto !== 'undefined' && crypto.randomUUID
+                ? `turn_user_${crypto.randomUUID()}`
+                : `turn_user_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+          }
 
           bodyToTurnIdMap.set(finalBody, clientTurnId);
           if (body !== finalBody) {
             bodyToTurnIdMap.set(body, clientTurnId);
           }
 
-          const userPromptText = originalUserPrompt || parsed.prompt;
-          const parentTurnId =
-            parsed.parent_message_id !== undefined
-              ? (parsed.parent_message_id ? String(parsed.parent_message_id) : null)
-              : undefined;
+          promptToTurnIdMap.set(userPromptText.trim(), clientTurnId);
+          if (parsed.prompt && parsed.prompt.trim() !== userPromptText.trim()) {
+            promptToTurnIdMap.set(parsed.prompt.trim(), clientTurnId);
+          }
+
+          lastObservedTurn = {
+            clientTurnId,
+            prompt: userPromptText,
+            parentTurnId,
+            sessionId: reqSessionId,
+            timestamp: Date.now(),
+          };
 
           dispatchBridgeEnvelope('user_turn.observed', {
             clientTurnId,
-            sessionId: parsed.chat_session_id ? String(parsed.chat_session_id) : undefined,
+            sessionId: reqSessionId,
             prompt: userPromptText,
             parentTurnId,
             transport,
@@ -311,7 +344,18 @@ export default defineContentScript({
     const extractDeepSeekRequestMetadata = (context: { method: string; url: string; body: unknown }): Partial<import('../src/transport/types').TransportMetadata> | undefined => {
       const parsed = parseDeepSeekRequestBody(context.body);
       if (!parsed) return undefined;
-      const clientTurnId = bodyToTurnIdMap.get(context.body);
+
+      let clientTurnId = bodyToTurnIdMap.get(context.body);
+      if (!clientTurnId && typeof parsed.prompt === 'string') {
+        const trimmed = parsed.prompt.trim();
+        clientTurnId = promptToTurnIdMap.get(trimmed);
+        if (!clientTurnId && lastObservedTurn && Date.now() - lastObservedTurn.timestamp < 15000) {
+          if (lastObservedTurn.prompt.trim() === trimmed) {
+            clientTurnId = lastObservedTurn.clientTurnId;
+          }
+        }
+      }
+
       return {
         clientTurnId,
         requestPrompt: typeof parsed.prompt === 'string' ? parsed.prompt : undefined,

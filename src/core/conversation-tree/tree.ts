@@ -52,6 +52,7 @@ export function buildConversationTree<T extends Message = Message>(
       observedLeafId: null,
       isArchiveViewingObservedPath: true,
       unlinkedMessages: [],
+      unlinkedDetails: [],
       nodeMap: new Map(),
       depthMap: new Map(),
       activeMessageIds: new Set(),
@@ -92,9 +93,18 @@ export function buildConversationTree<T extends Message = Message>(
 
     let pId: string | null = null;
 
-    if (m.parentId && idMap.has(m.parentId)) {
-      pId = m.parentId;
-    } else if (m.remoteParentId) {
+    if (m.parentId) {
+      if (idMap.has(m.parentId)) {
+        pId = m.parentId;
+      } else if (remoteIdMap.has(String(m.parentId))) {
+        const mappedFromParent = remoteIdMap.get(String(m.parentId));
+        if (mappedFromParent && idMap.has(mappedFromParent)) {
+          pId = mappedFromParent;
+        }
+      }
+    }
+
+    if (!pId && m.remoteParentId) {
       const mapped = remoteIdMap.get(String(m.remoteParentId));
       if (mapped && idMap.has(mapped)) {
         pId = mapped;
@@ -116,6 +126,20 @@ export function buildConversationTree<T extends Message = Message>(
       }
       if (candidateUserMsgs.length === 1) {
         pId = candidateUserMsgs[0]!.id;
+      }
+    }
+
+    // For user messages with remoteParentId in a linear sequence without branching,
+    // where the preceding assistant's remoteId was not yet populated:
+    if (!pId && m.role === 'user' && m.remoteParentId) {
+      const candidateAssistantMsgs: T[] = [];
+      for (let j = i - 1; j >= 0; j--) {
+        if (sortedMessages[j]!.role === 'assistant') {
+          candidateAssistantMsgs.push(sortedMessages[j]!);
+        }
+      }
+      if (candidateAssistantMsgs.length === 1) {
+        pId = candidateAssistantMsgs[0]!.id;
       }
     }
 
@@ -151,6 +175,7 @@ export function buildConversationTree<T extends Message = Message>(
   // 5. Connect parents and children with cycle detection
   const roots: ConversationTreeNode<T>[] = [];
   const unlinkedMessages: T[] = [];
+  const unlinkedDetails: import('./types').UnlinkedMessageDetail<T>[] = [];
 
   for (const m of sortedMessages) {
     const node = nodeMap.get(m.id)!;
@@ -176,6 +201,12 @@ export function buildConversationTree<T extends Message = Message>(
       } else {
         // Cycle detected: isolate node into unlinkedMessages to prevent infinite loops
         unlinkedMessages.push(m);
+        unlinkedDetails.push({
+          message: m,
+          reason: 'cycle_detected',
+          attemptedParentId: parentId,
+          attemptedRemoteParentId: m.remoteParentId ? String(m.remoteParentId) : undefined,
+        });
       }
     } else {
       // No parent resolved
@@ -189,6 +220,18 @@ export function buildConversationTree<T extends Message = Message>(
       } else {
         // Had an unresolvable parentId/remoteParentId, or assistant orphan
         unlinkedMessages.push(m);
+        let reason: import('./types').UnlinkedMessageReason = 'missing_parent_id';
+        if (m.remoteParentId && !parentId) {
+          reason = 'unresolved_remote_parent';
+        } else if (m.parentId && !nodeMap.has(m.parentId)) {
+          reason = 'parent_not_yet_persisted';
+        }
+        unlinkedDetails.push({
+          message: m,
+          reason,
+          attemptedParentId: m.parentId ? String(m.parentId) : undefined,
+          attemptedRemoteParentId: m.remoteParentId ? String(m.remoteParentId) : undefined,
+        });
       }
     }
   }
@@ -204,6 +247,10 @@ export function buildConversationTree<T extends Message = Message>(
     const unlinkedIdx = unlinkedMessages.findIndex((u) => u.id === earliest.id);
     if (unlinkedIdx !== -1) {
       unlinkedMessages.splice(unlinkedIdx, 1);
+    }
+    const detailIdx = unlinkedDetails.findIndex((d) => d.message.id === earliest.id);
+    if (detailIdx !== -1) {
+      unlinkedDetails.splice(detailIdx, 1);
     }
   }
 
@@ -516,6 +563,7 @@ export function buildConversationTree<T extends Message = Message>(
     observedLeafId,
     isArchiveViewingObservedPath,
     unlinkedMessages,
+    unlinkedDetails,
     nodeMap,
     depthMap,
     activeMessageIds,

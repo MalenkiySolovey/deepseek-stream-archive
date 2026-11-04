@@ -25,6 +25,7 @@ export interface DeepSeekProjectedContent {
 
 export interface DeepSeekLastGoodState {
   messageId?: string;
+  requestMessageId?: string;
   sessionId?: string;
   answer: string;
   thinking: string;
@@ -66,6 +67,7 @@ export interface DeepSeekSemanticEvent {
   sequence: number;
   timestamp: number;
   messageId?: string;
+  requestMessageId?: string;
   sessionId?: string;
   delta?: string;
   fullText?: string;

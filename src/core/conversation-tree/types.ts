@@ -27,6 +27,23 @@ export interface ArchiveViewSelection {
   updatedAt: number;
 }
 
+export type UnlinkedMessageReason =
+  | 'missing_parent_id'
+  | 'parent_not_yet_persisted'
+  | 'unresolved_remote_parent'
+  | 'cycle_detected'
+  | 'attempt_only_projection'
+  | 'unmatched_capture'
+  | 'parent_exists_in_other_conversation'
+  | 'parent_id_conflict';
+
+export interface UnlinkedMessageDetail<T extends Message = Message> {
+  message: T;
+  reason: UnlinkedMessageReason;
+  attemptedParentId?: string;
+  attemptedRemoteParentId?: string;
+}
+
 export interface ConversationTreeDiagnostics {
   userBranchGroupCount: number;
   assistantVariantGroupCount: number;
@@ -48,6 +65,7 @@ export interface ConversationTreeResult<T extends Message = Message> {
   observedLeafId: string | null;
   isArchiveViewingObservedPath: boolean;
   unlinkedMessages: T[];
+  unlinkedDetails: UnlinkedMessageDetail<T>[];
   nodeMap: Map<string, ConversationTreeNode<T>>;
   depthMap: Map<string, number>;
   activeMessageIds: Set<string>;

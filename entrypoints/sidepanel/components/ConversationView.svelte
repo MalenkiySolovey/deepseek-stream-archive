@@ -918,15 +918,28 @@
           <div class="unlinked-turns-list">
             {#each unlinkedMessages() as um (um.id)}
               {@const umData = getActiveContent(um)}
+              {@const detail = conversationTree().unlinkedDetails?.find((d) => d.message.id === um.id)}
               <div class="unlinked-turn-card">
                 <div class="unmatched-card-meta">
                   <span class="role-badge" class:asst={um.role === 'assistant'} class:usr={um.role === 'user'}>
                     {um.role === 'assistant' ? t.roleAssistant : t.roleUser}
                   </span>
                   <span class="unmatched-pill">{um.status}</span>
+                  {#if detail?.reason}
+                    <span class="unmatched-pill unlinked-reason">{detail.reason}</span>
+                  {/if}
                   <span class="unmatched-key">ID: {um.id}</span>
+                  {#if um.remoteId}
+                    <span class="unmatched-key">Remote: {um.remoteId}</span>
+                  {/if}
+                  {#if um.parentId}
+                    <span class="unmatched-key">Parent: {um.parentId}</span>
+                  {/if}
                   {#if um.remoteParentId}
-                    <span class="unmatched-key">Parent: {um.remoteParentId}</span>
+                    <span class="unmatched-key">RemoteParent: {um.remoteParentId}</span>
+                  {/if}
+                  {#if um.sourceRawStreamKey}
+                    <span class="unmatched-key">Stream: {um.sourceRawStreamKey}</span>
                   {/if}
                   <button
                     class="copy-btn mini"
@@ -2042,6 +2055,12 @@
     background: #475569;
     color: #f1f5f9;
     font-size: 0.625rem;
+  }
+
+  .unmatched-pill.unlinked-reason {
+    background: #b45309;
+    color: #fef3c7;
+    font-weight: 500;
   }
 
   .unmatched-key {

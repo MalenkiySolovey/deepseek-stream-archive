@@ -52,6 +52,7 @@ export class DeepSeekProtocolDecoder {
   private lastMeaningfulState?: DeepSeekLastGoodState;
 
   private currentMessageId?: string;
+  private currentRequestMessageId?: string;
   private lastProjectedAnswer = '';
   private lastProjectedThinking = '';
   private currentProjectionSource: ProjectionSource = 'none';
@@ -199,19 +200,30 @@ export class DeepSeekProtocolDecoder {
         try {
           const readyJson = JSON.parse(rawData);
           const msgId = readyJson?.response_message_id ?? readyJson?.message_id;
-          if (msgId !== undefined && msgId !== null) {
-            const strId = String(msgId).trim();
-            if (strId && strId !== this.currentMessageId) {
-              this.currentMessageId = strId;
-              semanticEvents.push({
-                type: 'message_id_identified',
-                streamId: this.streamId,
-                sequence: this.nextSeq(),
-                timestamp: Date.now(),
-                messageId: this.currentMessageId,
-                sessionId: this.sessionId,
-              });
-            }
+          const reqId = readyJson?.request_message_id;
+          const strId = msgId !== undefined && msgId !== null ? String(msgId).trim() : undefined;
+          const strReqId = reqId !== undefined && reqId !== null ? String(reqId).trim() : undefined;
+
+          let hasNewId = false;
+          if (strId && strId !== this.currentMessageId) {
+            this.currentMessageId = strId;
+            hasNewId = true;
+          }
+          if (strReqId && strReqId !== this.currentRequestMessageId) {
+            this.currentRequestMessageId = strReqId;
+            hasNewId = true;
+          }
+
+          if (hasNewId && (this.currentMessageId || this.currentRequestMessageId)) {
+            semanticEvents.push({
+              type: 'message_id_identified',
+              streamId: this.streamId,
+              sequence: this.nextSeq(),
+              timestamp: Date.now(),
+              messageId: this.currentMessageId,
+              requestMessageId: this.currentRequestMessageId,
+              sessionId: this.sessionId,
+            });
           }
         } catch {
           // ignore non-json ready frame
