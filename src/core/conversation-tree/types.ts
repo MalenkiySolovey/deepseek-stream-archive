@@ -32,6 +32,7 @@ export type UnlinkedMessageReason =
   | 'parent_not_yet_persisted'
   | 'unresolved_remote_parent'
   | 'cycle_detected'
+  | 'invalid_role_parentage'
   | 'attempt_only_projection'
   | 'unmatched_capture'
   | 'parent_exists_in_other_conversation'

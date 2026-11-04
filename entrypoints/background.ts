@@ -135,6 +135,10 @@ import type { DeepSeekProtocolDiagnosticsData } from '../src/adapters/deepseek/p
 import { DEFAULT_DEEPSEEK_PROFILE } from '../src/adapters/deepseek/compatibility/profiles';
 import { HistoryReconciler } from '../src/core/reconciliation/history-reconciler';
 import { compareMessageOrder } from '../src/core/conversation-tree/tree';
+import {
+  persistUserTurnMessage,
+  persistCanonicalCheckpointMessage,
+} from '../src/core/recorder/checkpoint-persister';
 import { DeepSeekHistoryParser } from '../src/adapters/deepseek/history/parser';
 import type { DeepSeekParsedHistory } from '../src/adapters/deepseek/history/types';
 import type { PageRecoverySummary, PageRecoveryMessageSummary } from '../src/adapters/deepseek/dom/types';
@@ -1221,48 +1225,12 @@ export default defineBackground(() => {
             });
           }
 
-          // Resolve parent link if remoteParentId was provided
-          if (userMsg.remoteParentId && !userMsg.parentId) {
-            try {
-              const existingMsgs = await storageRepo.listMessagesByConversation(userMsg.conversationId);
-              const targetRemoteParent = String(userMsg.remoteParentId);
-
-              // 1. Direct match: assistant message with remoteId or local id matching remoteParentId
-              let parentCandidate = existingMsgs.find(
-                (m) =>
-                  m.role === 'assistant' &&
-                  ((m.remoteId && String(m.remoteId) === targetRemoteParent) || m.id === targetRemoteParent)
-              );
-
-              // 2. Sibling user turn match (Edit branch fork): if another user turn in this conversation
-              // already shares the same remoteParentId, this user turn is an Edit sibling branching under the same parent!
-              if (!parentCandidate) {
-                const siblingUser = existingMsgs.find(
-                  (m) =>
-                    m.role === 'user' &&
-                    m.id !== userMsg.id &&
-                    m.remoteParentId &&
-                    String(m.remoteParentId) === targetRemoteParent &&
-                    m.parentId
-                );
-                if (siblingUser?.parentId) {
-                  parentCandidate = existingMsgs.find((m) => m.id === siblingUser.parentId);
-                }
-              }
-
-              if (parentCandidate && parentCandidate.role === 'assistant') {
-                userMsg.parentId = parentCandidate.id;
-              }
-            } catch {
-              // fail-open: tree resolution will perform fallback
-            }
-          }
-
-          await storageRepo.saveMessages([userMsg]);
+          const result = await persistUserTurnMessage(storageRepo, userMsg);
           sendResponse({
-            success: true,
+            success: result.success,
             messageId: userMsg.id,
-            persistedAt: Date.now(),
+            persistedAt: result.persistedAt,
+            error: result.error,
           } as PersistUserTurnResponse);
         })
         .catch((err) => {
@@ -1295,70 +1263,20 @@ export default defineBackground(() => {
           const targetConvId =
             checkpoint.conversation?.id || checkpoint.message.conversationId;
 
-          // Assistant parentage resolution (especially on Regenerate where no userMessage is sent)
-          if (checkpoint.message.role === 'assistant' && targetConvId) {
-            const asstMsg = checkpoint.message;
-            const remoteParent = asstMsg.remoteParentId ? String(asstMsg.remoteParentId) : undefined;
-            const needsParentResolution =
-              !asstMsg.parentId ||
-              (remoteParent !== undefined && asstMsg.parentId === remoteParent);
+          const result = await persistCanonicalCheckpointMessage(storageRepo, checkpoint);
 
-            if (needsParentResolution) {
-              const existingMsgs = await storageRepo.listMessagesByConversation(targetConvId);
-
-              // 1. Direct match by remoteId of user message
-              let resolvedParent = remoteParent
-                ? existingMsgs.find(
-                    (m) => m.role === 'user' && m.remoteId && String(m.remoteId) === remoteParent
-                  )
-                : undefined;
-
-              // 2. Sibling assistant match (Regenerate variant): another assistant shares the same remoteParentId
-              if (!resolvedParent && remoteParent) {
-                const siblingAsst = existingMsgs.find(
-                  (m) =>
-                    m.role === 'assistant' &&
-                    m.id !== asstMsg.id &&
-                    m.remoteParentId &&
-                    String(m.remoteParentId) === remoteParent &&
-                    m.parentId
-                );
-                if (siblingAsst?.parentId) {
-                  resolvedParent = existingMsgs.find((m) => m.id === siblingAsst.parentId);
-                }
-              }
-
-              // 3. Fallback for linear / single-user turn or last active user turn
-              if (!resolvedParent) {
-                const userCandidates = existingMsgs.filter((m) => m.role === 'user');
-                if (userCandidates.length === 1) {
-                  resolvedParent = userCandidates[0];
-                } else if (userCandidates.length > 1) {
-                  const lastFinishedAsst = existingMsgs
-                    .filter((m) => m.role === 'assistant' && m.id !== asstMsg.id && m.parentId)
-                    .sort(compareMessageOrder)
-                    .at(-1);
-                  if (lastFinishedAsst?.parentId) {
-                    resolvedParent = existingMsgs.find((m) => m.id === lastFinishedAsst.parentId);
-                  }
-                }
-              }
-
-              if (resolvedParent) {
-                asstMsg.parentId = resolvedParent.id;
-                // If parent user message lacked remoteId, populate it from remoteParent
-                if (!resolvedParent.remoteId && remoteParent) {
-                  resolvedParent.remoteId = remoteParent;
-                  await storageRepo.saveMessages([resolvedParent]);
-                }
-              }
-            }
+          if (!result.success) {
+            sendResponse({
+              success: false,
+              streamKey: result.streamKey,
+              checkpointSeq: result.checkpointSeq,
+              error: result.error,
+            } as PersistCanonicalCheckpointResponse);
+            return;
           }
 
-          await storageRepo.saveCanonicalCheckpoint(validated.checkpoint);
-
           runtimeCanonicalCheckpointsCount++;
-          runtimeRevisionsCommittedCount += validated.checkpoint.revisions.length;
+          runtimeRevisionsCommittedCount += checkpoint.revisions.length;
           lastPersistedAt = Date.now();
 
           // Advance continuity receipt lifecycle on canonical checkpoint

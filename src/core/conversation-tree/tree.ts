@@ -1,4 +1,5 @@
 import { isLogicalMessage, type Message } from '../models';
+import { isValidRoleParentage } from '../parentage/parent-resolver';
 import type {
   BuildConversationTreeOptions,
   ConversationTreeNode,
@@ -154,29 +155,11 @@ export function buildConversationTree<T extends Message = Message>(
         }
       }
       if (!pId) {
-        const candidateUserMsgs: T[] = [];
-        for (let j = i - 1; j >= 0; j--) {
-          if (sortedMessages[j]!.role === 'user') {
-            candidateUserMsgs.push(sortedMessages[j]!);
-          }
-        }
+        // Unambiguous legacy linear archive with exactly 1 candidate user prompt in conversation:
+        const candidateUserMsgs = sortedMessages.filter((msg) => msg.role === 'user');
         if (candidateUserMsgs.length === 1) {
           pId = candidateUserMsgs[0]!.id;
         }
-      }
-    }
-
-    // For user messages with remoteParentId in a linear sequence without branching,
-    // where the preceding assistant's remoteId was not yet populated:
-    if (!pId && m.role === 'user' && m.remoteParentId) {
-      const candidateAssistantMsgs: T[] = [];
-      for (let j = i - 1; j >= 0; j--) {
-        if (sortedMessages[j]!.role === 'assistant') {
-          candidateAssistantMsgs.push(sortedMessages[j]!);
-        }
-      }
-      if (candidateAssistantMsgs.length >= 1) {
-        pId = candidateAssistantMsgs[0]!.id;
       }
     }
 
@@ -232,9 +215,20 @@ export function buildConversationTree<T extends Message = Message>(
 
       if (!isCyclic) {
         const parentNode = nodeMap.get(parentId)!;
-        node.parent = parentNode;
-        parentNode.children.push(node);
-        parentNode.isLeaf = false;
+        if (!isValidRoleParentage(m.role, parentNode.message.role)) {
+          // Role alternation violation (e.g. USER -> USER or ASSISTANT -> ASSISTANT)
+          unlinkedMessages.push(m);
+          unlinkedDetails.push({
+            message: m,
+            reason: 'invalid_role_parentage',
+            attemptedParentId: parentId,
+            attemptedRemoteParentId: m.remoteParentId ? String(m.remoteParentId) : undefined,
+          });
+        } else {
+          node.parent = parentNode;
+          parentNode.children.push(node);
+          parentNode.isLeaf = false;
+        }
       } else {
         // Cycle detected: isolate node into unlinkedMessages to prevent infinite loops
         unlinkedMessages.push(m);

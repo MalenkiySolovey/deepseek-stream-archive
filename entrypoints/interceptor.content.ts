@@ -103,6 +103,14 @@ export default defineContentScript({
 
     // Forward captured transport events across MAIN -> ISOLATED boundary
     const handleTransportEvent = (event: TransportEvent) => {
+      if (lastObservedTurn) {
+        if (event.type === 'chunk' && event.chunkText && event.chunkText.trim().length > 0) {
+          lastObservedTurn.hasReceivedTokens = true;
+        } else if (event.type === 'complete' && lastObservedTurn.hasReceivedTokens) {
+          // Finished receiving authoritative response; clear active turn so future prompts start fresh
+          lastObservedTurn = null;
+        }
+      }
       dispatchBridgeEnvelope('transport.event', event);
     };
 
@@ -206,6 +214,8 @@ export default defineContentScript({
       parentTurnId?: string | null;
       sessionId?: string;
       timestamp: number;
+      hasReceivedTokens: boolean;
+      isTerminal: boolean;
     }
     const recentObservedTurns: ObservedTurnContext[] = [];
     const MAX_RECENT_TURNS = 20;
@@ -302,6 +312,7 @@ export default defineContentScript({
           let clientTurnId: string;
           if (
             lastObservedTurn &&
+            !lastObservedTurn.hasReceivedTokens &&
             lastObservedTurn.prompt.trim() === userPromptText.trim() &&
             lastObservedTurn.sessionId === reqSessionId &&
             lastObservedTurn.parentTurnId === parentTurnId &&
@@ -326,6 +337,8 @@ export default defineContentScript({
             parentTurnId,
             sessionId: reqSessionId,
             timestamp: Date.now(),
+            hasReceivedTokens: false,
+            isTerminal: false,
           };
 
           recentObservedTurns.unshift(lastObservedTurn);

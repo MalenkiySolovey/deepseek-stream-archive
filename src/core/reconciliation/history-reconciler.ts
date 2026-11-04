@@ -123,7 +123,7 @@ export class HistoryReconciler {
       if (!existing && hm.role === 'assistant') {
         const parentUser = hm.parentId ? existingByRemoteId.get(hm.parentId) : undefined;
         const matchIdx = unmatchedProvisionalAssistant.findIndex((cand) => {
-          // Parent linkage check:
+          // 1. Negative parent disqualification:
           if (cand.remoteParentId && hm.parentId && cand.remoteParentId !== hm.parentId) {
             return false;
           }
@@ -135,7 +135,37 @@ export class HistoryReconciler {
           ) {
             return false;
           }
-          return true;
+
+          // 2. Positive proof of identity:
+          // A: Confirmed parent match
+          const hasParentMatch = Boolean(
+            (parentUser && cand.parentId && cand.parentId === parentUser.id) ||
+            (cand.remoteParentId && hm.parentId && cand.remoteParentId === hm.parentId)
+          );
+          if (hasParentMatch) {
+            return true;
+          }
+
+          // B: Confirmed content match
+          const candText = cand.content || '';
+          if (candText.trim().length > 0 && hm.text.trim().length > 0) {
+            return candText.trim() === hm.text.trim();
+          }
+
+          // C: Unambiguous single provisional assistant in the entire conversation:
+          // If there is ONLY ONE provisional assistant in this conversation, and its parent is
+          // either unknown (ghost parent from legacy v0.1.0) or matches parentUser,
+          // and it does NOT point to a different known message in existingMessages:
+          if (
+            unmatchedProvisionalAssistant.length === 1 &&
+            (!cand.parentId || !existingMessages.some((m) => m.id === cand.parentId)) &&
+            (!cand.remoteParentId || (hm.parentId && cand.remoteParentId === hm.parentId))
+          ) {
+            return true;
+          }
+
+          // Invariant: Never match based on arbitrary index/order when multiple candidates exist!
+          return false;
         });
         if (matchIdx >= 0) {
           existing = unmatchedProvisionalAssistant.splice(matchIdx, 1)[0]!;

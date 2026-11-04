@@ -5,6 +5,10 @@ import { IndexedDbStorageRepository } from '../src/storage/repositories/storage-
 import { CanonicalStreamCoordinator } from '../src/core/recorder/canonical-stream-coordinator';
 import { HistoryReconciler } from '../src/core/reconciliation/history-reconciler';
 import { buildConversationTree } from '../src/core/conversation-tree/tree';
+import {
+  persistUserTurnMessage,
+  persistCanonicalCheckpointMessage,
+} from '../src/core/recorder/checkpoint-persister';
 import type { Message } from '../src/core/models';
 import type { NormalizedHistoryMessage } from '../src/adapters/deepseek/history/types';
 
@@ -32,92 +36,13 @@ describe('Realistic Wire Scenarios Reproduction & Fix Verification Suite', () =>
     storageRepo = new IndexedDbStorageRepository(fakeFactory);
   });
 
-  // Helper simulating background.ts parentage resolution pipeline for live turns
+  // Production persistence handlers (replaces old test-specific duplicates)
   async function persistUserTurnWithParentResolution(userMsg: Message): Promise<void> {
-    const existingMsgs = await storageRepo.listMessagesByConversation(userMsg.conversationId);
-    if (userMsg.remoteParentId && !userMsg.parentId) {
-      const targetRemoteParent = String(userMsg.remoteParentId);
-      let parentCandidate = existingMsgs.find(
-        (m) =>
-          m.role === 'assistant' &&
-          ((m.remoteId && String(m.remoteId) === targetRemoteParent) || m.id === targetRemoteParent)
-      );
-      if (!parentCandidate) {
-        const siblingUser = existingMsgs.find(
-          (m) =>
-            m.role === 'user' &&
-            m.id !== userMsg.id &&
-            m.remoteParentId &&
-            String(m.remoteParentId) === targetRemoteParent &&
-            m.parentId
-        );
-        if (siblingUser?.parentId) {
-          parentCandidate = existingMsgs.find((m) => m.id === siblingUser.parentId);
-        }
-      }
-      if (parentCandidate && parentCandidate.role === 'assistant') {
-        userMsg.parentId = parentCandidate.id;
-      }
-    }
-    await storageRepo.saveMessages([userMsg]);
+    await persistUserTurnMessage(storageRepo, userMsg);
   }
 
-  // Helper simulating background.ts canonical checkpoint assistant parentage resolution
   async function persistCanonicalCheckpointWithParentResolution(checkpoint: any): Promise<void> {
-    const targetConvId = checkpoint.conversation?.id || checkpoint.message.conversationId;
-    if (checkpoint.message.role === 'assistant' && targetConvId) {
-      const asstMsg = checkpoint.message;
-      const remoteParent = asstMsg.remoteParentId ? String(asstMsg.remoteParentId) : undefined;
-      const needsParentResolution =
-        !asstMsg.parentId ||
-        (remoteParent !== undefined && asstMsg.parentId === remoteParent);
-
-      if (needsParentResolution) {
-        const existingMsgs = await storageRepo.listMessagesByConversation(targetConvId);
-        let resolvedParent = remoteParent
-          ? existingMsgs.find(
-              (m) => m.role === 'user' && m.remoteId && String(m.remoteId) === remoteParent
-            )
-          : undefined;
-
-        if (!resolvedParent && remoteParent) {
-          const siblingAsst = existingMsgs.find(
-            (m) =>
-              m.role === 'assistant' &&
-              m.id !== asstMsg.id &&
-              m.remoteParentId &&
-              String(m.remoteParentId) === remoteParent &&
-              m.parentId
-          );
-          if (siblingAsst?.parentId) {
-            resolvedParent = existingMsgs.find((m) => m.id === siblingAsst.parentId);
-          }
-        }
-
-        if (!resolvedParent) {
-          const userCandidates = existingMsgs.filter((m) => m.role === 'user');
-          if (userCandidates.length === 1) {
-            resolvedParent = userCandidates[0];
-          } else if (userCandidates.length > 1) {
-            const lastFinishedAsst = existingMsgs
-              .filter((m) => m.role === 'assistant' && m.id !== asstMsg.id && m.parentId)
-              .at(-1);
-            if (lastFinishedAsst?.parentId) {
-              resolvedParent = existingMsgs.find((m) => m.id === lastFinishedAsst.parentId);
-            }
-          }
-        }
-
-        if (resolvedParent) {
-          asstMsg.parentId = resolvedParent.id;
-          if (!resolvedParent.remoteId && remoteParent) {
-            resolvedParent.remoteId = remoteParent;
-            await storageRepo.saveMessages([resolvedParent]);
-          }
-        }
-      }
-    }
-    await storageRepo.saveCanonicalCheckpoint(checkpoint);
+    await persistCanonicalCheckpointMessage(storageRepo, checkpoint);
   }
 
   it('Scenario A: Edit первого запроса создает 2 корневые пользовательские ветки, 4 сообщения, переключатель веток 1 / 2', async () => {
