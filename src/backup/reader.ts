@@ -39,6 +39,8 @@ export interface ReadPortableBackupOptions {
   maxDecompressedBytes?: number;
   maxRecords?: number;
   maxLineChars?: number;
+  inspectionOnly?: boolean;
+  onRecord?: (store: IncludedBackupStoreName, record: Record<string, unknown>) => Promise<void> | void;
 }
 
 export interface BackupValidationError {
@@ -469,26 +471,32 @@ export async function readPortableBackup(
         return false;
       }
 
-      // Add to materialized records
-      switch (storeName) {
-        case 'conversations':
-          records.conversations.push(valRes.record as Conversation);
-          break;
-        case 'messages':
-          records.messages.push(valRes.record as Message);
-          break;
-        case 'revisions':
-          records.revisions.push(valRes.record as ResponseRevision);
-          break;
-        case 'recovery_events':
-          records.recovery_events.push(valRes.record as RecoveryEvent);
-          break;
-        case 'raw_streams':
-          records.raw_streams.push(valRes.record as RawStreamRecord);
-          break;
-        case 'raw_stream_batches':
-          records.raw_stream_batches.push(valRes.record as RawStreamBatch);
-          break;
+      // Add to materialized records (unless inspectionOnly mode is active for bounded memory)
+      if (!options?.inspectionOnly) {
+        switch (storeName) {
+          case 'conversations':
+            records.conversations.push(valRes.record as Conversation);
+            break;
+          case 'messages':
+            records.messages.push(valRes.record as Message);
+            break;
+          case 'revisions':
+            records.revisions.push(valRes.record as ResponseRevision);
+            break;
+          case 'recovery_events':
+            records.recovery_events.push(valRes.record as RecoveryEvent);
+            break;
+          case 'raw_streams':
+            records.raw_streams.push(valRes.record as RawStreamRecord);
+            break;
+          case 'raw_stream_batches':
+            records.raw_stream_batches.push(valRes.record as RawStreamBatch);
+            break;
+        }
+      }
+
+      if (options?.onRecord) {
+        options.onRecord(storeName as IncludedBackupStoreName, valRes.record as Record<string, unknown>);
       }
 
       observedCounts[storeName as IncludedBackupStoreName]++;

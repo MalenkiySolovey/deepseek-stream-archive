@@ -587,7 +587,7 @@ export class StreamArchiveOverlayPortal {
 
       for (const msg of availableMessages) {
         let isAnchored = false;
-        const lookupId = msg.remoteId || msg.messageId;
+        const lookupId = msg.remoteId;
         if (lookupId) {
           const anchor = locateMessageAnchor(lookupId, document);
           if (anchor) {

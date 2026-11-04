@@ -1393,22 +1393,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
                 const hasDirectContent =
                   rev && (rev.text.trim().length > 0 || (rev.thinking && rev.thinking.trim().length > 0));
 
-                let effectiveRemoteId = m.remoteId;
-                if (!effectiveRemoteId) {
-                  // Read-time healing: if m is missing remoteId, check if another assistant message
-                  // under the same confirmed parent received the remoteId from server history
-                  const peer = messages.find(
-                    (p) =>
-                      p.id !== m.id &&
-                      p.role === 'assistant' &&
-                      Boolean(p.remoteId) &&
-                      ((p.parentId && m.parentId && p.parentId === m.parentId) ||
-                        (p.remoteParentId && m.remoteParentId && p.remoteParentId === m.remoteParentId))
-                  );
-                  if (peer?.remoteId) {
-                    effectiveRemoteId = peer.remoteId;
-                  }
-                }
+                const effectiveRemoteId = m.remoteId;
 
                 if (rev && rev.isLastGood && rev.messageId === m.id && hasDirectContent) {
                   const presKind =
@@ -1854,6 +1839,9 @@ export class IndexedDbStorageRepository implements StorageRepository {
       const revStore = tx.objectStore(STORE_REVISIONS);
       const recStore = tx.objectStore(STORE_RECOVERY_EVENTS);
 
+      tx.onerror = () => reject(tx.error || new Error('Export transaction failed'));
+      tx.onabort = () => reject(tx.error || new Error('Export transaction aborted'));
+
       const convReq = convStore.get(conversationId);
       convReq.onerror = () => reject(convReq.error || new Error('Failed to get conversation'));
       convReq.onsuccess = () => {
@@ -1881,24 +1869,29 @@ export class IndexedDbStorageRepository implements StorageRepository {
 
           const messageDetails: ConversationExportModel['messages'] = [];
           let pending = messages.length;
+          let hasFailed = false;
+
+          const fail = (err: unknown) => {
+            if (!hasFailed) {
+              hasFailed = true;
+              reject(err instanceof Error ? err : new Error(String(err)));
+            }
+          };
 
           for (const msg of messages) {
             const recReq = recIndex.getAll(msg.id);
-            recReq.onerror = () => checkMsgDone();
+            recReq.onerror = () => fail(recReq.error || new Error(`Failed to read recovery events for message ${msg.id}`));
             recReq.onsuccess = () => {
+              if (hasFailed) return;
               const recoveryEvents = (recReq.result as RecoveryEvent[]) || [];
 
-              const revReq = revIndex.getAll(msg.id);
-              revReq.onerror = () => checkMsgDone();
-              revReq.onsuccess = () => {
-                const revs = (revReq.result as ResponseRevision[]) || [];
-                revs.sort((a, b) => a.revisionIndex - b.revisionIndex);
+              if (!includeRevs) {
+                // Optimized bounded path: Only fetch preferred revision and lastGood revision
+                // Zero scanning or loading of intermediate streaming revisions into memory
+                const authEvent = recoveryEvents.find((e) => e.recoveredRevisionId);
 
-                if (!includeRevs) {
-                  // Fast path: Only retain preferred revision and lastGood revision
-                  // rather than loading hundreds or thousands of intermediate streaming snapshots
-                  const preferred = selectPreferredRevision(msg, revs);
-                  const lastGood = revs.find((r) => r.isLastGood);
+                const finishWithRevisions = (preferred?: ResponseRevision, lastGood?: ResponseRevision) => {
+                  if (hasFailed) return;
                   const boundedRevisions: ResponseRevision[] = [];
                   if (preferred) boundedRevisions.push(preferred);
                   if (lastGood && lastGood.id !== preferred?.id) boundedRevisions.push(lastGood);
@@ -1908,18 +1901,66 @@ export class IndexedDbStorageRepository implements StorageRepository {
                     revisions: boundedRevisions,
                     recoveryEvents,
                   });
+                  checkMsgDone();
+                };
+
+                let lastGoodRev: ResponseRevision | undefined = undefined;
+
+                const stepFetchPreferred = () => {
+                  // Cursor traversal on messageId index tracks the single maximum revisionIndex in O(1) memory
+                  // avoiding materializing thousands of intermediate streaming chunks into an array
+                  const keyRangeClass = typeof IDBKeyRange !== 'undefined' ? IDBKeyRange : (globalThis as any)?.IDBKeyRange;
+                  const range = keyRangeClass ? keyRangeClass.only(msg.id) : null;
+                  const curReq = revIndex.openCursor(range);
+                  let maxRev: ResponseRevision | undefined = undefined;
+
+                  curReq.onerror = () => fail(curReq.error || new Error(`Failed to query latest revision for message ${msg.id}`));
+                  curReq.onsuccess = () => {
+                    const cursor = curReq.result;
+                    if (cursor) {
+                      const rev = cursor.value as ResponseRevision;
+                      if (!maxRev || rev.revisionIndex > maxRev.revisionIndex) {
+                        maxRev = rev;
+                      }
+                      cursor.continue();
+                    } else {
+                      finishWithRevisions(maxRev, lastGoodRev);
+                    }
+                  };
+                };
+
+                if (authEvent?.recoveredRevisionId) {
+                  // Direct O(1) point-lookup by primary key for the authoritative recovered revision
+                  const authRevReq = revStore.get(authEvent.recoveredRevisionId);
+                  authRevReq.onerror = () => fail(authRevReq.error || new Error(`Failed to read recovered revision ${authEvent.recoveredRevisionId}`));
+                  authRevReq.onsuccess = () => {
+                    lastGoodRev = authRevReq.result as ResponseRevision | undefined;
+                    stepFetchPreferred();
+                  };
                 } else {
+                  stepFetchPreferred();
+                }
+              } else {
+                // Full revision history explicitly requested
+                const revReq = revIndex.getAll(msg.id);
+                revReq.onerror = () => fail(revReq.error || new Error(`Failed to read revisions for message ${msg.id}`));
+                revReq.onsuccess = () => {
+                  if (hasFailed) return;
+                  const revs = (revReq.result as ResponseRevision[]) || [];
+                  revs.sort((a, b) => a.revisionIndex - b.revisionIndex);
+
                   messageDetails.push({
                     message: msg,
                     revisions: revs,
                     recoveryEvents,
                   });
-                }
-                checkMsgDone();
-              };
+                  checkMsgDone();
+                };
+              }
             };
 
             function checkMsgDone() {
+              if (hasFailed) return;
               pending--;
               if (pending === 0) {
                 // Ensure messageDetails are strictly in original chronological order

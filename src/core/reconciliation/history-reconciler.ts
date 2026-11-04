@@ -213,13 +213,17 @@ export class HistoryReconciler {
             )
           );
 
-          if (isCandFiltered || isHmFiltered) {
+          // Invariant: A filtered candidate can NEVER match a normal server message,
+          // and a normal candidate can NEVER match a filtered server message!
+          if (Boolean(isCandFiltered) !== Boolean(isHmFiltered)) {
+            return false;
+          }
+
+          if (isCandFiltered && isHmFiltered) {
             // When a message is filtered, DeepSeek replaces server content with a canned template response.
             // Consequently, candidate text (the pre-filter content) and server text (the template response)
             // will NEVER match by content equality.
-            const filteredCandidates = candidatesUnderParent.filter(
-              (c) => c.status === 'filtered' || c.status === 'interrupted' || c.status === 'streaming'
-            );
+            const filteredCandidates = candidatesUnderParent.filter((c) => c.status === 'filtered');
             const filteredServer = messages.filter(
               (m) =>
                 m.role === 'assistant' &&
@@ -227,12 +231,12 @@ export class HistoryReconciler {
                 (m.status === 'filtered' || m.isFiltered || Boolean(m.templateResponse))
             );
 
-            // Disambiguation for filtered messages under same parent:
+            // Strict disambiguation: Only match if there is exactly 1 filtered candidate AND
+            // exactly 1 filtered server message under this confirmed parent!
+            // If there are multiple filtered regenerates or multiple filtered server messages,
+            // never guess! Keep them separate and leave remoteId unresolved.
             if (filteredCandidates.length === 1 && filteredServer.length === 1) {
               return cand.id === filteredCandidates[0]!.id;
-            }
-            if (candidatesUnderParent.length === 1 && filteredServer.length === 1) {
-              return cand.id === candidatesUnderParent[0]!.id;
             }
             return false;
           }

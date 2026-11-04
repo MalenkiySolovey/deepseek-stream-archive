@@ -385,6 +385,13 @@
     backupError = null;
     backupSummary = null;
 
+    const activeStreamsCount = await getActiveStreamsCount();
+    if (activeStreamsCount > 0) {
+      backupState = 'error';
+      backupError = 'Cannot create backup while active DeepSeek generation streams are running. Please wait for completion.';
+      return;
+    }
+
     const dateStr = formatDateUtc();
     const suggestedName = `deepseek-streamarchive-backup_${dateStr}.${PORTABLE_BACKUP_EXTENSION}`;
 
@@ -422,7 +429,7 @@
         // Direct bounded streaming to disk (< 5 MiB peak RAM, no IPC message size limit)
         backupState = 'saving';
         const writable = await fileHandle.createWritable();
-        const result = await streamBackupToWritable(db, writable);
+        const result = await streamBackupToWritable(db, writable, { getActiveStreamsCount });
 
         backupState = 'complete';
         backupSummary = {
@@ -435,7 +442,7 @@
         };
       } else {
         // Fallback for environments without File System Access API
-        const { stream: compressedStream, getCounts } = createCompressedBackupReadableStream(db);
+        const { stream: compressedStream, getCounts } = createCompressedBackupReadableStream(db, { getActiveStreamsCount });
         const resp = new Response(compressedStream);
         const blob = await resp.blob();
 

@@ -26,6 +26,7 @@ export interface StreamingBackupOptions {
   appVersion?: string;
   now?: number;
   batchSize?: number;
+  getActiveStreamsCount?: () => Promise<number> | number;
   onProgress?: (progress: StreamingBackupProgress) => void;
 }
 
@@ -59,6 +60,13 @@ function fetchCursorBatch(
     } catch (err) {
       return reject(new Error(`Failed to open readonly transaction for store ${storeName}: ${(err as Error).message}`));
     }
+
+    tx.onabort = () => {
+      reject(new Error(`Transaction aborted for store ${storeName}: ${tx.error?.message || 'Aborted'}`));
+    };
+    tx.onerror = () => {
+      reject(new Error(`Transaction failed for store ${storeName}: ${tx.error?.message || 'Error'}`));
+    };
 
     const store = tx.objectStore(storeName);
     const keyRangeClass =
@@ -122,6 +130,12 @@ export function createUncompressedBackupReadableStream(
       try {
         while (phase !== 'done') {
           if (phase === 'manifest') {
+            if (options.getActiveStreamsCount) {
+              const activeCount = await options.getActiveStreamsCount();
+              if (activeCount > 0) {
+                throw new Error('Cannot create backup while active DeepSeek generation streams are running. Please wait for streaming to conclude.');
+              }
+            }
             const manifest: PortableBackupManifestRecord = {
               kind: 'manifest',
               format: PORTABLE_BACKUP_FORMAT,
