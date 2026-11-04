@@ -48,6 +48,9 @@ export function buildConversationTree<T extends Message = Message>(
       activePath: [],
       activeNodes: [],
       activeLeafId: null,
+      observedPath: [],
+      observedLeafId: null,
+      isArchiveViewingObservedPath: true,
       unlinkedMessages: [],
       nodeMap: new Map(),
       depthMap: new Map(),
@@ -59,6 +62,10 @@ export function buildConversationTree<T extends Message = Message>(
         orphanPromptsCount: 0,
         orphanAssistantCount: 0,
         unresolvedParentLinksCount: 0,
+        activeLeafId: null,
+        observedLeafId: null,
+        isArchiveViewingObservedPath: true,
+        newMessagesOutsideViewCount: 0,
       },
     };
   }
@@ -96,14 +103,19 @@ export function buildConversationTree<T extends Message = Message>(
       }
     }
 
-    // Fallback for assistant messages without explicit parentage:
-    // pair with nearest preceding user message
+    // For assistant messages without explicit parentage:
+    // Only resolve to preceding user message if completely unambiguous
+    // (e.g. legacy linear v0.1.0 archive with exactly 1 candidate user prompt in conversation).
+    // In branched or multi-prompt conversations, never guess chronologically.
     if (!pId && m.role === 'assistant') {
+      const candidateUserMsgs: T[] = [];
       for (let j = i - 1; j >= 0; j--) {
         if (sortedMessages[j]!.role === 'user') {
-          pId = sortedMessages[j]!.id;
-          break;
+          candidateUserMsgs.push(sortedMessages[j]!);
         }
+      }
+      if (candidateUserMsgs.length === 1) {
+        pId = candidateUserMsgs[0]!.id;
       }
     }
 
@@ -249,7 +261,86 @@ export function buildConversationTree<T extends Message = Message>(
     assignTreeMetadata(root, 0);
   }
 
-  // 8. Active Path Selection
+  // 7b. Subtree Metadata for intelligent downward branch selection (linear O(N))
+  const subtreeLatestTimestamp = new Map<string, number>();
+  const computeLatest = (node: ConversationTreeNode<T>): number => {
+    let latest = node.message.updatedAt || node.message.createdAt || 0;
+    for (const child of node.children) {
+      const childLatest = computeLatest(child);
+      if (childLatest > latest) {
+        latest = childLatest;
+      }
+    }
+    subtreeLatestTimestamp.set(node.message.id, latest);
+    return latest;
+  };
+  for (const root of roots) {
+    computeLatest(root);
+  }
+
+  // 7c. Compute Observed DeepSeek Path (independent of StreamArchive view)
+  const serverCurrentMessageId = options?.conversation?.currentMessageId
+    ? String(options.conversation.currentMessageId)
+    : null;
+
+  let observedLeafNode: ConversationTreeNode<T> | null = null;
+  if (serverCurrentMessageId) {
+    let target = nodeMap.get(serverCurrentMessageId);
+    if (!target) {
+      for (const n of nodeMap.values()) {
+        if (n.message.remoteId && String(n.message.remoteId) === serverCurrentMessageId) {
+          target = n;
+          break;
+        }
+      }
+    }
+    if (target) {
+      observedLeafNode = target;
+    }
+  }
+
+  // If server current message ID wasn't provided or not found, observed path defaults to the most recently updated branch
+  if (!observedLeafNode && roots.length > 0) {
+    let curr: ConversationTreeNode<T> | undefined = roots[0];
+    let bestTime = -1;
+    for (let i = 0; i < roots.length; i++) {
+      const t = subtreeLatestTimestamp.get(roots[i]!.message.id) ?? 0;
+      if (t > bestTime) {
+        bestTime = t;
+        curr = roots[i];
+      }
+    }
+    while (curr && curr.children.length > 0) {
+      let nextChild = curr.children[0]!;
+      let nextTime = -1;
+      for (const child of curr.children) {
+        const t = subtreeLatestTimestamp.get(child.message.id) ?? 0;
+        if (t > nextTime) {
+          nextTime = t;
+          nextChild = child;
+        }
+      }
+      curr = nextChild;
+    }
+    observedLeafNode = curr || null;
+  }
+
+  const observedNodes: ConversationTreeNode<T>[] = [];
+  const observedAncestorIds = new Set<string>();
+  if (observedLeafNode) {
+    let curr: ConversationTreeNode<T> | null = observedLeafNode;
+    const visited = new Set<string>();
+    while (curr && !visited.has(curr.message.id)) {
+      visited.add(curr.message.id);
+      observedNodes.unshift(curr);
+      observedAncestorIds.add(curr.message.id);
+      curr = curr.parent;
+    }
+  }
+  const observedLeafId = observedLeafNode ? observedLeafNode.message.id : null;
+  const observedPath = observedNodes.map((n) => n.message);
+
+  // 8. Active Path Selection (StreamArchive independent view)
   const activeNodes: ConversationTreeNode<T>[] = [];
   const activeMessageIds = new Set<string>();
   const depthMap = new Map<string, number>();
@@ -275,58 +366,40 @@ export function buildConversationTree<T extends Message = Message>(
       activeMessageIds.add(node.message.id);
       depthMap.set(node.message.id, i);
     }
-  } else {
-    // 7b. Subtree Metadata for intelligent downward branch selection (linear O(N))
-    const subtreeLatestTimestamp = new Map<string, number>();
-    const computeLatest = (node: ConversationTreeNode<T>): number => {
-      let latest = node.message.updatedAt || node.message.createdAt || 0;
-      for (const child of node.children) {
-        const childLatest = computeLatest(child);
-        if (childLatest > latest) {
-          latest = childLatest;
-        }
-      }
-      subtreeLatestTimestamp.set(node.message.id, latest);
-      return latest;
-    };
-    for (const root of roots) {
-      computeLatest(root);
-    }
-
-    // Downward traversal honoring branchSelections, falling back to server currentMessageId or newest subtree
+  } else if (roots.length > 0) {
+    const viewSelection = options?.viewSelection;
     const branchSelections = options?.branchSelections || {};
-    const serverCurrentMessageId = options?.conversation?.currentMessageId
-      ? String(options.conversation.currentMessageId)
-      : null;
 
-    const serverAncestorIds = new Set<string>();
-    if (serverCurrentMessageId) {
-      let target: ConversationTreeNode<T> | undefined = nodeMap.get(serverCurrentMessageId);
-      if (!target) {
-        for (const n of nodeMap.values()) {
-          if (n.message.remoteId && String(n.message.remoteId) === serverCurrentMessageId) {
-            target = n;
-            break;
-          }
-        }
-      }
-      let curr: ConversationTreeNode<T> | null = target ?? null;
-      while (curr) {
-        serverAncestorIds.add(curr.message.id);
-        curr = curr.parent;
+    // Root selection:
+    let chosenRoot: ConversationTreeNode<T> | undefined;
+
+    // 1. Stable root ID from viewSelection
+    if (viewSelection?.selectedRootId) {
+      chosenRoot = roots.find((r) => r.message.id === viewSelection.selectedRootId);
+    }
+    if (!chosenRoot && viewSelection?.selectedChildByParent?.['__root__']) {
+      const targetId = viewSelection.selectedChildByParent['__root__'];
+      chosenRoot = roots.find((r) => r.message.id === targetId);
+    }
+
+    // 2. Fallback to branchSelections (string ID or legacy number)
+    if (!chosenRoot && branchSelections['__root__'] !== undefined) {
+      const sel = branchSelections['__root__'];
+      if (typeof sel === 'string') {
+        chosenRoot = roots.find((r) => r.message.id === sel);
+      } else if (typeof sel === 'number') {
+        const clampedIdx = Math.max(0, Math.min(sel, roots.length - 1));
+        chosenRoot = roots[clampedIdx];
       }
     }
 
-    // Pick root:
-    let rootIdx = 0;
-    if (branchSelections['__root__'] !== undefined) {
-      rootIdx = branchSelections['__root__'];
-    } else if (serverCurrentMessageId && serverAncestorIds.size > 0) {
-      const matchedIdx = roots.findIndex((r) => serverAncestorIds.has(r.message.id));
-      if (matchedIdx >= 0) {
-        rootIdx = matchedIdx;
-      }
-    } else if (options?.preferLatestByDefault && roots.length > 0) {
+    // 3. Fallback for initial unselected view: follow DeepSeek's observed path if available
+    if (!chosenRoot && observedAncestorIds.size > 0) {
+      chosenRoot = roots.find((r) => observedAncestorIds.has(r.message.id));
+    }
+
+    // 4. Default: newest root
+    if (!chosenRoot) {
       let bestIdx = 0;
       let bestTime = -1;
       for (let i = 0; i < roots.length; i++) {
@@ -336,11 +409,10 @@ export function buildConversationTree<T extends Message = Message>(
           bestIdx = i;
         }
       }
-      rootIdx = bestIdx;
+      chosenRoot = roots[bestIdx]!;
     }
 
-    const clampedRootIdx = Math.max(0, Math.min(rootIdx, roots.length - 1));
-    let current: ConversationTreeNode<T> | undefined = roots[clampedRootIdx];
+    let current: ConversationTreeNode<T> | undefined = chosenRoot;
     const visited = new Set<string>();
     let currentDepth = 0;
 
@@ -351,47 +423,51 @@ export function buildConversationTree<T extends Message = Message>(
       depthMap.set(current.message.id, currentDepth++);
       activeLeafId = current.message.id;
 
-      const children = current.children;
+      const children: ConversationTreeNode<T>[] = current.children;
       if (!children || children.length === 0) {
         break;
       }
 
-      let chosenChildIdx = 0;
-      if (branchSelections[current.message.id] !== undefined) {
-        chosenChildIdx = branchSelections[current.message.id]!;
-      } else if (serverCurrentMessageId && serverAncestorIds.size > 0) {
-        const matchedChildIdx = children.findIndex((c) => serverAncestorIds.has(c.message.id));
-        if (matchedChildIdx >= 0) {
-          chosenChildIdx = matchedChildIdx;
-        } else {
-          // If no child leads to server currentMessageId, pick child with newest activity
-          let newestIdx = 0;
-          let newestTime = -1;
-          for (let i = 0; i < children.length; i++) {
-            const time = subtreeLatestTimestamp.get(children[i]!.message.id) ?? 0;
-            if (time > newestTime) {
-              newestTime = time;
-              newestIdx = i;
-            }
-          }
-          chosenChildIdx = newestIdx;
-        }
-      } else {
-        // Pick child with newest activity
-        let newestIdx = options?.preferLatestByDefault ? children.length - 1 : 0;
-        let newestTime = -1;
-        for (let i = 0; i < children.length; i++) {
-          const time = subtreeLatestTimestamp.get(children[i]!.message.id) ?? 0;
-          if (time > newestTime) {
-            newestTime = time;
-            newestIdx = i;
-          }
-        }
-        chosenChildIdx = newestIdx;
+      let chosenChild: ConversationTreeNode<T> | undefined;
+
+      // 1. Check stable child ID in viewSelection
+      if (viewSelection?.selectedChildByParent?.[current.message.id]) {
+        const targetChildId = viewSelection.selectedChildByParent[current.message.id];
+        chosenChild = children.find((c: ConversationTreeNode<T>) => c.message.id === targetChildId);
       }
 
-      const clampedIdx = Math.max(0, Math.min(chosenChildIdx, children.length - 1));
-      current = children[clampedIdx];
+      // 2. Check branchSelections (string ID or number)
+      if (!chosenChild && branchSelections[current.message.id] !== undefined) {
+        const sel = branchSelections[current.message.id];
+        if (typeof sel === 'string') {
+          chosenChild = children.find((c: ConversationTreeNode<T>) => c.message.id === sel);
+        } else if (typeof sel === 'number') {
+          const clampedIdx = Math.max(0, Math.min(sel, children.length - 1));
+          chosenChild = children[clampedIdx];
+        }
+      }
+
+      // 3. Fallback when user has no explicit choice for this fork:
+      // If one of the children is part of observed DeepSeek path, pick it (initial view matches DeepSeek)
+      if (!chosenChild && observedAncestorIds.size > 0) {
+        chosenChild = children.find((c: ConversationTreeNode<T>) => observedAncestorIds.has(c.message.id));
+      }
+
+      // 4. Fallback: pick child with newest timestamp
+      if (!chosenChild) {
+        let bestChild: ConversationTreeNode<T> = children[0]!;
+        let bestTime = -1;
+        for (const child of children) {
+          const t = subtreeLatestTimestamp.get(child.message.id) ?? 0;
+          if (t > bestTime) {
+            bestTime = t;
+            bestChild = child;
+          }
+        }
+        chosenChild = bestChild;
+      }
+
+      current = chosenChild;
     }
   }
 
@@ -427,6 +503,8 @@ export function buildConversationTree<T extends Message = Message>(
     }
   }
 
+  const isArchiveViewingObservedPath = Boolean(!observedLeafId || activeLeafId === observedLeafId);
+  const newMessagesOutsideViewCount = observedPath.filter((m) => !activeMessageIds.has(m.id)).length;
   const activePath = activeNodes.map((n) => n.message);
 
   return {
@@ -434,6 +512,9 @@ export function buildConversationTree<T extends Message = Message>(
     activePath,
     activeNodes,
     activeLeafId,
+    observedPath,
+    observedLeafId,
+    isArchiveViewingObservedPath,
     unlinkedMessages,
     nodeMap,
     depthMap,
@@ -445,6 +526,10 @@ export function buildConversationTree<T extends Message = Message>(
       orphanPromptsCount,
       orphanAssistantCount,
       unresolvedParentLinksCount,
+      activeLeafId,
+      observedLeafId,
+      isArchiveViewingObservedPath,
+      newMessagesOutsideViewCount,
     },
   };
 }

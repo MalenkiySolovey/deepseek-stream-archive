@@ -187,7 +187,6 @@ export class CanonicalStreamCoordinator {
       conversationId: this.provisionalSessionId,
       messageId: deterministicMessageId,
       parentId: this.userMessage?.id || config.clientTurnId,
-      remoteParentId: config.requestParentMessageId || undefined,
       sourceRawStreamKey: this.rawStreamKey,
       flushIntervalMs: this.debounceMs,
       minCharsForFlush: config.minCharsForFlush ?? 50,

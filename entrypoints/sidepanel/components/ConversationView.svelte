@@ -35,6 +35,8 @@
   import {
     buildConversationTree,
     type ConversationTreeResult,
+    type ConversationTreeNode,
+    type ArchiveViewSelection,
   } from '../../../src/core/conversation-tree';
   import SafeMarkdown from './SafeMarkdown.svelte';
   import ContextContinuityPreviewModal from './ContextContinuityPreviewModal.svelte';
@@ -73,6 +75,7 @@
 
   // Branch index per parent grouping
   let branchSelections = $state<Record<string, number>>({});
+  let viewSelection = $state<ArchiveViewSelection | null>(null);
 
   // Export Popover/Dialog State
   let showExportModal = $state(false);
@@ -381,10 +384,17 @@
     try {
       if (typeof chrome !== 'undefined' && chrome.storage?.local && conversationId) {
         try {
-          const stored = await chrome.storage.local.get(`branch_selections_${conversationId}`);
-          const saved = stored[`branch_selections_${conversationId}`];
-          if (saved && typeof saved === 'object') {
-            branchSelections = { ...saved };
+          const stored = await chrome.storage.local.get([
+            `archive_view_selection_${conversationId}`,
+            `branch_selections_${conversationId}`,
+          ]);
+          const savedView = stored[`archive_view_selection_${conversationId}`];
+          if (savedView && typeof savedView === 'object') {
+            viewSelection = savedView as ArchiveViewSelection;
+          }
+          const savedBranch = stored[`branch_selections_${conversationId}`];
+          if (savedBranch && typeof savedBranch === 'object') {
+            branchSelections = { ...savedBranch };
           }
         } catch {
           // ignore
@@ -434,6 +444,7 @@
     const msgs = logicalMessages();
     return buildConversationTree(msgs, {
       conversation: detail?.conversation,
+      viewSelection,
       branchSelections,
       preferLatestByDefault: false,
     });
@@ -478,13 +489,90 @@
   }
 
   async function switchBranch(key: string, delta: number, total: number) {
-    const current = branchSelections[key] ?? 0;
-    const next = (current + delta + total) % total;
-    branchSelections[key] = next;
+    const tree = conversationTree();
+    let siblings: ConversationTreeNode<ArchiveMessageSummary>[] = [];
+    if (key === '__root__') {
+      siblings = tree.roots;
+    } else {
+      const parentNode = tree.getNode(key);
+      if (parentNode) {
+        siblings = parentNode.children;
+      }
+    }
+    if (siblings.length <= 1) return;
+
+    // Find current index of active node among siblings
+    let currentIndex = 0;
+    const currentSelectedId = viewSelection?.selectedChildByParent?.[key];
+    if (currentSelectedId) {
+      const foundIdx = siblings.findIndex((s) => s.message.id === currentSelectedId);
+      if (foundIdx >= 0) currentIndex = foundIdx;
+    } else {
+      const activeIdx = siblings.findIndex((s) => tree.activeMessageIds.has(s.message.id));
+      if (activeIdx >= 0) currentIndex = activeIdx;
+    }
+
+    const nextIndex = (currentIndex + delta + siblings.length) % siblings.length;
+    const nextNode = siblings[nextIndex]!;
+    const nextSelectedId = nextNode.message.id;
+
+    const updatedSelection: ArchiveViewSelection = {
+      conversationId,
+      selectedChildByParent: {
+        ...(viewSelection?.selectedChildByParent || {}),
+        [key]: nextSelectedId,
+      },
+      selectedRootId: key === '__root__' ? nextSelectedId : viewSelection?.selectedRootId,
+      updatedAt: Date.now(),
+    };
+
+    viewSelection = updatedSelection;
+    branchSelections[key] = nextIndex;
+
     try {
       if (typeof chrome !== 'undefined' && chrome.storage?.local && conversationId) {
         await chrome.storage.local.set({
+          [`archive_view_selection_${conversationId}`]: updatedSelection,
           [`branch_selections_${conversationId}`]: { ...branchSelections },
+        });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function goToObservedSession() {
+    const tree = conversationTree();
+    if (!tree.observedLeafId || tree.observedPath.length === 0) return;
+
+    const newSelectedChildByParent: Record<string, string> = {
+      ...(viewSelection?.selectedChildByParent || {}),
+    };
+    let rootId: string | undefined = undefined;
+
+    for (let i = 0; i < tree.observedPath.length; i++) {
+      const msg = tree.observedPath[i]!;
+      const parentKey = msg.parentId || '__root__';
+      newSelectedChildByParent[parentKey] = msg.id;
+      if (i === 0) {
+        rootId = msg.id;
+        newSelectedChildByParent['__root__'] = msg.id;
+      }
+    }
+
+    const updatedSelection: ArchiveViewSelection = {
+      conversationId,
+      selectedChildByParent: newSelectedChildByParent,
+      selectedRootId: rootId,
+      updatedAt: Date.now(),
+    };
+
+    viewSelection = updatedSelection;
+
+    try {
+      if (typeof chrome !== 'undefined' && chrome.storage?.local && conversationId) {
+        await chrome.storage.local.set({
+          [`archive_view_selection_${conversationId}`]: updatedSelection,
         });
       }
     } catch {
@@ -634,6 +722,22 @@
     </div>
   {:else}
     <div class="messages-thread">
+      {#if !conversationTree().isArchiveViewingObservedPath && conversationTree().observedLeafId}
+        <div class="observed-path-banner">
+          <div class="observed-path-info">
+            <span class="observed-path-icon">🧭</span>
+            <span class="observed-path-text">{t.observedPathNotification}</span>
+          </div>
+          <button
+            class="observed-path-btn"
+            type="button"
+            onclick={goToObservedSession}
+          >
+            {t.goToObservedSession}
+          </button>
+        </div>
+      {/if}
+
       {#each visibleMessages() as msg (msg.id)}
         {@const branchInfo = getSiblingInfo(msg)}
         {@const activeData = getActiveContent(msg)}
@@ -667,12 +771,12 @@
               {#if branchInfo.count > 1}
                 <div class="branch-controls">
                   <span class="branch-label">
-                    {branchInfo.isAssistantVariant ? t.responseXofY : t.branchXofY} {branchInfo.current} {t.of} {branchInfo.count}
+                    {branchInfo.isAssistantVariant ? t.responseXofY : t.promptXofY} {branchInfo.current} {t.of} {branchInfo.count}
                   </span>
                   <button
                     class="branch-nav-btn"
                     type="button"
-                    title={branchInfo.isAssistantVariant ? t.prevResponse : t.prevBranch}
+                    title={branchInfo.isAssistantVariant ? t.prevResponse : t.prevPrompt}
                     onclick={() => switchBranch(branchInfo.key, -1, branchInfo.count)}
                   >
                     ‹
@@ -680,7 +784,7 @@
                   <button
                     class="branch-nav-btn"
                     type="button"
-                    title={branchInfo.isAssistantVariant ? t.nextResponse : t.nextBranch}
+                    title={branchInfo.isAssistantVariant ? t.nextResponse : t.nextPrompt}
                     onclick={() => switchBranch(branchInfo.key, 1, branchInfo.count)}
                   >
                     ›
@@ -1997,5 +2101,50 @@
     border: 1px solid #3f3f46;
     border-radius: 0.375rem;
     padding: 0.75rem;
+  }
+
+  .observed-path-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.6rem 0.85rem;
+    background: rgba(30, 58, 138, 0.35);
+    border: 1px solid rgba(59, 130, 246, 0.45);
+    border-radius: 0.375rem;
+    margin-bottom: 0.75rem;
+    font-size: 0.8125rem;
+  }
+
+  .observed-path-info {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #93c5fd;
+  }
+
+  .observed-path-icon {
+    font-size: 1rem;
+  }
+
+  .observed-path-text {
+    line-height: 1.4;
+  }
+
+  .observed-path-btn {
+    background: #2563eb;
+    color: #ffffff;
+    border: 1px solid #3b82f6;
+    border-radius: 0.25rem;
+    padding: 0.25rem 0.65rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s;
+  }
+
+  .observed-path-btn:hover {
+    background: #1d4ed8;
   }
 </style>

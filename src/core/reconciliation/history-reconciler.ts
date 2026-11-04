@@ -93,9 +93,21 @@ export class HistoryReconciler {
 
       // Associate unmatched provisional user turn with authoritative history turn
       if (!existing && hm.role === 'user') {
-        const matchIdx = unmatchedProvisionalUser.findIndex(
-          (cand) => cand.content === hm.text || !cand.content || !hm.text
-        );
+        const matchIdx = unmatchedProvisionalUser.findIndex((cand) => {
+          // If remoteParentId and hm.parentId are both present, they MUST match
+          if (cand.remoteParentId && hm.parentId && cand.remoteParentId !== hm.parentId) {
+            return false;
+          }
+          // If both are root (no parent), content must match
+          if (!cand.remoteParentId && !hm.parentId) {
+            return Boolean(cand.content && hm.text && cand.content === hm.text);
+          }
+          // If content is present on both, it must match
+          if (cand.content && hm.text) {
+            return cand.content === hm.text;
+          }
+          return Boolean(cand.remoteParentId && hm.parentId && cand.remoteParentId === hm.parentId);
+        });
         if (matchIdx >= 0) {
           existing = unmatchedProvisionalUser.splice(matchIdx, 1)[0]!;
           existing.remoteId = hm.messageId;
@@ -245,23 +257,23 @@ export class HistoryReconciler {
       }
 
       if (em.role === 'user') {
-        // Redundant client retry attempt of a user prompt that was already captured/reconciled
-        const isRedundantRetry = messages.some(
-          (hm) => hm.role === 'user' && (hm.text === em.content || !em.content)
-        );
-        if (isRedundantRetry) {
-          const updatedMsg: Message = {
-            ...em,
-            projectionState: 'attempt_only',
-            parentId: undefined,
-            updatedAt: now,
-          };
-          const existingIdx = messagesToPut.findIndex((p) => p.id === em.id);
-          if (existingIdx >= 0) {
-            messagesToPut[existingIdx] = updatedMsg;
-          } else {
-            messagesToPut.push(updatedMsg);
-            messagesUpdated++;
+        // Preserving alternate user edit branches:
+        // If the user prompt has content, it is a legitimate user turn in an alternate branch.
+        // It must NOT be degraded to attempt_only or have its parentId wiped!
+        if (em.content && em.content.trim().length > 0) {
+          if (em.projectionState !== 'provisional_logical' && em.projectionState !== 'logical') {
+            const updatedMsg: Message = {
+              ...em,
+              projectionState: 'provisional_logical',
+              updatedAt: now,
+            };
+            const existingIdx = messagesToPut.findIndex((p) => p.id === em.id);
+            if (existingIdx >= 0) {
+              messagesToPut[existingIdx] = updatedMsg;
+            } else {
+              messagesToPut.push(updatedMsg);
+              messagesUpdated++;
+            }
           }
         }
         continue;
@@ -380,6 +392,17 @@ export class HistoryReconciler {
       if (m.remoteParentId) {
         const expectedParentId = remoteToLocalMap.get(m.remoteParentId);
         if (expectedParentId && expectedParentId !== m.id) {
+          const parentMsg = combinedMessages.get(expectedParentId);
+          // Invariant: Assistant message parent MUST be a user message!
+          // User message parent MUST be an assistant message (or null).
+          const isRoleValid =
+            (m.role === 'assistant' && (!parentMsg || parentMsg.role === 'user')) ||
+            (m.role === 'user' && (!parentMsg || parentMsg.role === 'assistant'));
+
+          if (!isRoleValid) {
+            continue;
+          }
+
           // Cycle check: verify expectedParentId does not lead back to m.id
           let current: string | undefined = expectedParentId;
           let hasCycle = false;
@@ -391,8 +414,8 @@ export class HistoryReconciler {
               break;
             }
             visited.add(current);
-            const parentMsg = combinedMessages.get(current);
-            current = parentMsg?.parentId;
+            const parent = combinedMessages.get(current);
+            current = parent?.parentId;
           }
 
           if (!hasCycle && m.parentId !== expectedParentId) {

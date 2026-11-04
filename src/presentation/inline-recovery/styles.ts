@@ -201,6 +201,102 @@ export const INLINE_RECOVERY_STYLES = `
   font-family: inherit;
 }
 
+/* Rich Markdown Elements */
+.safe-md-heading {
+  margin: 0.75rem 0 0.35rem 0;
+  font-weight: 600;
+  line-height: 1.3;
+  color: #f8fafc;
+}
+.safe-md-h1 { font-size: 1.25rem; border-bottom: 1px solid rgba(51, 65, 85, 0.4); padding-bottom: 0.3rem; }
+.safe-md-h2 { font-size: 1.125rem; border-bottom: 1px solid rgba(51, 65, 85, 0.3); padding-bottom: 0.2rem; }
+.safe-md-h3 { font-size: 1rem; }
+.safe-md-h4 { font-size: 0.9375rem; }
+.safe-md-h5 { font-size: 0.875rem; }
+.safe-md-h6 { font-size: 0.8125rem; color: #94a3b8; }
+
+.safe-md-bold { font-weight: 600; color: #f8fafc; }
+.safe-md-italic { font-style: italic; }
+.safe-md-del { text-decoration: line-through; color: #94a3b8; }
+
+.safe-md-inline-code {
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid rgba(51, 65, 85, 0.6);
+  border-radius: 4px;
+  padding: 0.15rem 0.35rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.85em;
+  color: #38bdf8;
+}
+
+.safe-md-link {
+  color: #38bdf8;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: color 0.15s ease;
+}
+.safe-md-link:hover {
+  color: #7dd3fc;
+}
+
+.safe-md-blockquote {
+  margin: 0.5rem 0;
+  padding: 0.35rem 0.75rem;
+  border-left: 3px solid #38bdf8;
+  background: rgba(30, 41, 59, 0.4);
+  border-radius: 0 4px 4px 0;
+  color: #cbd5e1;
+  font-style: italic;
+}
+
+.safe-md-hr {
+  border: none;
+  border-top: 1px solid rgba(51, 65, 85, 0.6);
+  margin: 0.75rem 0;
+}
+
+.safe-md-ul, .safe-md-ol {
+  margin: 0.35rem 0 0.5rem 1.25rem;
+  padding: 0;
+  line-height: 1.6;
+}
+.safe-md-li {
+  margin: 0.2rem 0;
+}
+.safe-md-sublist {
+  margin: 0.2rem 0 0.2rem 1rem;
+}
+
+.safe-md-table-wrapper {
+  overflow-x: auto;
+  margin: 0.5rem 0;
+  max-width: 100%;
+}
+.safe-md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid #1e293b;
+  border-radius: 4px;
+}
+.safe-md-th {
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  padding: 0.4rem 0.6rem;
+  font-weight: 600;
+  color: #f1f5f9;
+}
+.safe-md-td {
+  border: 1px solid #1e293b;
+  padding: 0.35rem 0.6rem;
+  color: #cbd5e1;
+}
+.safe-md-tr:nth-child(even) {
+  background: rgba(30, 41, 59, 0.3);
+}
+
 /* Actions footer */
 .streamarchive-inline-footer {
   display: flex;

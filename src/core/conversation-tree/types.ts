@@ -20,12 +20,23 @@ export interface ConversationTreeNode<T extends Message = Message> {
   isLeaf: boolean;
 }
 
+export interface ArchiveViewSelection {
+  conversationId: string;
+  selectedChildByParent: Record<string, string>;
+  selectedRootId?: string;
+  updatedAt: number;
+}
+
 export interface ConversationTreeDiagnostics {
   userBranchGroupCount: number;
   assistantVariantGroupCount: number;
   orphanPromptsCount: number;
   orphanAssistantCount: number;
   unresolvedParentLinksCount: number;
+  activeLeafId: string | null;
+  observedLeafId: string | null;
+  isArchiveViewingObservedPath: boolean;
+  newMessagesOutsideViewCount: number;
 }
 
 export interface ConversationTreeResult<T extends Message = Message> {
@@ -33,6 +44,9 @@ export interface ConversationTreeResult<T extends Message = Message> {
   activePath: T[];
   activeNodes: ConversationTreeNode<T>[];
   activeLeafId: string | null;
+  observedPath: T[];
+  observedLeafId: string | null;
+  isArchiveViewingObservedPath: boolean;
   unlinkedMessages: T[];
   nodeMap: Map<string, ConversationTreeNode<T>>;
   depthMap: Map<string, number>;
@@ -43,7 +57,8 @@ export interface ConversationTreeResult<T extends Message = Message> {
 
 export interface BuildConversationTreeOptions {
   conversation?: (Pick<Conversation, 'id' | 'remoteId'> & { currentMessageId?: string | null }) | null;
-  branchSelections?: Record<string, number>;
+  branchSelections?: Record<string, number | string>;
+  viewSelection?: ArchiveViewSelection | null;
   activeLeafId?: string;
   preferLatestByDefault?: boolean;
 }
