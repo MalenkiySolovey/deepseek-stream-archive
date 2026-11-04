@@ -11,7 +11,7 @@ import type {
  * Secondary: remoteCreatedAt ascending
  * Tertiary: local id string comparison
  */
-function compareMessageOrder(a: Message, b: Message): number {
+export function compareMessageOrder(a: Message, b: Message): number {
   if (a.createdAt !== b.createdAt) {
     return a.createdAt - b.createdAt;
   }
@@ -19,6 +19,11 @@ function compareMessageOrder(a: Message, b: Message): number {
   const rB = b.remoteCreatedAt ?? 0;
   if (rA !== rB) {
     return rA - rB;
+  }
+  // When timestamps are identical, user prompts must precede assistant responses
+  if (a.role !== b.role) {
+    if (a.role === 'user') return -1;
+    if (b.role === 'user') return 1;
   }
   return a.id.localeCompare(b.id);
 }
@@ -113,11 +118,32 @@ export function buildConversationTree<T extends Message = Message>(
       }
     }
 
+    // Sibling-based parent resolution across tree:
+    // If another message with the same role shares the same non-null remoteParentId,
+    // they are siblings branching under the same parent!
+    if (!pId && m.remoteParentId) {
+      const targetRemote = String(m.remoteParentId);
+      for (const other of sortedMessages) {
+        if (
+          other.id !== m.id &&
+          other.role === m.role &&
+          other.remoteParentId &&
+          String(other.remoteParentId) === targetRemote
+        ) {
+          const otherParent =
+            resolvedParentIds.get(other.id) ||
+            (other.parentId && idMap.has(other.parentId) ? other.parentId : null);
+          if (otherParent && idMap.has(otherParent)) {
+            pId = otherParent;
+            break;
+          }
+        }
+      }
+    }
+
     // For assistant messages without explicit parentage:
     // 1. Exact pairing via sourceRawStreamKey
-    // 2. Only resolve to preceding user message if completely unambiguous
-    // (e.g. legacy linear v0.1.0 archive with exactly 1 candidate user prompt in conversation).
-    // In branched or multi-prompt conversations, never guess chronologically.
+    // 2. Unambiguous or most recent preceding user candidate
     if (!pId && m.role === 'assistant') {
       if (m.sourceRawStreamKey) {
         const streamUser = sortedMessages.find(
@@ -149,7 +175,7 @@ export function buildConversationTree<T extends Message = Message>(
           candidateAssistantMsgs.push(sortedMessages[j]!);
         }
       }
-      if (candidateAssistantMsgs.length === 1) {
+      if (candidateAssistantMsgs.length >= 1) {
         pId = candidateAssistantMsgs[0]!.id;
       }
     }
@@ -221,11 +247,16 @@ export function buildConversationTree<T extends Message = Message>(
       }
     } else {
       // No parent resolved
-      if (m.role === 'user' && !m.parentId && !m.remoteParentId) {
+      const isLegitRootUser =
+        m.role === 'user' &&
+        (!m.parentId || m.parentId === 'null' || m.parentId === 'undefined') &&
+        (!m.remoteParentId ||
+          m.remoteParentId === 'null' ||
+          m.remoteParentId === 'undefined' ||
+          m.remoteParentId === '0');
+
+      if (isLegitRootUser) {
         // Legitimate conversation root prompt
-        node.isRoot = true;
-        roots.push(node);
-      } else if (!m.parentId && !m.remoteParentId && m.role === 'user') {
         node.isRoot = true;
         roots.push(node);
       } else {

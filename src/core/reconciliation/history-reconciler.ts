@@ -429,6 +429,20 @@ export class HistoryReconciler {
           expectedParentId = m.parentId;
         }
       }
+      if (!expectedParentId && m.remoteParentId) {
+        const targetRemote = String(m.remoteParentId);
+        const sibling = Array.from(combinedMessages.values()).find(
+          (other) =>
+            other.id !== m.id &&
+            other.role === m.role &&
+            other.remoteParentId &&
+            String(other.remoteParentId) === targetRemote &&
+            other.parentId
+        );
+        if (sibling?.parentId && combinedMessages.has(sibling.parentId)) {
+          expectedParentId = sibling.parentId;
+        }
+      }
       if (!expectedParentId && m.role === 'assistant') {
         const candidateUser = Array.from(combinedMessages.values()).find(
           (u) =>
@@ -439,6 +453,9 @@ export class HistoryReconciler {
         if (candidateUser) {
           expectedParentId = candidateUser.id;
         }
+      }
+      if (!expectedParentId && m.parentId && combinedMessages.has(m.parentId)) {
+        expectedParentId = m.parentId;
       }
 
       if (expectedParentId && expectedParentId !== m.id) {

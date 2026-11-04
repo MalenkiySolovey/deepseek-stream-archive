@@ -757,6 +757,7 @@
 
       {#each visibleMessages as msg (msg.id)}
         {@const branchInfo = getSiblingInfo(msg)}
+        {@const node = conversationTree.getNode(msg.id)}
         {@const activeData = getActiveContent(msg)}
         {@const isAssistant = msg.role === 'assistant'}
         {@const isFiltered = msg.status === 'filtered' || (msg.recoveryEvents && msg.recoveryEvents.length > 0) || Boolean(msg.preferredRevision?.isLastGood)}
@@ -819,7 +820,7 @@
             </div>
           </div>
 
-          {#if msg.remoteParentId && !msg.parentId}
+          {#if (msg.remoteParentId && !msg.parentId && !node?.parent && !node?.isRoot)}
             <div class="unresolved-parent-notice">
               ⚠️ {t.unresolvedParent} ({msg.remoteParentId})
             </div>

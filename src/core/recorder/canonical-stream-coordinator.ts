@@ -413,7 +413,14 @@ export class CanonicalStreamCoordinator {
         this.lastAckedStatus !== undefined &&
         messageSnapshot.status !== this.lastAckedStatus;
 
-      if (this.lastAckedSeq < 0 && !hasNewRevisions && !hasNewRecoveryEvents && !isFinal) {
+      if (
+        this.lastAckedSeq < 0 &&
+        !hasNewRevisions &&
+        !hasNewRecoveryEvents &&
+        !hasNewRemoteId &&
+        !hasStatusChange &&
+        !isFinal
+      ) {
         return null;
       }
 
