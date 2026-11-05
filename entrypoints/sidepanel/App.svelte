@@ -63,6 +63,7 @@
     executeRestore,
   } from '../../src/restore/restore-service';
   import { buildRestorePlan } from '../../src/restore/plan';
+  import { recoverIncompleteRestoreIfAny } from '../../src/restore/staging-service';
   import type { MaterializedPortableBackup } from '../../src/backup/reader';
   import { IndexedDbStorageRepository } from '../../src/storage/repositories/storage-repository-impl';
   import { formatDateUtc } from '../../src/export';
@@ -132,6 +133,10 @@
   let continuitySettings = $state<ContextContinuitySettings>({ ...DEFAULT_CONTEXT_CONTINUITY_SETTINGS });
 
   onMount(() => {
+    if (typeof window !== 'undefined') {
+      (window as any).__recoverIncompleteRestoreIfAny = recoverIncompleteRestoreIfAny;
+    }
+    recoverIncompleteRestoreIfAny().catch(() => {});
     loadRecoverySettings();
     loadContinuitySettings();
   });

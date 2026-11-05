@@ -106,7 +106,7 @@ export interface PaginatedArchiveConversations {
 
 export interface StorageRepository {
   // Mutation generation & storage consistency
-  getMutationEpoch(): number;
+  getMutationEpoch(): Promise<number>;
 
   // Conversation operations
   saveConversation(conversation: Conversation): Promise<void>;

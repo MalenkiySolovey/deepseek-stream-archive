@@ -24,6 +24,7 @@ import type { RawStreamRecord } from '../raw-journal/types';
 import { evaluateRawStreamRetention, getCutoffTimestamp } from './policy';
 import type { ArchiveCleanupResult, RawRetentionMode, RawRetentionPlan } from './types';
 import { createDurableWriteTransaction } from '../db';
+import { STORAGE_MUTATION_KEY, recordStorageMutation } from '../mutation-tracker';
 
 function makeKeyRange(key: IDBValidKey): IDBKeyRange | IDBValidKey {
   return typeof IDBKeyRange !== 'undefined' ? IDBKeyRange.only(key) : key;

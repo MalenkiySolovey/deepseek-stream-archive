@@ -32,7 +32,8 @@ import {
   type HistoryStagingManifestRecord,
 } from '../schema';
 import { openExtensionDatabase, createDurableWriteTransaction } from '../db';
-import { recordStorageMutation, getStorageMutationEpoch } from '../mutation-tracker';
+import { recordStorageMutation, getStorageMutationEpoch, getDurableStorageMutationEpoch } from '../mutation-tracker';
+import { recoverIncompleteRestoreIfAny } from '../../restore/staging-service';
 import {
   computeCanonicalCheckpointFingerprint,
   serializeHistoryStagingBatchForFingerprint,
@@ -81,11 +82,22 @@ import {
 export class IndexedDbStorageRepository implements StorageRepository {
   constructor(private readonly idbFactory?: IDBFactory) {}
 
-  getMutationEpoch(): number {
-    return getStorageMutationEpoch();
+  async getMutationEpoch(): Promise<number> {
+    const db = await this.getDb();
+    return getDurableStorageMutationEpoch(db);
   }
 
+  private recoveryChecked = false;
+
   private async getDb(): Promise<IDBDatabase> {
+    if (!this.recoveryChecked) {
+      this.recoveryChecked = true;
+      try {
+        await recoverIncompleteRestoreIfAny(this.idbFactory);
+      } catch {
+        // non-blocking crash recovery check
+      }
+    }
     return openExtensionDatabase(this.idbFactory);
   }
 

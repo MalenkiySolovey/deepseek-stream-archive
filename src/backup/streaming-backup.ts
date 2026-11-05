@@ -321,7 +321,7 @@ export async function streamBackupToWritable(
     }
   } else {
     // Custom writable duck-type (e.g. FileSystemWritableFileStream or mock)
-    const custom = writable as { write: (data: Uint8Array) => Promise<void>; close: () => Promise<void>; abort: (reason?: unknown) => Promise<void> };
+    const custom = writable as { write: (data: Uint8Array) => Promise<void>; close: () => Promise<void>; abort?: (reason?: unknown) => Promise<void> };
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -333,7 +333,9 @@ export async function streamBackupToWritable(
       }
       await custom.close();
     } catch (err) {
-      await custom.abort(err).catch(() => {});
+      if (typeof custom.abort === 'function') {
+        await custom.abort(err).catch(() => {});
+      }
       throw err;
     }
   }

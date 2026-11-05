@@ -26,6 +26,7 @@ export interface RestorePlan {
     raw_streams: RawStreamRecord[];
     raw_stream_batches: RawStreamBatch[];
   };
+  toInsertCounts?: PortableBackupStoreCounts;
   toSkip: PortableBackupStoreCounts;
   conflicts: RestoreConflict[];
 }

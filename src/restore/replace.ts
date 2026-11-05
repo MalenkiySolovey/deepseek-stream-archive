@@ -56,9 +56,10 @@ export async function executeAtomicReplace(
   const startTime = Date.now();
 
   return new Promise((resolve, reject) => {
+    const availableStores = (ALL_NINE_STORES as unknown as string[]).filter((s) => db.objectStoreNames.contains(s));
     let tx: IDBTransaction;
     try {
-      tx = createDurableWriteTransaction(db, ALL_NINE_STORES as unknown as string[], 'strict');
+      tx = createDurableWriteTransaction(db, availableStores, 'strict');
     } catch (err) {
       return reject(new Error(`Failed to open replace transaction: ${(err as Error).message}`));
     }

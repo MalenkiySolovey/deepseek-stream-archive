@@ -78,17 +78,36 @@ export function resetStorageMutationEpoch(epoch = 1): void {
 /**
  * Queries the authoritative durable storage mutation epoch directly from IndexedDB.
  * Guarantees recovery of true generation sequence across Service Worker cold-starts.
+ * Fails closed (rejects) if the database or transaction errors so backups abort safely.
  */
 export function getDurableStorageMutationEpoch(db: IDBDatabase): Promise<number> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     try {
       if (!db.objectStoreNames.contains(STORE_CANONICAL_CHECKPOINTS)) {
         return resolve(currentMutationEpoch);
       }
       const tx = db.transaction(STORE_CANONICAL_CHECKPOINTS, 'readonly');
+      let settled = false;
+
+      tx.onerror = () => {
+        if (!settled) {
+          settled = true;
+          reject(new Error(`Failed to read durable storage mutation epoch: ${tx.error?.message || 'Transaction error'}`));
+        }
+      };
+
+      tx.onabort = () => {
+        if (!settled) {
+          settled = true;
+          reject(new Error(`Transaction reading durable storage mutation epoch aborted: ${tx.error?.message || 'Aborted'}`));
+        }
+      };
+
       const store = tx.objectStore(STORE_CANONICAL_CHECKPOINTS);
       const req = store.get(STORAGE_MUTATION_KEY);
       req.onsuccess = () => {
+        if (settled) return;
+        settled = true;
         const record = req.result;
         const seq = typeof record?.lastCommittedCheckpointSeq === 'number'
           ? record.lastCommittedCheckpointSeq
@@ -101,10 +120,13 @@ export function getDurableStorageMutationEpoch(db: IDBDatabase): Promise<number>
         }
       };
       req.onerror = () => {
-        resolve(currentMutationEpoch);
+        if (!settled) {
+          settled = true;
+          reject(new Error(`Failed to get mutation key from canonical checkpoints: ${req.error?.message || 'Request error'}`));
+        }
       };
-    } catch {
-      resolve(currentMutationEpoch);
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error(String(err)));
     }
   });
 }

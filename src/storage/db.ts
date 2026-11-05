@@ -106,20 +106,29 @@ export function closeExtensionDatabase(idbFactory?: IDBFactory, dbName?: string)
       }
     }
   } else {
+    const toRemove: IDBDatabase[] = [];
     for (const db of allActiveDatabases) {
-      try {
-        db.close();
-      } catch {
-        // ignore
+      if (!dbName || db.name === dbName) {
+        try {
+          db.close();
+        } catch {
+          // ignore
+        }
+        toRemove.push(db);
       }
     }
-    allActiveDatabases.clear();
-    defaultDatabase = null;
+    for (const db of toRemove) {
+      allActiveDatabases.delete(db);
+      if (defaultDatabase === db) {
+        defaultDatabase = null;
+      }
+    }
   }
 }
 
 /**
  * Completely deletes an IndexedDB database (e.g. for cleaning up staging databases).
+ * Fails closed if deletion is blocked or encounters error, ensuring no corrupt/stale DB is used.
  */
 export async function deleteExtensionDatabase(idbFactory?: IDBFactory, dbName: string = DB_NAME): Promise<void> {
   const factory = idbFactory || (typeof indexedDB !== 'undefined' ? indexedDB : null);
@@ -132,9 +141,36 @@ export async function deleteExtensionDatabase(idbFactory?: IDBFactory, dbName: s
 
   return new Promise((resolve, reject) => {
     const request = factory.deleteDatabase(dbName);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error || new Error(`Failed to delete IndexedDB database "${dbName}".`));
-    request.onblocked = () => resolve();
+    let settled = false;
+    let blockedTimeout: any = null;
+
+    request.onsuccess = () => {
+      if (settled) return;
+      settled = true;
+      if (blockedTimeout) clearTimeout(blockedTimeout);
+      resolve();
+    };
+
+    request.onerror = () => {
+      if (settled) return;
+      settled = true;
+      if (blockedTimeout) clearTimeout(blockedTimeout);
+      reject(request.error || new Error(`Failed to delete IndexedDB database "${dbName}".`));
+    };
+
+    request.onblocked = () => {
+      // onblocked indicates active unclosed connections are preventing deletion.
+      // Attempt closing known active connections and wait with timeout rather than falsely resolving.
+      closeExtensionDatabase(idbFactory, dbName);
+      if (!blockedTimeout) {
+        blockedTimeout = setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            reject(new Error(`Timed out waiting for IndexedDB database "${dbName}" to unblock for deletion.`));
+          }
+        }, 8000);
+      }
+    };
   });
 }
 
