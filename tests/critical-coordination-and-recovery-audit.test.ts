@@ -13,6 +13,8 @@ import {
   setRestoreJournalMarker,
   getRestoreJournalMarker,
   verifyDatabaseEquality,
+  computeDatabaseStoreChecksums,
+  SIX_DURABLE_STORES,
   EIGHT_SNAPSHOT_STORES,
   type RecoveryStatus,
 } from '../src/restore/staging-service';
@@ -344,6 +346,11 @@ describe('10 Mandatory Audit Scenarios: Coordination, Web Locks & Recovery Safet
     snapDb.close();
 
     // Simulate crash at stage 'commit_verified' (deep verification had already succeeded!)
+    const liveDbForChecksum = await openExtensionDatabase(fakeFactory, liveDbName);
+    const checksums = await computeDatabaseStoreChecksums(liveDbForChecksum, SIX_DURABLE_STORES);
+    const counts = { conversations: 1, messages: 0, revisions: 0, recovery_events: 0, raw_streams: 0, raw_stream_batches: 0 };
+    liveDbForChecksum.close();
+
     await setRestoreJournalMarker({
       type: 'replace',
       stage: 'commit_verified',
@@ -352,6 +359,8 @@ describe('10 Mandatory Audit Scenarios: Coordination, Web Locks & Recovery Safet
       stagingDbName: 'test_staging_commit_verified',
       timestamp: Date.now() - 5000,
       operationId: 'op-commit-verified',
+      liveStoreChecksums: checksums,
+      liveStoreCounts: counts,
     }, fakeFactory);
 
     const recStatus = await recoverIncompleteRestoreIfAny(fakeFactory);

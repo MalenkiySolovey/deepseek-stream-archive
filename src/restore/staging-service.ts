@@ -50,6 +50,7 @@ import type { RestorePlan, RestoreResult, RestoreMode, RestoreConflict } from '.
 import type { Conversation, Message, ResponseRevision, RecoveryEvent } from '../core/models';
 import type { RawStreamRecord, RawStreamBatch } from '../storage/raw-journal/types';
 import { ALL_NINE_STORES } from './replace';
+import { computeSha256, canonicalStringify } from '../shared/crypto';
 
 export const RESTORE_STAGING_DB_NAME = 'StreamArchiveDB_restore_staging' as const;
 export const RESTORE_SNAPSHOT_DB_NAME = 'StreamArchiveDB_pre_restore_snapshot' as const;
@@ -138,6 +139,8 @@ export interface RestoreJournalMarker {
   operationId?: string;
   expectedCounts?: PortableBackupStoreCounts;
   snapshotCounts?: Record<string, number>;
+  liveStoreChecksums?: Record<string, string>;
+  liveStoreCounts?: Record<string, number>;
 }
 
 export type RestoreInterruptionPoint =
@@ -601,7 +604,7 @@ export async function recoverIncompleteRestoreIfAny(idbFactory?: IDBFactory): Pr
 
         // If commit was already verified before crash, verify liveDb before destroying snapshot!
         if (normalizedStage === 'commit_verified' || normalizedStage === 'cleanup_pending') {
-          let verifiedCommit = true;
+          let verifiedCommit = false;
 
           if (marker.type === 'replace') {
             // Replace mode: liveDb should match stagingDb exactly
@@ -619,8 +622,39 @@ export async function recoverIncompleteRestoreIfAny(idbFactory?: IDBFactory): Pr
                 try { stagingDb.close(); } catch {}
               }
             } else {
-              // Staging DB already deleted: ensure live database has records if expected data was > 0
-              if (expectedTotal > 0 && liveTotal === 0) {
+              // Staging DB is absent: verify using authoritative liveStoreChecksums and liveStoreCounts
+              if (marker.liveStoreChecksums && marker.liveStoreCounts) {
+                let countsMatch = true;
+                for (const store of SIX_DURABLE_STORES) {
+                  const exp = marker.liveStoreCounts[store] ?? 0;
+                  const act = await getStoreRecordCount(liveDb, store);
+                  if (act !== exp) {
+                    console.error(`[Crash Recovery] Replace count mismatch in store "${store}" without stagingDb: actual=${act}, expected=${exp}`);
+                    countsMatch = false;
+                    break;
+                  }
+                }
+
+                if (countsMatch) {
+                  const currentChecksums = await computeDatabaseStoreChecksums(liveDb, SIX_DURABLE_STORES);
+                  let checksumsMatch = true;
+                  for (const store of SIX_DURABLE_STORES) {
+                    const expChecksum = marker.liveStoreChecksums[store];
+                    const actChecksum = currentChecksums[store];
+                    if (!expChecksum || actChecksum !== expChecksum) {
+                      console.error(`[Crash Recovery] Replace checksum mismatch in store "${store}" without stagingDb: actual=${actChecksum}, expected=${expChecksum}`);
+                      checksumsMatch = false;
+                      break;
+                    }
+                  }
+
+                  if (checksumsMatch) {
+                    const integrity = await validateStagingReferentialIntegrity(liveDb);
+                    verifiedCommit = integrity.valid;
+                  }
+                }
+              } else {
+                console.error('[Crash Recovery] Staging DB is absent and journal lacks verifiable checksums for replace. Refusing to destroy snapshot.');
                 verifiedCommit = false;
               }
             }
@@ -645,17 +679,39 @@ export async function recoverIncompleteRestoreIfAny(idbFactory?: IDBFactory): Pr
                 try { stagingDb.close(); } catch {}
               }
             } else if (snapshotDb) {
-              // Staging DB already deleted: ensure all records in snapshotDb exist in liveDb, and referential integrity holds
-              try {
-                const snapCount = snapshotTotal;
-                const liveCount = liveTotal;
-                if (liveCount < snapCount) {
-                  verifiedCommit = false;
-                } else {
-                  const integrity = await validateStagingReferentialIntegrity(liveDb);
-                  verifiedCommit = integrity.valid;
+              // Staging DB is absent: verify using authoritative liveStoreChecksums and liveStoreCounts
+              if (marker.liveStoreChecksums && marker.liveStoreCounts) {
+                let countsMatch = true;
+                for (const store of SIX_DURABLE_STORES) {
+                  const exp = marker.liveStoreCounts[store] ?? 0;
+                  const act = await getStoreRecordCount(liveDb, store);
+                  if (act !== exp) {
+                    console.error(`[Crash Recovery] Merge count mismatch in store "${store}" without stagingDb: actual=${act}, expected=${exp}`);
+                    countsMatch = false;
+                    break;
+                  }
                 }
-              } catch {
+
+                if (countsMatch) {
+                  const currentChecksums = await computeDatabaseStoreChecksums(liveDb, SIX_DURABLE_STORES);
+                  let checksumsMatch = true;
+                  for (const store of SIX_DURABLE_STORES) {
+                    const expChecksum = marker.liveStoreChecksums[store];
+                    const actChecksum = currentChecksums[store];
+                    if (!expChecksum || actChecksum !== expChecksum) {
+                      console.error(`[Crash Recovery] Merge checksum mismatch in store "${store}" without stagingDb: actual=${actChecksum}, expected=${expChecksum}`);
+                      checksumsMatch = false;
+                      break;
+                    }
+                  }
+
+                  if (checksumsMatch) {
+                    const integrity = await validateStagingReferentialIntegrity(liveDb);
+                    verifiedCommit = integrity.valid;
+                  }
+                }
+              } else {
+                console.error('[Crash Recovery] Staging DB is absent and journal lacks verifiable checksums for merge. Preserving snapshot without destructive rollback.');
                 verifiedCommit = false;
               }
             }
@@ -864,6 +920,48 @@ async function fetchStoreBatch(
 }
 
 /**
+ * Safely fetches multiple records by primary key within a single transaction tick.
+ * Eliminates TransactionInactiveError in genuine Chromium by enqueuing all get requests
+ * synchronously before yielding control to the microtask loop.
+ */
+export async function batchGetKeys(
+  db: IDBDatabase,
+  storeName: string,
+  keys: readonly IDBValidKey[]
+): Promise<Map<IDBValidKey, any>> {
+  if (keys.length === 0) return new Map();
+  return new Promise((resolve, reject) => {
+    let tx: IDBTransaction;
+    try {
+      tx = db.transaction(storeName, 'readonly');
+    } catch (err) {
+      return reject(new Error(`Failed to open readonly transaction for "${storeName}": ${(err as Error).message}`));
+    }
+    const store = tx.objectStore(storeName);
+    const map = new Map<IDBValidKey, any>();
+    let count = 0;
+    let errored = false;
+
+    for (const key of keys) {
+      const req = store.get(key);
+      req.onsuccess = () => {
+        if (!errored) {
+          map.set(key, req.result !== undefined ? req.result : null);
+          count++;
+          if (count === keys.length) resolve(map);
+        }
+      };
+      req.onerror = () => {
+        if (!errored) {
+          errored = true;
+          reject(req.error || new Error(`Failed to read record for key "${String(key)}" from "${storeName}"`));
+        }
+      };
+    }
+  });
+}
+
+/**
  * Validates referential integrity directly against the staging database using cursor batches.
  * Peak memory consumption is strictly bounded (< 2 MiB RAM) without accumulating in-memory graphs.
  */
@@ -880,19 +978,25 @@ export async function validateStagingReferentialIntegrity(
       if (batch.length === 0) break;
       lastKey = batch[batch.length - 1]!.key;
 
-      const tx = stagingDb.transaction([STORE_CONVERSATIONS, STORE_MESSAGES], 'readonly');
-      const convStore = tx.objectStore(STORE_CONVERSATIONS);
-      const msgStore = tx.objectStore(STORE_MESSAGES);
+      const convIds = Array.from(new Set(batch.map((item) => (item.value as Message).conversationId)));
+      const parentIds = Array.from(
+        new Set(
+          batch
+            .map((item) => (item.value as Message).parentId)
+            .filter((pid): pid is string => Boolean(pid))
+        )
+      );
+
+      const [convMap, parentMap] = await Promise.all([
+        batchGetKeys(stagingDb, STORE_CONVERSATIONS, convIds),
+        batchGetKeys(stagingDb, STORE_MESSAGES, parentIds),
+      ]);
 
       for (const item of batch) {
         const msg = item.value as Message;
         // Check conversationId
-        const convReq = convStore.get(msg.conversationId);
-        const convExists = await new Promise<boolean>((res) => {
-          convReq.onsuccess = () => res(!!convReq.result);
-          convReq.onerror = () => res(false);
-        });
-        if (!convExists) {
+        const conv = convMap.get(msg.conversationId);
+        if (!conv) {
           errors.push({
             code: 'orphan_message',
             message: `Message "${msg.id}" references non-existent conversation "${msg.conversationId}".`,
@@ -910,11 +1014,7 @@ export async function validateStagingReferentialIntegrity(
               entityId: msg.id,
             });
           } else {
-            const parentReq = msgStore.get(msg.parentId);
-            const parent = await new Promise<any>((res) => {
-              parentReq.onsuccess = () => res(parentReq.result);
-              parentReq.onerror = () => res(null);
-            });
+            const parent = parentMap.get(msg.parentId);
             if (!parent) {
               errors.push({
                 code: 'missing_parent_message',
@@ -945,16 +1045,13 @@ export async function validateStagingReferentialIntegrity(
       if (batch.length === 0) break;
       lastKey = batch[batch.length - 1]!.key;
 
-      const tx = stagingDb.transaction([STORE_MESSAGES], 'readonly');
-      const msgStore = tx.objectStore(STORE_MESSAGES);
+      const msgIds = Array.from(new Set(batch.map((item) => (item.value as ResponseRevision).messageId)));
+      const msgMap = await batchGetKeys(stagingDb, STORE_MESSAGES, msgIds);
+
       for (const item of batch) {
         const rev = item.value as ResponseRevision;
-        const msgReq = msgStore.get(rev.messageId);
-        const msgExists = await new Promise<boolean>((res) => {
-          msgReq.onsuccess = () => res(!!msgReq.result);
-          msgReq.onerror = () => res(false);
-        });
-        if (!msgExists) {
+        const msg = msgMap.get(rev.messageId);
+        if (!msg) {
           errors.push({
             code: 'orphan_revision',
             message: `Revision "${rev.id}" references non-existent message "${rev.messageId}".`,
@@ -975,16 +1072,13 @@ export async function validateStagingReferentialIntegrity(
       if (batch.length === 0) break;
       lastKey = batch[batch.length - 1]!.key;
 
-      const tx = stagingDb.transaction([STORE_RAW_STREAMS], 'readonly');
-      const rawStore = tx.objectStore(STORE_RAW_STREAMS);
+      const streamKeys = Array.from(new Set(batch.map((item) => (item.value as RawStreamBatch).streamKey)));
+      const streamMap = await batchGetKeys(stagingDb, STORE_RAW_STREAMS, streamKeys);
+
       for (const item of batch) {
         const b = item.value as RawStreamBatch;
-        const rawReq = rawStore.get(b.streamKey);
-        const rawExists = await new Promise<boolean>((res) => {
-          rawReq.onsuccess = () => res(!!rawReq.result);
-          rawReq.onerror = () => res(false);
-        });
-        if (!rawExists) {
+        const raw = streamMap.get(b.streamKey);
+        if (!raw) {
           errors.push({
             code: 'orphan_raw_batch',
             message: `Raw stream batch "${b.id}" references non-existent raw stream "${b.streamKey}".`,
@@ -1008,23 +1102,23 @@ export async function validateStagingReferentialIntegrity(
       if (batch.length === 0) break;
       lastKey = batch[batch.length - 1]!.key;
 
-      const storesToOpen: string[] = [STORE_RECOVERY_EVENTS];
-      if (hasMessages) storesToOpen.push(STORE_MESSAGES);
-      if (hasRevisions) storesToOpen.push(STORE_REVISIONS);
+      const msgIds = hasMessages
+        ? Array.from(new Set(batch.map((item) => (item.value as RecoveryEvent).messageId).filter(Boolean) as string[]))
+        : [];
+      const revIds = hasRevisions
+        ? Array.from(new Set(batch.map((item) => (item.value as RecoveryEvent).recoveredRevisionId).filter(Boolean) as string[]))
+        : [];
 
-      const tx = stagingDb.transaction(storesToOpen, 'readonly');
-      const msgStore = hasMessages ? tx.objectStore(STORE_MESSAGES) : null;
-      const revStore = hasRevisions ? tx.objectStore(STORE_REVISIONS) : null;
+      const [msgMap, revMap] = await Promise.all([
+        hasMessages ? batchGetKeys(stagingDb, STORE_MESSAGES, msgIds) : Promise.resolve(new Map()),
+        hasRevisions ? batchGetKeys(stagingDb, STORE_REVISIONS, revIds) : Promise.resolve(new Map()),
+      ]);
 
       for (const item of batch) {
         const ev = item.value as RecoveryEvent;
-        if (ev.messageId && msgStore) {
-          const mReq = msgStore.get(ev.messageId);
-          const mExists = await new Promise<boolean>((res) => {
-            mReq.onsuccess = () => res(!!mReq.result);
-            mReq.onerror = () => res(false);
-          });
-          if (!mExists) {
+        if (ev.messageId && hasMessages) {
+          const m = msgMap.get(ev.messageId);
+          if (!m) {
             errors.push({
               code: 'orphan_recovery_event',
               message: `Recovery event "${ev.id}" references non-existent message "${ev.messageId}".`,
@@ -1034,13 +1128,9 @@ export async function validateStagingReferentialIntegrity(
           }
         }
 
-        if (ev.recoveredRevisionId && revStore) {
-          const rReq = revStore.get(ev.recoveredRevisionId);
-          const rExists = await new Promise<boolean>((res) => {
-            rReq.onsuccess = () => res(!!rReq.result);
-            rReq.onerror = () => res(false);
-          });
-          if (!rExists) {
+        if (ev.recoveredRevisionId && hasRevisions) {
+          const r = revMap.get(ev.recoveredRevisionId);
+          if (!r) {
             errors.push({
               code: 'orphan_recovery_event_revision',
               message: `Recovery event "${ev.id}" references non-existent revision "${ev.recoveredRevisionId}".`,
@@ -1361,6 +1451,9 @@ async function copyStoreRecords(
 
 /**
  * Verifies deep equality between two databases across given stores.
+ * - Fails if any mandatory store in `stores` is missing in either database.
+ * - Passes if both stores exist and are empty (count 0).
+ * - Verifies key existence and deep record equality via batch key lookups, independent of cursor iteration order.
  */
 export async function verifyDatabaseEquality(
   dbA: IDBDatabase,
@@ -1368,50 +1461,47 @@ export async function verifyDatabaseEquality(
   stores: readonly string[]
 ): Promise<boolean> {
   for (const storeName of stores) {
-    if (!dbA.objectStoreNames.contains(storeName) || !dbB.objectStoreNames.contains(storeName)) {
-      continue;
+    const hasA = dbA.objectStoreNames.contains(storeName);
+    const hasB = dbB.objectStoreNames.contains(storeName);
+
+    if (!hasA || !hasB) {
+      console.error(
+        `[verifyDatabaseEquality] Mandatory object store "${storeName}" missing in database comparison: dbA=${hasA}, dbB=${hasB}`
+      );
+      return false;
     }
 
     // 1. Check count equality
-    const countA = await new Promise<number>((res, rej) => {
-      const tx = dbA.transaction(storeName, 'readonly');
-      const req = tx.objectStore(storeName).count();
-      req.onsuccess = () => res(req.result);
-      req.onerror = () => rej(req.error);
-    });
-    const countB = await new Promise<number>((res, rej) => {
-      const tx = dbB.transaction(storeName, 'readonly');
-      const req = tx.objectStore(storeName).count();
-      req.onsuccess = () => res(req.result);
-      req.onerror = () => rej(req.error);
-    });
+    const countA = await getStoreRecordCount(dbA, storeName);
+    const countB = await getStoreRecordCount(dbB, storeName);
 
     if (countA !== countB) {
       console.error(`[verifyDatabaseEquality] Count mismatch in store "${storeName}": dbA=${countA}, dbB=${countB}`);
       return false;
     }
 
-    // 2. Sample key check in batches
+    // Both exist and both are empty: identical empty store
+    if (countA === 0) {
+      continue;
+    }
+
+    // 2. Fetch records from dbA in batches and verify existence & deep equality in dbB by primary key
     let startKey: IDBValidKey | null = null;
     while (true) {
       const batchA = await fetchStoreBatch(dbA, storeName, startKey, BATCH_SIZE);
-      const batchB = await fetchStoreBatch(dbB, storeName, startKey, BATCH_SIZE);
-
-      if (batchA.length !== batchB.length) {
-        console.error(`[verifyDatabaseEquality] Batch length mismatch in "${storeName}": dbA=${batchA.length}, dbB=${batchB.length}`);
-        return false;
-      }
       if (batchA.length === 0) break;
 
-      for (let i = 0; i < batchA.length; i++) {
-        const itemA = batchA[i];
-        const itemB = batchB[i];
-        if (!itemA || !itemB || itemA.key !== itemB.key) {
-          console.error(`[verifyDatabaseEquality] Key mismatch in "${storeName}": dbA=${itemA?.key}, dbB=${itemB?.key}`);
+      const keysA = batchA.map((item) => item.key);
+      const bMap = await batchGetKeys(dbB, storeName, keysA);
+
+      for (const itemA of batchA) {
+        const itemBValue = bMap.get(itemA.key);
+        if (itemBValue === undefined || itemBValue === null) {
+          console.error(`[verifyDatabaseEquality] Key "${String(itemA.key)}" in "${storeName}" exists in dbA but missing in dbB.`);
           return false;
         }
-        if (!deepEqualRecords(storeName, itemA.value, itemB.value)) {
-          console.error(`[verifyDatabaseEquality] Content mismatch in "${storeName}" for key ${itemA.key}`);
+        if (!deepEqualRecords(storeName, itemA.value, itemBValue)) {
+          console.error(`[verifyDatabaseEquality] Content mismatch in "${storeName}" for key "${String(itemA.key)}".`);
           return false;
         }
       }
@@ -1474,35 +1564,8 @@ export async function verifyMergeDatabaseIntegrity(
       if (snapBatch.length === 0) break;
       snapKey = snapBatch[snapBatch.length - 1]!.key;
 
-      const liveResults = await new Promise<Map<IDBValidKey, any>>((resolve, reject) => {
-        let liveTx: IDBTransaction;
-        try {
-          liveTx = liveDb.transaction(store, 'readonly');
-        } catch (err) {
-          return reject(err);
-        }
-        const liveStore = liveTx.objectStore(store);
-        const map = new Map<IDBValidKey, any>();
-        let count = 0;
-        let errored = false;
-
-        for (const item of snapBatch) {
-          const req = liveStore.get(item.key);
-          req.onsuccess = () => {
-            if (!errored) {
-              map.set(item.key, req.result);
-              count++;
-              if (count === snapBatch.length) resolve(map);
-            }
-          };
-          req.onerror = () => {
-            if (!errored) {
-              errored = true;
-              reject(req.error || new Error(`Failed to read record for key ${String(item.key)}`));
-            }
-          };
-        }
-      });
+      const snapKeys = snapBatch.map((item) => item.key);
+      const liveResults = await batchGetKeys(liveDb, store, snapKeys);
 
       for (const item of snapBatch) {
         const liveRecord = liveResults.get(item.key);
@@ -1531,63 +1594,10 @@ export async function verifyMergeDatabaseIntegrity(
       if (stagingBatch.length === 0) break;
       stagingKey = stagingBatch[stagingBatch.length - 1]!.key;
 
+      const stagingKeys = stagingBatch.map((item) => item.key);
       const [liveMap, snapMap] = await Promise.all([
-        new Promise<Map<IDBValidKey, any>>((resolve, reject) => {
-          let liveTx: IDBTransaction;
-          try {
-            liveTx = liveDb.transaction(store, 'readonly');
-          } catch (err) {
-            return reject(err);
-          }
-          const liveStore = liveTx.objectStore(store);
-          const map = new Map<IDBValidKey, any>();
-          let count = 0;
-          let errored = false;
-          for (const item of stagingBatch) {
-            const req = liveStore.get(item.key);
-            req.onsuccess = () => {
-              if (!errored) {
-                map.set(item.key, req.result);
-                count++;
-                if (count === stagingBatch.length) resolve(map);
-              }
-            };
-            req.onerror = () => {
-              if (!errored) {
-                errored = true;
-                reject(req.error || new Error(`Failed to read live record for key ${String(item.key)}`));
-              }
-            };
-          }
-        }),
-        new Promise<Map<IDBValidKey, any>>((resolve, reject) => {
-          let snapTx: IDBTransaction;
-          try {
-            snapTx = snapshotDb.transaction(store, 'readonly');
-          } catch (err) {
-            return reject(err);
-          }
-          const snapStore = snapTx.objectStore(store);
-          const map = new Map<IDBValidKey, any>();
-          let count = 0;
-          let errored = false;
-          for (const item of stagingBatch) {
-            const req = snapStore.get(item.key);
-            req.onsuccess = () => {
-              if (!errored) {
-                map.set(item.key, req.result);
-                count++;
-                if (count === stagingBatch.length) resolve(map);
-              }
-            };
-            req.onerror = () => {
-              if (!errored) {
-                errored = true;
-                reject(req.error || new Error(`Failed to read snapshot record for key ${String(item.key)}`));
-              }
-            };
-          }
-        }),
+        batchGetKeys(liveDb, store, stagingKeys),
+        batchGetKeys(snapshotDb, store, stagingKeys),
       ]);
 
       for (const item of stagingBatch) {
@@ -1608,6 +1618,15 @@ export async function verifyMergeDatabaseIntegrity(
               error: `Imported record "${String(item.key)}" in store "${store}" does not match staging content in live database.`,
             };
           }
+        } else {
+          // Existing record: in a valid conservative merge, overlapping keys between snapshot and staging
+          // MUST be identical. If staging has conflicting content for the same ID, it is a conflict!
+          if (!deepEqualRecords(store, inSnap, item.value)) {
+            return {
+              valid: false,
+              error: `Conflicting record "${String(item.key)}" in store "${store}": staging content differs from pre-merge snapshot.`,
+            };
+          }
         }
       }
 
@@ -1625,6 +1644,50 @@ export async function verifyMergeDatabaseIntegrity(
   }
 
   return { valid: true };
+}
+
+/**
+ * Computes a deterministic SHA-256 fingerprint for all records within an object store.
+ * Traverses primary key batches in bounded memory (< 1 MiB RAM).
+ */
+export async function computeStoreContentChecksum(
+  db: IDBDatabase,
+  storeName: string
+): Promise<string> {
+  let lastKey: IDBValidKey | null = null;
+  const batchHashes: string[] = [];
+  while (true) {
+    const batch = await fetchStoreBatch(db, storeName, lastKey, BATCH_SIZE);
+    if (batch.length === 0) break;
+    lastKey = batch[batch.length - 1]!.key;
+
+    let batchContent = '';
+    for (const item of batch) {
+      batchContent += `${JSON.stringify(item.key)}|${canonicalStringify(item.value)}\n`;
+    }
+    const bHash = await computeSha256(batchContent);
+    batchHashes.push(bHash);
+
+    if (batch.length < BATCH_SIZE) break;
+  }
+  if (batchHashes.length === 0) return 'empty';
+  return await computeSha256(batchHashes.join(':'));
+}
+
+/**
+ * Computes store-level deterministic checksums across durable stores.
+ */
+export async function computeDatabaseStoreChecksums(
+  db: IDBDatabase,
+  stores: readonly string[]
+): Promise<Record<string, string>> {
+  const result: Record<string, string> = {};
+  for (const store of stores) {
+    if (db.objectStoreNames.contains(store)) {
+      result[store] = await computeStoreContentChecksum(db, store);
+    }
+  }
+  return result;
 }
 
 /**
@@ -1677,16 +1740,15 @@ export async function commitStagingReplaceToLive(
         await deleteExtensionDatabase(idbFactory, snapshotDbName);
         snapshotDb = await openExtensionDatabase(idbFactory, snapshotDbName);
 
-        for (const store of EIGHT_SNAPSHOT_STORES) {
-          if (liveDb.objectStoreNames.contains(store)) {
-            await copyStoreRecords(liveDb, snapshotDb, store, false);
-          }
+        const snapshotStores = EIGHT_SNAPSHOT_STORES.filter((s) => liveDb.objectStoreNames.contains(s));
+        for (const store of snapshotStores) {
+          await copyStoreRecords(liveDb, snapshotDb, store, false);
         }
 
         await triggerInterruptionPoint('after_snapshot_created');
 
         // Deep-verify snapshot before clearing live database
-        const snapVerified = await verifyDatabaseEquality(liveDb, snapshotDb, EIGHT_SNAPSHOT_STORES);
+        const snapVerified = await verifyDatabaseEquality(liveDb, snapshotDb, snapshotStores);
         if (!snapVerified) {
           throw new Error('Pre-restore snapshot verification failed. Aborting to protect existing archive.');
         }
@@ -1868,7 +1930,7 @@ export async function commitStagingReplaceToLive(
               }
             }
 
-            rollbackSucceeded = await verifyDatabaseEquality(snapshotDb, liveDb, EIGHT_SNAPSHOT_STORES);
+            rollbackSucceeded = await verifyDatabaseEquality(snapshotDb, liveDb, snapshotStores);
           } catch (rollbackErr) {
             console.error('[Staging Replace] Rollback snapshot encountered error:', rollbackErr);
             rollbackSucceeded = false;
@@ -1920,7 +1982,13 @@ export async function commitStagingReplaceToLive(
           }
         }
 
-        // Step 5: Success! Set commit_verified then cleanup_pending
+        // Step 5: Success! Compute live store checksums for crash resilience then set commit_verified
+        const liveStoreChecksums = await computeDatabaseStoreChecksums(liveDb, SIX_DURABLE_STORES);
+        const liveStoreCounts: Record<string, number> = {};
+        for (const store of SIX_DURABLE_STORES) {
+          liveStoreCounts[store] = await getStoreRecordCount(liveDb, store);
+        }
+
         await setRestoreJournalMarker({
           type: 'replace',
           stage: 'commit_verified',
@@ -1931,6 +1999,8 @@ export async function commitStagingReplaceToLive(
           operationId,
           expectedCounts,
           snapshotCounts,
+          liveStoreChecksums,
+          liveStoreCounts,
         }, idbFactory);
 
         await setRestoreJournalMarker({
@@ -1943,6 +2013,8 @@ export async function commitStagingReplaceToLive(
           operationId,
           expectedCounts,
           snapshotCounts,
+          liveStoreChecksums,
+          liveStoreCounts,
         }, idbFactory);
 
         await triggerInterruptionPoint('before_journal_deletion');
@@ -1987,13 +2059,14 @@ export async function commitStagingReplaceToLive(
               tx.onerror = () => reject(tx.error || new Error('Emergency rollback clear error'));
             });
 
-            for (const store of EIGHT_SNAPSHOT_STORES) {
-              if (liveDb.objectStoreNames.contains(store) && snapshotDb.objectStoreNames.contains(store)) {
+            const snapshotStores = EIGHT_SNAPSHOT_STORES.filter((store) => liveDb.objectStoreNames.contains(store));
+            for (const store of snapshotStores) {
+              if (snapshotDb.objectStoreNames.contains(store)) {
                 await copyStoreRecords(snapshotDb, liveDb, store, false);
               }
             }
 
-            const rollbackVerified = await verifyDatabaseEquality(snapshotDb, liveDb, EIGHT_SNAPSHOT_STORES);
+            const rollbackVerified = await verifyDatabaseEquality(snapshotDb, liveDb, snapshotStores);
             if (rollbackVerified) {
               await setRestoreJournalMarker(null, idbFactory);
               closeExtensionDatabase(idbFactory, snapshotDbName);
@@ -2075,15 +2148,14 @@ export async function commitStagingMergeToLive(
 
         await deleteExtensionDatabase(idbFactory, snapshotDbName);
         snapshotDb = await openExtensionDatabase(idbFactory, snapshotDbName);
-        for (const store of EIGHT_SNAPSHOT_STORES) {
-          if (liveDb.objectStoreNames.contains(store)) {
-            await copyStoreRecords(liveDb, snapshotDb, store, false);
-          }
+        const snapshotStores = EIGHT_SNAPSHOT_STORES.filter((store) => liveDb.objectStoreNames.contains(store));
+        for (const store of snapshotStores) {
+          await copyStoreRecords(liveDb, snapshotDb, store, false);
         }
 
         await triggerInterruptionPoint('after_snapshot_created');
 
-        const snapVerified = await verifyDatabaseEquality(liveDb, snapshotDb, EIGHT_SNAPSHOT_STORES);
+        const snapVerified = await verifyDatabaseEquality(liveDb, snapshotDb, snapshotStores);
         if (!snapVerified) {
           throw new Error('Pre-merge rollback snapshot verification failed.');
         }
@@ -2220,6 +2292,13 @@ export async function commitStagingMergeToLive(
           throw new Error(`Merge verification failed: ${mergeCheck.error || 'Live database is not the correct union of snapshot and staging.'}`);
         }
 
+        // Step 5: Success! Compute live store checksums for crash resilience then set commit_verified
+        const liveStoreChecksums = await computeDatabaseStoreChecksums(liveDb, SIX_DURABLE_STORES);
+        const liveStoreCounts: Record<string, number> = {};
+        for (const store of SIX_DURABLE_STORES) {
+          liveStoreCounts[store] = await getStoreRecordCount(liveDb, store);
+        }
+
         await setRestoreJournalMarker({
           type: 'merge',
           stage: 'commit_verified',
@@ -2229,6 +2308,8 @@ export async function commitStagingMergeToLive(
           timestamp: Date.now(),
           operationId,
           expectedCounts: insertedCounts,
+          liveStoreChecksums,
+          liveStoreCounts,
         }, idbFactory);
 
         await setRestoreJournalMarker({
@@ -2240,6 +2321,8 @@ export async function commitStagingMergeToLive(
           timestamp: Date.now(),
           operationId,
           expectedCounts: insertedCounts,
+          liveStoreChecksums,
+          liveStoreCounts,
         }, idbFactory);
 
         // Step 5: Success! Clean up marker and temporary databases
@@ -2279,13 +2362,14 @@ export async function commitStagingMergeToLive(
               tx.onerror = () => reject(tx.error || new Error('Merge rollback clear error'));
             });
 
-            for (const store of EIGHT_SNAPSHOT_STORES) {
-              if (liveDb.objectStoreNames.contains(store) && snapshotDb.objectStoreNames.contains(store)) {
+            const snapshotStores = EIGHT_SNAPSHOT_STORES.filter((store) => liveDb.objectStoreNames.contains(store));
+            for (const store of snapshotStores) {
+              if (snapshotDb.objectStoreNames.contains(store)) {
                 await copyStoreRecords(snapshotDb, liveDb, store, false);
               }
             }
 
-            const rollbackVerified = await verifyDatabaseEquality(snapshotDb, liveDb, EIGHT_SNAPSHOT_STORES);
+            const rollbackVerified = await verifyDatabaseEquality(snapshotDb, liveDb, snapshotStores);
             if (rollbackVerified) {
               await setRestoreJournalMarker(null, idbFactory);
               closeExtensionDatabase(idbFactory, snapshotDbName);

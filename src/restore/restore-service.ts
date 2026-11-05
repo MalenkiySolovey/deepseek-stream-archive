@@ -22,6 +22,7 @@ import {
   createSnapshotDatabaseName,
   closeExtensionDatabase,
   deleteExtensionDatabase,
+  getRestoreJournalMarker,
 } from './staging-service';
 import { withExclusiveRestoreLock } from './restore-lock';
 import type { RestoreMode, RestorePreflight, RestoreResult, RestorePlan } from './types';
@@ -467,15 +468,18 @@ export async function executeRestore(
   const snapshotDbName = createSnapshotDatabaseName(operationId);
 
   let ingestResult: { stagingDb: IDBDatabase; counts: PortableBackupStoreCounts } | null = null;
+  let commitStarted = false;
   try {
     const ingest = await ingestArchiveToStaging(rawInput, idbFactory, stagingDbName);
     ingestResult = ingest;
 
     let result: RestoreResult;
     if (mode === 'replace') {
+      commitStarted = true;
       result = await commitStagingReplaceToLive(db, ingest.stagingDb, ingest.counts, idbFactory, snapshotDbName);
     } else {
       const plan = await buildRestorePlanFromStaging(db, ingest.stagingDb, 'merge', ingest.counts);
+      commitStarted = true;
       result = await commitStagingMergeToLive(db, plan, idbFactory, ingest.stagingDb, snapshotDbName);
     }
 
@@ -485,11 +489,26 @@ export async function executeRestore(
 
     return result;
   } catch (err) {
+    let hasActiveMarker = false;
+    try {
+      const marker = await getRestoreJournalMarker(idbFactory);
+      if (marker !== null) {
+        hasActiveMarker = true;
+      }
+    } catch {
+      hasActiveMarker = true;
+    }
+
     if (ingestResult?.stagingDb) {
       closeExtensionDatabase(idbFactory, stagingDbName);
-      try {
-        await deleteExtensionDatabase(idbFactory, stagingDbName);
-      } catch {}
+      if (!commitStarted && !hasActiveMarker) {
+        // Safe pre-commit cleanup: commit never started and no active journal marker exists
+        try {
+          await deleteExtensionDatabase(idbFactory, stagingDbName);
+        } catch {}
+      } else {
+        console.warn(`[executeRestore] Preserving staging database "${stagingDbName}" due to active crash journal marker or in-flight commit.`);
+      }
     }
     throw err;
   }

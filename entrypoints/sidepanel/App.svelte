@@ -63,7 +63,11 @@
     executeRestore,
   } from '../../src/restore/restore-service';
   import { buildRestorePlan } from '../../src/restore/plan';
-  import { recoverIncompleteRestoreIfAny, verifyDatabaseEquality } from '../../src/restore/staging-service';
+  import {
+    recoverIncompleteRestoreIfAny,
+    verifyDatabaseEquality,
+    validateStagingReferentialIntegrity,
+  } from '../../src/restore/staging-service';
   import { readPortableBackup, type MaterializedPortableBackup } from '../../src/backup/reader';
   import { IndexedDbStorageRepository } from '../../src/storage/repositories/storage-repository-impl';
   import { formatDateUtc } from '../../src/export';
@@ -145,6 +149,7 @@
       (window as any).__validateAndPreflight = validateAndPreflightRestore;
       (window as any).__executeRestore = executeRestore;
       (window as any).__verifyDatabaseEquality = verifyDatabaseEquality;
+      (window as any).__validateStagingReferentialIntegrity = validateStagingReferentialIntegrity;
     }
     try {
       const status = await recoverIncompleteRestoreIfAny();
