@@ -63,8 +63,8 @@
     executeRestore,
   } from '../../src/restore/restore-service';
   import { buildRestorePlan } from '../../src/restore/plan';
-  import { recoverIncompleteRestoreIfAny } from '../../src/restore/staging-service';
-  import type { MaterializedPortableBackup } from '../../src/backup/reader';
+  import { recoverIncompleteRestoreIfAny, verifyDatabaseEquality } from '../../src/restore/staging-service';
+  import { readPortableBackup, type MaterializedPortableBackup } from '../../src/backup/reader';
   import { IndexedDbStorageRepository } from '../../src/storage/repositories/storage-repository-impl';
   import { formatDateUtc } from '../../src/export';
   import { saveLocalFile } from '../../src/backup/save-file';
@@ -140,6 +140,11 @@
   onMount(async () => {
     if (typeof window !== 'undefined') {
       (window as any).__recoverIncompleteRestoreIfAny = recoverIncompleteRestoreIfAny;
+      (window as any).__streamBackupToWritable = streamBackupToWritable;
+      (window as any).__readPortableBackup = readPortableBackup;
+      (window as any).__validateAndPreflight = validateAndPreflightRestore;
+      (window as any).__executeRestore = executeRestore;
+      (window as any).__verifyDatabaseEquality = verifyDatabaseEquality;
     }
     try {
       const status = await recoverIncompleteRestoreIfAny();

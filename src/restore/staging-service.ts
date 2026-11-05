@@ -218,15 +218,85 @@ export async function openExistingSnapshotWithoutCreating(
 }
 
 /**
- * Persists or clears the crash-recovery marker in chrome.storage.local and dedicated IndexedDB.
+ * Persists or clears the crash-recovery marker in authoritative IndexedDB and diagnostic chrome.storage.local.
+ * IndexedDB is the authoritative source of truth. If writing to IndexedDB fails, this function throws
+ * to ensure that destructive operations fail-closed before touching user data.
  */
 export async function setRestoreJournalMarker(
   marker: RestoreJournalMarker | null,
   idbFactory?: IDBFactory
 ): Promise<void> {
-  // 1. Chrome storage local (if available)
+  const factory = idbFactory || (typeof indexedDB !== 'undefined' ? indexedDB : null);
+
+  // 1. Authoritative IndexedDB persistence FIRST!
+  if (factory) {
+    if (marker === null) {
+      await new Promise<void>((resolve) => {
+        try {
+          const req = factory.open(RESTORE_JOURNAL_DB_NAME, 1);
+          req.onupgradeneeded = (e) => {
+            const db = (e.target as IDBOpenDBRequest).result;
+            if (!db.objectStoreNames.contains(RESTORE_JOURNAL_STORE_NAME)) {
+              db.createObjectStore(RESTORE_JOURNAL_STORE_NAME, { keyPath: 'id' });
+            }
+          };
+          req.onsuccess = () => {
+            const db = req.result;
+            try {
+              const tx = db.transaction([RESTORE_JOURNAL_STORE_NAME], 'readwrite');
+              tx.oncomplete = () => {
+                db.close();
+                resolve();
+              };
+              tx.onerror = () => {
+                db.close();
+                resolve();
+              };
+              tx.objectStore(RESTORE_JOURNAL_STORE_NAME).delete('active');
+            } catch {
+              db.close();
+              resolve();
+            }
+          };
+          req.onerror = () => resolve();
+        } catch {
+          resolve();
+        }
+      });
+    } else {
+      await new Promise<void>((resolve, reject) => {
+        const req = factory.open(RESTORE_JOURNAL_DB_NAME, 1);
+        req.onupgradeneeded = (e) => {
+          const db = (e.target as IDBOpenDBRequest).result;
+          if (!db.objectStoreNames.contains(RESTORE_JOURNAL_STORE_NAME)) {
+            db.createObjectStore(RESTORE_JOURNAL_STORE_NAME, { keyPath: 'id' });
+          }
+        };
+        req.onsuccess = () => {
+          const db = req.result;
+          const tx = db.transaction([RESTORE_JOURNAL_STORE_NAME], 'readwrite');
+          tx.oncomplete = () => {
+            db.close();
+            resolve();
+          };
+          tx.onerror = () => {
+            db.close();
+            reject(tx.error || new Error('Failed to persist crash recovery journal marker transaction'));
+          };
+          tx.onabort = () => {
+            db.close();
+            reject(tx.error || new Error('Crash recovery journal marker transaction aborted'));
+          };
+          tx.objectStore(RESTORE_JOURNAL_STORE_NAME).put({ id: 'active', ...marker });
+        };
+        req.onerror = () => reject(req.error || new Error('Failed to open crash recovery journal database'));
+      });
+    }
+  }
+
+  // 2. Secondary diagnostic mirror in chrome.storage.local
   try {
-    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
       if (marker) {
         await chrome.storage.local.set({ __streamarchive_restore_marker__: marker });
       } else {
@@ -234,53 +304,72 @@ export async function setRestoreJournalMarker(
       }
     }
   } catch {
-    // Non-blocking fallback
+    // Non-blocking diagnostic mirror
   }
-
-  // 2. Dedicated recovery database
-  const factory = idbFactory || (typeof indexedDB !== 'undefined' ? indexedDB : null);
-  if (!factory) return;
-
-  if (marker === null) {
-    try {
-      await deleteExtensionDatabase(idbFactory, RESTORE_JOURNAL_DB_NAME);
-    } catch {
-      // ignore
-    }
-    return;
-  }
-
-  return new Promise((resolve, reject) => {
-    const req = factory.open(RESTORE_JOURNAL_DB_NAME, 1);
-    req.onupgradeneeded = (e) => {
-      const db = (e.target as IDBOpenDBRequest).result;
-      if (!db.objectStoreNames.contains(RESTORE_JOURNAL_STORE_NAME)) {
-        db.createObjectStore(RESTORE_JOURNAL_STORE_NAME, { keyPath: 'id' });
-      }
-    };
-    req.onsuccess = () => {
-      const db = req.result;
-      const tx = db.transaction([RESTORE_JOURNAL_STORE_NAME], 'readwrite');
-      tx.oncomplete = () => {
-        db.close();
-        resolve();
-      };
-      tx.onerror = () => {
-        db.close();
-        reject(tx.error);
-      };
-      tx.objectStore(RESTORE_JOURNAL_STORE_NAME).put({ id: 'active', ...marker });
-    };
-    req.onerror = () => reject(req.error);
-  });
 }
 
 /**
- * Reads the active crash-recovery marker if present.
+ * Reads the active crash-recovery marker. IndexedDB is the authoritative source of truth.
+ * If IndexedDB and chrome.storage.local are desynchronized, IndexedDB unconditionally wins.
  */
 export async function getRestoreJournalMarker(idbFactory?: IDBFactory): Promise<RestoreJournalMarker | null> {
+  const factory = idbFactory || (typeof indexedDB !== 'undefined' ? indexedDB : null);
+  let idbMarker: RestoreJournalMarker | null = null;
+
+  // 1. Check authoritative IndexedDB first
+  if (factory) {
+    try {
+      idbMarker = await new Promise<RestoreJournalMarker | null>((resolve) => {
+        const req = factory.open(RESTORE_JOURNAL_DB_NAME, 1);
+        req.onupgradeneeded = (e) => {
+          const db = (e.target as IDBOpenDBRequest).result;
+          if (!db.objectStoreNames.contains(RESTORE_JOURNAL_STORE_NAME)) {
+            db.createObjectStore(RESTORE_JOURNAL_STORE_NAME, { keyPath: 'id' });
+          }
+        };
+        req.onsuccess = () => {
+          const db = req.result;
+          try {
+            const tx = db.transaction([RESTORE_JOURNAL_STORE_NAME], 'readonly');
+            const getReq = tx.objectStore(RESTORE_JOURNAL_STORE_NAME).get('active');
+            getReq.onsuccess = () => {
+              const res = getReq.result;
+              db.close();
+              if (res && res.type) {
+                resolve(res as RestoreJournalMarker);
+              } else {
+                resolve(null);
+              }
+            };
+            getReq.onerror = () => {
+              db.close();
+              resolve(null);
+            };
+          } catch {
+            db.close();
+            resolve(null);
+          }
+        };
+        req.onerror = () => resolve(null);
+      });
+    } catch {
+      idbMarker = null;
+    }
+  }
+
+  if (idbMarker) {
+    // Reconcile chrome.storage.local if desynchronized
+    try {
+      if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+        chrome.storage.local.set({ __streamarchive_restore_marker__: idbMarker }).catch(() => {});
+      }
+    } catch {}
+    return idbMarker;
+  }
+
+  // 2. Fallback to chrome.storage.local if IndexedDB returned nothing
   try {
-    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
       const stored = await chrome.storage.local.get('__streamarchive_restore_marker__');
       if (stored && stored.__streamarchive_restore_marker__) {
         return stored.__streamarchive_restore_marker__ as RestoreJournalMarker;
@@ -290,42 +379,7 @@ export async function getRestoreJournalMarker(idbFactory?: IDBFactory): Promise<
     // ignore
   }
 
-  const factory = idbFactory || (typeof indexedDB !== 'undefined' ? indexedDB : null);
-  if (!factory) return null;
-
-  return new Promise((resolve) => {
-    const req = factory.open(RESTORE_JOURNAL_DB_NAME, 1);
-    req.onupgradeneeded = (e) => {
-      const db = (e.target as IDBOpenDBRequest).result;
-      if (!db.objectStoreNames.contains(RESTORE_JOURNAL_STORE_NAME)) {
-        db.createObjectStore(RESTORE_JOURNAL_STORE_NAME, { keyPath: 'id' });
-      }
-    };
-    req.onsuccess = () => {
-      const db = req.result;
-      try {
-        const tx = db.transaction([RESTORE_JOURNAL_STORE_NAME], 'readonly');
-        const getReq = tx.objectStore(RESTORE_JOURNAL_STORE_NAME).get('active');
-        getReq.onsuccess = () => {
-          const res = getReq.result;
-          db.close();
-          if (res && res.type) {
-            resolve(res as RestoreJournalMarker);
-          } else {
-            resolve(null);
-          }
-        };
-        getReq.onerror = () => {
-          db.close();
-          resolve(null);
-        };
-      } catch {
-        db.close();
-        resolve(null);
-      }
-    };
-    req.onerror = () => resolve(null);
-  });
+  return null;
 }
 
 async function getStoreRecordCount(db: IDBDatabase, storeName: string): Promise<number> {
@@ -348,39 +402,43 @@ async function getStoreRecordCount(db: IDBDatabase, storeName: string): Promise<
  * Recovers live database from snapshot if a previous restore was interrupted by a browser crash or kill.
  */
 export async function recoverIncompleteRestoreIfAny(idbFactory?: IDBFactory): Promise<RecoveryStatus> {
-  const marker = await getRestoreJournalMarker(idbFactory);
-  if (!marker) return { state: 'not_required' };
-
-  let normalizedStage: RestoreJournalStage = marker.stage;
-  if (marker.stage === ('snapshot_ready' as any)) normalizedStage = 'snapshot_verified';
-  else if (marker.stage === ('transferring' as any)) normalizedStage = 'commit_started';
-  else if (marker.stage === ('commit_completed' as any)) normalizedStage = 'commit_verified';
-  else if (marker.stage === ('rolling_back' as any)) normalizedStage = 'rollback_in_progress';
-
-  // If restore was interrupted BEFORE liveDb was modified, liveDb is 100% intact!
-  if (
-    normalizedStage === 'idle' ||
-    normalizedStage === 'preparing_snapshot' ||
-    normalizedStage === 'snapshot_verified' ||
-    normalizedStage === 'completed'
-  ) {
-    console.info(`[Crash Recovery] Interrupted restore was in safe stage "${normalizedStage}". Live database was untouched. Cleaning temporary markers...`);
-    await setRestoreJournalMarker(null, idbFactory);
-    try {
-      closeExtensionDatabase(idbFactory, marker.snapshotDbName);
-      await deleteExtensionDatabase(idbFactory, marker.snapshotDbName);
-    } catch {}
-    try {
-      closeExtensionDatabase(idbFactory, marker.stagingDbName);
-      await deleteExtensionDatabase(idbFactory, marker.stagingDbName);
-    } catch {}
-    return { state: 'not_required' };
-  }
+  const initialMarker = await getRestoreJournalMarker(idbFactory);
+  if (!initialMarker) return { state: 'not_required' };
 
   const startTime = Date.now();
 
   try {
     return await withExclusiveRestoreLock('recovery', async (): Promise<RecoveryStatus> => {
+      // Re-read authoritative marker INSIDE the exclusive lock to prevent racing with another active context
+      const marker = await getRestoreJournalMarker(idbFactory);
+      if (!marker) return { state: 'not_required' };
+
+      let normalizedStage: RestoreJournalStage = marker.stage;
+      if (marker.stage === ('snapshot_ready' as any)) normalizedStage = 'snapshot_verified';
+      else if (marker.stage === ('transferring' as any)) normalizedStage = 'commit_started';
+      else if (marker.stage === ('commit_completed' as any)) normalizedStage = 'commit_verified';
+      else if (marker.stage === ('rolling_back' as any)) normalizedStage = 'rollback_in_progress';
+
+      // If restore was interrupted BEFORE liveDb was modified, liveDb is 100% intact!
+      if (
+        normalizedStage === 'idle' ||
+        normalizedStage === 'preparing_snapshot' ||
+        normalizedStage === 'snapshot_verified' ||
+        normalizedStage === 'completed'
+      ) {
+        console.info(`[Crash Recovery] Interrupted restore was in safe stage "${normalizedStage}". Live database was untouched. Cleaning temporary markers...`);
+        await setRestoreJournalMarker(null, idbFactory);
+        try {
+          closeExtensionDatabase(idbFactory, marker.snapshotDbName);
+          await deleteExtensionDatabase(idbFactory, marker.snapshotDbName);
+        } catch {}
+        try {
+          closeExtensionDatabase(idbFactory, marker.stagingDbName);
+          await deleteExtensionDatabase(idbFactory, marker.stagingDbName);
+        } catch {}
+        return { state: 'not_required' };
+      }
+
       console.warn(`[Crash Recovery] Detected unfinished restore from crash (stage: ${normalizedStage}, started: ${marker.timestamp}). Recovering live database...`);
 
       let snapshotDb: IDBDatabase | null = null;
@@ -437,9 +495,44 @@ export async function recoverIncompleteRestoreIfAny(idbFactory?: IDBFactory): Pr
           };
         }
 
-        // If commit was already verified before crash, retain the verified live data
+        // If commit was already verified before crash, verify liveDb before destroying snapshot!
         if (normalizedStage === 'commit_verified' || normalizedStage === 'cleanup_pending') {
-          console.info(`[Crash Recovery] Commit was already verified before crash (stage: ${normalizedStage}). Completing cleanup without rollback...`);
+          let verifiedCommit = true;
+
+          // If stagingDb exists, perform deep equality check
+          let stagingDb: IDBDatabase | null = null;
+          try {
+            stagingDb = await openExistingSnapshotWithoutCreating(idbFactory, marker.stagingDbName);
+          } catch {}
+
+          if (stagingDb) {
+            try {
+              verifiedCommit = await verifyDatabaseEquality(stagingDb, liveDb, SIX_DURABLE_STORES);
+            } catch {
+              verifiedCommit = false;
+            } finally {
+              try { stagingDb.close(); } catch {}
+            }
+          } else {
+            // Staging DB already deleted: ensure live database has records if expected data was > 0
+            if (expectedTotal > 0 && liveTotal === 0) {
+              verifiedCommit = false;
+            }
+          }
+
+          if (!verifiedCommit) {
+            console.error(
+              `[Crash Recovery] CRITICAL ERROR: Live database "${marker.liveDbName}" failed verification at stage "${normalizedStage}"! ` +
+              `Preserving snapshot "${marker.snapshotDbName}".`
+            );
+            return {
+              state: 'failed',
+              reason: `Live database failed verification at stage "${normalizedStage}". Snapshot preserved.`,
+              snapshotPreserved: true,
+            };
+          }
+
+          console.info(`[Crash Recovery] Commit was verified before crash (stage: ${normalizedStage}). Completing cleanup without rollback...`);
           await setRestoreJournalMarker(null, idbFactory);
           if (snapshotDb) {
             try { snapshotDb.close(); } catch {}
@@ -517,7 +610,7 @@ export async function recoverIncompleteRestoreIfAny(idbFactory?: IDBFactory): Pr
           try { snapshotDb.close(); } catch {}
         }
       }
-    }, 10_000);
+    }, 30_000);
   } catch (lockErr: any) {
     console.warn('[Crash Recovery] Recovery lock could not be acquired (another context active):', lockErr);
     return {
@@ -1216,6 +1309,12 @@ export async function commitStagingReplaceToLive(
           snapshotCounts,
         }, idbFactory);
 
+        // Verification of authoritative journal write before touching liveDb
+        const verifiedJournalMarker = await getRestoreJournalMarker(idbFactory);
+        if (!verifiedJournalMarker || verifiedJournalMarker.stage !== 'commit_started' || verifiedJournalMarker.operationId !== operationId) {
+          throw new Error('Authoritative journal marker verification failed before commit. Aborting replace to protect live database.');
+        }
+
         // Step 2: Clear live database
         try {
           const storesToClear = (ALL_NINE_STORES as unknown as string[]).filter((s) => liveDb.objectStoreNames.contains(s));
@@ -1593,6 +1692,12 @@ export async function commitStagingMergeToLive(
           operationId,
         }, idbFactory);
 
+        // Verification of authoritative journal write before touching liveDb
+        const verifiedMergeMarker = await getRestoreJournalMarker(idbFactory);
+        if (!verifiedMergeMarker || verifiedMergeMarker.stage !== 'commit_started' || verifiedMergeMarker.operationId !== operationId) {
+          throw new Error('Authoritative journal marker verification failed before merge commit. Aborting merge to protect live database.');
+        }
+
         // Step 3: Stream non-conflicting records from stagingDb into liveDb in batches
         const insertedCounts: PortableBackupStoreCounts = {
           conversations: 0,
@@ -1685,6 +1790,17 @@ export async function commitStagingMergeToLive(
           timestamp: Date.now(),
           operationId,
         }, idbFactory);
+
+        // Verification of liveDb records integrity post-merge
+        let mergeLiveTotal = 0;
+        for (const store of SIX_DURABLE_STORES) {
+          if (liveDb.objectStoreNames.contains(store)) {
+            mergeLiveTotal += await getStoreRecordCount(liveDb, store);
+          }
+        }
+        if (mergeLiveTotal === 0 && (insertedCounts.conversations > 0 || insertedCounts.messages > 0)) {
+          throw new Error('Merge verification failed: live database unexpectedly empty after transfer.');
+        }
 
         await setRestoreJournalMarker({
           type: 'merge',

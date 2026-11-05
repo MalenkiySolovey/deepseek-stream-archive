@@ -494,7 +494,7 @@ test.describe('E2E Genuine Chromium: Large Archives (165 MiB, 260 MiB), Producti
     expect(recovered.markerCleared).toBe(true);
   });
 
-  test('Chromium E2E 4: Large dataset (100 MiB, 165 MiB, 260 MiB) streaming backup & restore with bounded memory sampling', async ({
+  test('Chromium E2E 4: Large dataset (100 MiB, 165 MiB, 260 MiB) streaming compression benchmark with bounded memory sampling', async ({
     page,
   }) => {
     await page.goto('https://chat.deepseek.com', { waitUntil: 'domcontentloaded' });
@@ -655,5 +655,214 @@ test.describe('E2E Genuine Chromium: Large Archives (165 MiB, 260 MiB), Producti
       expect(r.totalRead).toBeGreaterThan(0);
       expect(r.heapDeltaMb).toBeLessThan(500); // Strictly bounded heap growth across 100, 165, 260 MiB
     }
+  });
+
+  test('Chromium E2E 5: Genuine large archive backup & restore pipeline: streaming compression, preflight, staging restore, and byte-level database equality', async ({
+    loadSidepanel,
+  }) => {
+    const sidepanel = await loadSidepanel();
+
+    const pipelineResult = await sidepanel.evaluate(async () => {
+      const openDb = (name: string): Promise<IDBDatabase> => {
+        return new Promise((res, rej) => {
+          const req = indexedDB.open(name, 9);
+          req.onupgradeneeded = (e) => {
+            const db = (e.target as any).result;
+            if (!db.objectStoreNames.contains('conversations')) db.createObjectStore('conversations', { keyPath: 'id' });
+            if (!db.objectStoreNames.contains('messages')) db.createObjectStore('messages', { keyPath: 'id' });
+            if (!db.objectStoreNames.contains('revisions')) db.createObjectStore('revisions', { keyPath: 'id' });
+            if (!db.objectStoreNames.contains('recovery_events')) db.createObjectStore('recovery_events', { keyPath: 'id' });
+            if (!db.objectStoreNames.contains('raw_streams')) db.createObjectStore('raw_streams', { keyPath: 'id' });
+            if (!db.objectStoreNames.contains('raw_stream_batches')) db.createObjectStore('raw_stream_batches', { keyPath: 'id' });
+            if (!db.objectStoreNames.contains('canonical_checkpoints')) db.createObjectStore('canonical_checkpoints', { keyPath: 'streamKey' });
+            if (!db.objectStoreNames.contains('context_continuity_receipts')) db.createObjectStore('context_continuity_receipts', { keyPath: 'id' });
+          };
+          req.onsuccess = () => res(req.result);
+          req.onerror = () => rej(req.error);
+        });
+      };
+
+      const sourceDbName = 'StreamArchiveDB_pipeline_src';
+      const targetDbName = 'StreamArchiveDB_pipeline_dst';
+
+      const sourceDb = await openDb(sourceDbName);
+
+      // 1. Populate source database with rich branched conversation tree
+      const tx = sourceDb.transaction(
+        ['conversations', 'messages', 'revisions', 'recovery_events', 'raw_streams', 'raw_stream_batches'],
+        'readwrite'
+      );
+
+      tx.objectStore('conversations').put({
+        id: 'conv-large-pipe',
+        remoteId: 'remote-pipe-1',
+        title: 'DeepSeek Large Archive Pipeline Test',
+        createdAt: 1000,
+        updatedAt: 5000,
+        model: 'deepseek-reasoner',
+      });
+
+      tx.objectStore('messages').put({
+        id: 'msg-root-user',
+        conversationId: 'conv-large-pipe',
+        role: 'user',
+        status: 'finished',
+        identityState: 'reconciled',
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+
+      // Branch 1
+      tx.objectStore('messages').put({
+        id: 'msg-asst-b1',
+        conversationId: 'conv-large-pipe',
+        parentId: 'msg-root-user',
+        role: 'assistant',
+        status: 'finished',
+        identityState: 'reconciled',
+        createdAt: 2000,
+        updatedAt: 2500,
+      });
+
+      const longReasoning = 'DeepThink reasoning chain: '.repeat(500); // realistic payload
+      tx.objectStore('revisions').put({
+        id: 'rev-b1-final',
+        messageId: 'msg-asst-b1',
+        revisionIndex: 0,
+        text: 'Final validated answer for branch 1.',
+        thinking: longReasoning,
+        source: 'network',
+        capturedAt: 2500,
+        isFinal: true,
+        isLastGood: true,
+      });
+
+      // Branch 2 (regenerate sibling)
+      tx.objectStore('messages').put({
+        id: 'msg-asst-b2',
+        conversationId: 'conv-large-pipe',
+        parentId: 'msg-root-user',
+        role: 'assistant',
+        status: 'finished',
+        identityState: 'reconciled',
+        createdAt: 3000,
+        updatedAt: 3500,
+      });
+
+      tx.objectStore('revisions').put({
+        id: 'rev-b2-final',
+        messageId: 'msg-asst-b2',
+        revisionIndex: 0,
+        text: 'Regenerated alternate answer for branch 2.',
+        thinking: longReasoning + ' Alternate reasoning branch.',
+        source: 'network',
+        capturedAt: 3500,
+        isFinal: true,
+        isLastGood: true,
+      });
+
+      tx.objectStore('recovery_events').put({
+        id: 'rec-pipe-1',
+        messageId: 'msg-asst-b1',
+        kind: 'content_filter',
+        recoveredRevisionId: 'rev-b1-final',
+        detectedAt: 2600,
+      });
+
+      tx.objectStore('raw_streams').put({
+        id: 'sess-pipe:stream-1',
+        producerSessionId: 'sess-pipe',
+        streamId: 'stream-1',
+        transport: 'fetch',
+        url: 'https://chat.deepseek.com/api/v0/chat/completion',
+        method: 'POST',
+        state: 'completed',
+        openedAt: 1000,
+        updatedAt: 3600,
+        totalChunks: 2,
+        totalChars: 120,
+        totalBatches: 2,
+      });
+
+      for (let b = 0; b < 2; b++) {
+        tx.objectStore('raw_stream_batches').put({
+          id: `batch-pipe-${b}`,
+          streamKey: 'sess-pipe:stream-1',
+          batchSeq: b,
+          chunks: [{ streamSequence: b, chunkText: `chunk text payload ${b}`, timestamp: 1000 + b * 100 }],
+          createdAt: 1000 + b * 100,
+          charCount: 60,
+        });
+      }
+
+      await new Promise<void>((r) => { tx.oncomplete = () => r(); });
+
+      // 2. Stream backup directly to WritableStream (streamBackupToWritable compresses using CompressionStream)
+      const chunks: Uint8Array[] = [];
+      const destinationStream = new WritableStream<Uint8Array>({
+        write(chunk) {
+          chunks.push(chunk);
+        },
+      });
+
+      const streamBackupFn = (window as any).__streamBackupToWritable;
+      await streamBackupFn(sourceDb, destinationStream);
+
+      const totalLen = chunks.reduce((acc, c) => acc + c.byteLength, 0);
+      const combinedGzip = new Uint8Array(totalLen);
+      let offset = 0;
+      for (const c of chunks) {
+        combinedGzip.set(c, offset);
+        offset += c.byteLength;
+      }
+
+      // 3. Read portable backup
+      const readBackupFn = (window as any).__readPortableBackup;
+      const backupBlob = new Blob([combinedGzip], { type: 'application/gzip' });
+      const materialized = await readBackupFn(backupBlob);
+
+      // 4. Preflight validate in Replace and Merge modes
+      const preflightFn = (window as any).__validateAndPreflight;
+      const targetDb = await openDb(targetDbName);
+
+      const replacePreflight = await preflightFn(targetDb, backupBlob, 0, 'replace');
+      const mergePreflight = await preflightFn(sourceDb, backupBlob, 0, 'merge');
+
+      // 5. Execute Restore in Replace mode into targetDb
+      const executeRestoreFn = (window as any).__executeRestore;
+      const restoreResult = await executeRestoreFn(targetDb, backupBlob, 'replace', 0);
+
+      // 6. Deep equality verification between source and target
+      const verifyEqFn = (window as any).__verifyDatabaseEquality;
+      const durableStores = ['conversations', 'messages', 'revisions', 'recovery_events', 'raw_streams', 'raw_stream_batches'];
+      const isEqual = await verifyEqFn(sourceDb, targetDb, durableStores);
+
+      sourceDb.close();
+      targetDb.close();
+      indexedDB.deleteDatabase(sourceDbName);
+      indexedDB.deleteDatabase(targetDbName);
+
+      return {
+        gzipBytes: combinedGzip.byteLength,
+        manifestValid: materialized.backup?.manifest?.formatVersion === 1,
+        footerValid: materialized.backup?.footer?.complete === true,
+        replacePreflightValid: replacePreflight.preflight.canRestore,
+        mergePreflightValid: mergePreflight.preflight.canRestore,
+        mergeConflictsCount: mergePreflight.preflight.plan?.conflicts?.length ?? 0,
+        restoreSuccess: restoreResult.success,
+        restoreVerified: restoreResult.verified,
+        databasesEqual: isEqual,
+      };
+    });
+
+    expect(pipelineResult.gzipBytes).toBeGreaterThan(0);
+    expect(pipelineResult.manifestValid).toBe(true);
+    expect(pipelineResult.footerValid).toBe(true);
+    expect(pipelineResult.replacePreflightValid).toBe(true);
+    expect(pipelineResult.mergePreflightValid).toBe(true);
+    expect(pipelineResult.mergeConflictsCount).toBe(0); // 0 false conflicts on identical data
+    expect(pipelineResult.restoreSuccess).toBe(true);
+    expect(pipelineResult.restoreVerified).toBe(true);
+    expect(pipelineResult.databasesEqual).toBe(true);
   });
 });

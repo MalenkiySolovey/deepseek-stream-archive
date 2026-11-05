@@ -21,6 +21,27 @@ export const STORAGE_LOCK_KEY = '__streamarchive_restore_lock__';
 export const LOCK_LEASE_MS = 60_000;
 export const HEARTBEAT_INTERVAL_MS = 10_000;
 
+/**
+ * Determines whether code is running within a browser extension environment
+ * where Web Locks API (navigator.locks) is strictly mandatory for cross-tab coordination.
+ */
+export function isBrowserExtensionRuntime(): boolean {
+  if ((globalThis as any).__FORCE_BROWSER_LOCK_REQUIREMENT === true) {
+    return true;
+  }
+  const isVitest = typeof process !== 'undefined' && Boolean(process.env?.VITEST);
+  if (isVitest && !(globalThis as any).__ENFORCE_BROWSER_WEB_LOCKS_IN_VITEST__) {
+    return false;
+  }
+  if (typeof chrome !== 'undefined' && Boolean(chrome.runtime?.id)) {
+    return true;
+  }
+  if (typeof window !== 'undefined' && typeof window.document !== 'undefined') {
+    return true;
+  }
+  return false;
+}
+
 export interface RestoreLockLease {
   lockId: string;
   operation: string;
@@ -184,6 +205,13 @@ export async function withExclusiveRestoreLock<T>(
   const lockId = `exclusive-${operation}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const hasWebLocks = typeof navigator !== 'undefined' && typeof navigator.locks?.request === 'function';
 
+  if (!hasWebLocks && isBrowserExtensionRuntime()) {
+    throw new Error(
+      `[RestoreLock] Web Locks API (navigator.locks) is required in browser runtime for exclusive operation "${operation}". ` +
+      `Refusing fallback to process-local lock to avoid cross-context data corruption.`
+    );
+  }
+
   let timer: any = null;
   const controller = new AbortController();
   if (timeoutMs > 0 && typeof setTimeout !== 'undefined') {
@@ -271,18 +299,47 @@ export async function withExclusiveRestoreLock<T>(
 export async function withSharedStorageLock<T>(
   operation: string,
   fn: () => Promise<T>,
-  timeoutMs: number = 30_000
+  timeoutMs: number = 180_000
 ): Promise<T> {
   const hasWebLocks = typeof navigator !== 'undefined' && typeof navigator.locks?.request === 'function';
 
+  if (!hasWebLocks && isBrowserExtensionRuntime()) {
+    throw new Error(
+      `[RestoreLock] Web Locks API (navigator.locks) is required in browser runtime for shared operation "${operation}". ` +
+      `Refusing fallback to process-local lock to avoid cross-context data corruption.`
+    );
+  }
+
   let timer: any = null;
   const controller = new AbortController();
-  if (timeoutMs > 0 && typeof setTimeout !== 'undefined') {
-    timer = setTimeout(() => {
+  const startTime = Date.now();
+  const allowExtension = timeoutMs >= 10_000;
+  const maxWaitMs = Math.max(timeoutMs, 300_000);
+
+  const scheduleWatchdog = () => {
+    const checkInterval = allowExtension ? Math.min(timeoutMs, 10_000) : timeoutMs;
+    timer = setTimeout(async () => {
+      const elapsed = Date.now() - startTime;
+      if (allowExtension && elapsed < maxWaitMs) {
+        try {
+          const activeExclusive = await isRestoreLocked();
+          if (activeExclusive) {
+            // Long restore is still active and holding the lock: safely extend wait
+            scheduleWatchdog();
+            return;
+          }
+        } catch {
+          // non-blocking
+        }
+      }
       controller.abort(
-        new Error(`[RestoreLock] Timed out waiting for shared storage lock for operation "${operation}" after ${timeoutMs}ms`)
+        new Error(`[RestoreLock] Timed out waiting for shared storage lock for operation "${operation}" after ${elapsed}ms`)
       );
-    }, timeoutMs);
+    }, checkInterval);
+  };
+
+  if (timeoutMs > 0 && typeof setTimeout !== 'undefined') {
+    scheduleWatchdog();
   }
 
   try {

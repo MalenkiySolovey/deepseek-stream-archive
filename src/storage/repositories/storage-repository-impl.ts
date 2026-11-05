@@ -373,23 +373,25 @@ export class IndexedDbStorageRepository implements StorageRepository {
   // ── Atomic Canonical Checkpoint Persistence ──
 
   async saveCanonicalCheckpoint(data: CanonicalCheckpointData): Promise<void> {
-    const isTerm = Boolean(data.isTerminal ?? data.isFinal);
-    const fingerprint =
-      data.checkpointSeq !== undefined
-        ? await computeCanonicalCheckpointFingerprint({
-            streamKey: data.streamKey,
-            checkpointSeq: data.checkpointSeq,
-            isTerminal: isTerm,
-            conversation: data.conversation,
-            userMessage: data.userMessage,
-            message: data.message,
-            revisions: data.revisions,
-            recoveryEvents: data.recoveryEvents,
-          })
-        : undefined;
+    await this.ensureRecoveryChecked();
+    return withSharedStorageLock('saveCanonicalCheckpoint', async () => {
+      const isTerm = Boolean(data.isTerminal ?? data.isFinal);
+      const fingerprint =
+        data.checkpointSeq !== undefined
+          ? await computeCanonicalCheckpointFingerprint({
+              streamKey: data.streamKey,
+              checkpointSeq: data.checkpointSeq,
+              isTerminal: isTerm,
+              conversation: data.conversation,
+              userMessage: data.userMessage,
+              message: data.message,
+              revisions: data.revisions,
+              recoveryEvents: data.recoveryEvents,
+            })
+          : undefined;
 
-    const db = await this.getDb();
-    return new Promise((resolve, reject) => {
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
+      return new Promise<void>((resolve, reject) => {
       const stores = [
         STORE_CONVERSATIONS,
         STORE_MESSAGES,
@@ -584,6 +586,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
         executePayloadWrites();
       }
     });
+    });
   }
 
   async getCanonicalCheckpoint(
@@ -652,183 +655,192 @@ export class IndexedDbStorageRepository implements StorageRepository {
 }
 
   async applyHistoryReconciliationPlan(plan: HistoryReconciliationPlan): Promise<void> {
-    const db = await this.getDb();
-    return new Promise((resolve, reject) => {
-      const stores = [STORE_CONVERSATIONS, STORE_MESSAGES, STORE_REVISIONS];
-      const tx = createDurableWriteTransaction(db, stores, 'strict');
+    await this.ensureRecoveryChecked();
+    return withSharedStorageLock('applyHistoryReconciliationPlan', async () => {
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
+      return new Promise<void>((resolve, reject) => {
+        const stores = [STORE_CONVERSATIONS, STORE_MESSAGES, STORE_REVISIONS];
+        const tx = createDurableWriteTransaction(db, stores, 'strict');
 
-      let aborted = false;
-      const fail = (err: Error) => {
-        if (aborted) return;
-        aborted = true;
-        try {
-          tx.abort();
-        } catch {
-          // ignore
-        }
-        reject(err);
-      };
+        let aborted = false;
+        const fail = (err: Error) => {
+          if (aborted) return;
+          aborted = true;
+          try {
+            tx.abort();
+          } catch {
+            // ignore
+          }
+          reject(err);
+        };
 
-      tx.onerror = () => {
-        if (!aborted) reject(tx.error || new Error('Apply history reconciliation plan transaction failed'));
-      };
-      tx.onabort = () => {
-        if (!aborted) reject(tx.error || new Error('Apply history reconciliation plan transaction aborted'));
-      };
-      tx.oncomplete = () => {
-        if (!aborted) {
-          recordStorageMutation();
-          resolve();
-        }
-      };
+        tx.onerror = () => {
+          if (!aborted) reject(tx.error || new Error('Apply history reconciliation plan transaction failed'));
+        };
+        tx.onabort = () => {
+          if (!aborted) reject(tx.error || new Error('Apply history reconciliation plan transaction aborted'));
+        };
+        tx.oncomplete = () => {
+          if (!aborted) {
+            recordStorageMutation();
+            resolve();
+          }
+        };
 
-      const convStore = tx.objectStore(STORE_CONVERSATIONS);
-      const msgStore = tx.objectStore(STORE_MESSAGES);
-      const revStore = tx.objectStore(STORE_REVISIONS);
+        const convStore = tx.objectStore(STORE_CONVERSATIONS);
+        const msgStore = tx.objectStore(STORE_MESSAGES);
+        const revStore = tx.objectStore(STORE_REVISIONS);
 
-      this.applyReconciliationPlanToStores(plan, convStore, msgStore, revStore, fail);
+        this.applyReconciliationPlanToStores(plan, convStore, msgStore, revStore, fail);
+      });
     });
   }
 
   // ── Atomic Replay Promotion Plan Persistence ──
 
   async applyReplayPromotionPlan(plan: ReplayPromotionPlan): Promise<void> {
-    const db = await this.getDb();
-    return new Promise((resolve, reject) => {
-      const stores = [
-        STORE_CONVERSATIONS,
-        STORE_MESSAGES,
-        STORE_REVISIONS,
-        STORE_RECOVERY_EVENTS,
-      ];
-      const tx = createDurableWriteTransaction(db, stores, 'strict');
+    await this.ensureRecoveryChecked();
+    return withSharedStorageLock('applyReplayPromotionPlan', async () => {
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
+      return new Promise<void>((resolve, reject) => {
+        const stores = [
+          STORE_CONVERSATIONS,
+          STORE_MESSAGES,
+          STORE_REVISIONS,
+          STORE_RECOVERY_EVENTS,
+        ];
+        const tx = createDurableWriteTransaction(db, stores, 'strict');
 
-      let aborted = false;
-      const fail = (err: Error) => {
-        if (aborted) return;
-        aborted = true;
-        try {
-          tx.abort();
-        } catch {
-          // ignore
-        }
-        reject(err);
-      };
+        let aborted = false;
+        const fail = (err: Error) => {
+          if (aborted) return;
+          aborted = true;
+          try {
+            tx.abort();
+          } catch {
+            // ignore
+          }
+          reject(err);
+        };
 
-      tx.onerror = () => {
-        if (!aborted) reject(tx.error || new Error('Apply replay promotion plan transaction failed'));
-      };
-      tx.onabort = () => {
-        if (!aborted) reject(tx.error || new Error('Apply replay promotion plan transaction aborted'));
-      };
-      tx.oncomplete = () => {
-        if (!aborted) {
-          recordStorageMutation();
-          resolve();
-        }
-      };
-
-      const convStore = tx.objectStore(STORE_CONVERSATIONS);
-      const msgStore = tx.objectStore(STORE_MESSAGES);
-      const revStore = tx.objectStore(STORE_REVISIONS);
-      const recStore = tx.objectStore(STORE_RECOVERY_EVENTS);
-
-      const convReq = convStore.get(plan.conversation.id);
-      convReq.onerror = () => fail(convReq.error || new Error('Failed to read conversation for replay promotion'));
-      convReq.onsuccess = () => {
-        const existingConv = convReq.result as Conversation | undefined;
-        if (existingConv) {
-          convStore.put({
-            ...plan.conversation,
-            title: plan.conversation.title || existingConv.title,
-            createdAt: existingConv.createdAt,
-            updatedAt: Math.max(existingConv.updatedAt, plan.conversation.updatedAt),
-          });
-        } else {
-          convStore.put(plan.conversation);
-        }
-      };
-
-      const msgReq = msgStore.get(plan.message.id);
-      msgReq.onerror = () => fail(msgReq.error || new Error(`Failed to read message ${plan.message.id} for replay promotion`));
-      msgReq.onsuccess = () => {
-        const existingMsg = msgReq.result as Message | undefined;
-        const merged = mergeCanonicalMessage(existingMsg, plan.message, 'replay');
-        msgStore.put(merged);
-      };
-
-      for (const rev of plan.revisions) {
-        const revReq = revStore.get(rev.id);
-        revReq.onerror = () => fail(revReq.error || new Error(`Failed to check existing revision ${rev.id}`));
-        revReq.onsuccess = () => {
-          const existingRev = revReq.result as ResponseRevision | undefined;
-          if (existingRev) {
-            if (!isRevisionPayloadIdentical(existingRev, rev)) {
-              fail(new Error(`revision_conflict: cannot mutate existing revision ${rev.id}`));
-              return;
-            }
-          } else {
-            revStore.put(rev);
+        tx.onerror = () => {
+          if (!aborted) reject(tx.error || new Error('Apply replay promotion plan transaction failed'));
+        };
+        tx.onabort = () => {
+          if (!aborted) reject(tx.error || new Error('Apply replay promotion plan transaction aborted'));
+        };
+        tx.oncomplete = () => {
+          if (!aborted) {
+            recordStorageMutation();
+            resolve();
           }
         };
-      }
 
-      if (plan.recoveryEvents) {
-        for (const rec of plan.recoveryEvents) {
-          const recReq = recStore.get(rec.id);
-          recReq.onerror = () => fail(recReq.error || new Error(`Failed to check existing recovery event ${rec.id}`));
-          recReq.onsuccess = () => {
-            const existingRec = recReq.result as RecoveryEvent | undefined;
-            if (existingRec) {
-              if (!isRecoveryEventIdentical(existingRec, rec)) {
-                fail(new Error(`recovery_event_conflict: cannot mutate existing recovery event ${rec.id}`));
+        const convStore = tx.objectStore(STORE_CONVERSATIONS);
+        const msgStore = tx.objectStore(STORE_MESSAGES);
+        const revStore = tx.objectStore(STORE_REVISIONS);
+        const recStore = tx.objectStore(STORE_RECOVERY_EVENTS);
+
+        const convReq = convStore.get(plan.conversation.id);
+        convReq.onerror = () => fail(convReq.error || new Error('Failed to read conversation for replay promotion'));
+        convReq.onsuccess = () => {
+          const existingConv = convReq.result as Conversation | undefined;
+          if (existingConv) {
+            convStore.put({
+              ...plan.conversation,
+              title: plan.conversation.title || existingConv.title,
+              createdAt: existingConv.createdAt,
+              updatedAt: Math.max(existingConv.updatedAt, plan.conversation.updatedAt),
+            });
+          } else {
+            convStore.put(plan.conversation);
+          }
+        };
+
+        const msgReq = msgStore.get(plan.message.id);
+        msgReq.onerror = () => fail(msgReq.error || new Error(`Failed to read message ${plan.message.id} for replay promotion`));
+        msgReq.onsuccess = () => {
+          const existingMsg = msgReq.result as Message | undefined;
+          const merged = mergeCanonicalMessage(existingMsg, plan.message, 'replay');
+          msgStore.put(merged);
+        };
+
+        for (const rev of plan.revisions) {
+          const revReq = revStore.get(rev.id);
+          revReq.onerror = () => fail(revReq.error || new Error(`Failed to check existing revision ${rev.id}`));
+          revReq.onsuccess = () => {
+            const existingRev = revReq.result as ResponseRevision | undefined;
+            if (existingRev) {
+              if (!isRevisionPayloadIdentical(existingRev, rev)) {
+                fail(new Error(`revision_conflict: cannot mutate existing revision ${rev.id}`));
                 return;
               }
             } else {
-              recStore.put(rec);
+              revStore.put(rev);
             }
           };
         }
-      }
+
+        if (plan.recoveryEvents) {
+          for (const rec of plan.recoveryEvents) {
+            const recReq = recStore.get(rec.id);
+            recReq.onerror = () => fail(recReq.error || new Error(`Failed to check existing recovery event ${rec.id}`));
+            recReq.onsuccess = () => {
+              const existingRec = recReq.result as RecoveryEvent | undefined;
+              if (existingRec) {
+                if (!isRecoveryEventIdentical(existingRec, rec)) {
+                  fail(new Error(`recovery_event_conflict: cannot mutate existing recovery event ${rec.id}`));
+                  return;
+                }
+              } else {
+                recStore.put(rec);
+              }
+            };
+          }
+        }
+      });
     });
   }
 
   // ── History Staging Operations ──
 
   async saveHistoryStagingManifest(manifest: HistoryStagingManifestRecord): Promise<void> {
-    const db = await this.getDb();
-    return new Promise((resolve, reject) => {
-      const tx = createDurableWriteTransaction(db, [STORE_HISTORY_STAGING_MANIFESTS], 'strict');
-      const store = tx.objectStore(STORE_HISTORY_STAGING_MANIFESTS);
-      const req = store.get(manifest.stagingId);
-      req.onerror = () => reject(req.error || new Error('Failed to check staging manifest'));
-      req.onsuccess = () => {
-        const existing = req.result as HistoryStagingManifestRecord | undefined;
-        if (existing) {
-          if (
-            existing.sessionId === manifest.sessionId &&
-            existing.expectedBatchCount === manifest.expectedBatchCount &&
-            existing.expectedMessageCount === manifest.expectedMessageCount
-          ) {
-            // Idempotent success
+    await this.ensureRecoveryChecked();
+    return withSharedStorageLock('saveHistoryStagingManifest', async () => {
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
+      return new Promise<void>((resolve, reject) => {
+        const tx = createDurableWriteTransaction(db, [STORE_HISTORY_STAGING_MANIFESTS], 'strict');
+        const store = tx.objectStore(STORE_HISTORY_STAGING_MANIFESTS);
+        const req = store.get(manifest.stagingId);
+        req.onerror = () => reject(req.error || new Error('Failed to check staging manifest'));
+        req.onsuccess = () => {
+          const existing = req.result as HistoryStagingManifestRecord | undefined;
+          if (existing) {
+            if (
+              existing.sessionId === manifest.sessionId &&
+              existing.expectedBatchCount === manifest.expectedBatchCount &&
+              existing.expectedMessageCount === manifest.expectedMessageCount
+            ) {
+              // Idempotent success
+              return;
+            }
+            reject(
+              new Error(
+                `history_staging_conflict: manifest ${manifest.stagingId} exists with different configuration`
+              )
+            );
             return;
           }
-          reject(
-            new Error(
-              `history_staging_conflict: manifest ${manifest.stagingId} exists with different configuration`
-            )
-          );
-          return;
-        }
-        const recordToSave: HistoryStagingManifestRecord = {
-          ...manifest,
-          receivedBatchCount: manifest.receivedBatchCount ?? 0,
+          const recordToSave: HistoryStagingManifestRecord = {
+            ...manifest,
+            receivedBatchCount: manifest.receivedBatchCount ?? 0,
+          };
+          store.put(recordToSave);
         };
-        store.put(recordToSave);
-      };
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error || new Error('Save history staging manifest tx failed'));
-      tx.onabort = () => reject(tx.error || new Error('Save history staging manifest tx aborted'));
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error || new Error('Save history staging manifest tx failed'));
+        tx.onabort = () => reject(tx.error || new Error('Save history staging manifest tx aborted'));
+      });
     });
   }
 
@@ -844,92 +856,95 @@ export class IndexedDbStorageRepository implements StorageRepository {
   }
 
   async saveHistoryStagingBatch(batch: HistoryStagingBatchRecord): Promise<void> {
-    const db = await this.getDb();
-    return new Promise((resolve, reject) => {
-      const tx = createDurableWriteTransaction(
-        db,
-        [STORE_HISTORY_STAGING, STORE_HISTORY_STAGING_MANIFESTS],
-        'strict'
-      );
-      let aborted = false;
-      const fail = (err: Error) => {
-        if (aborted) return;
-        aborted = true;
-        try {
-          tx.abort();
-        } catch {
-          // ignore
-        }
-        reject(err);
-      };
+    await this.ensureRecoveryChecked();
+    return withSharedStorageLock('saveHistoryStagingBatch', async () => {
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
+      return new Promise<void>((resolve, reject) => {
+        const tx = createDurableWriteTransaction(
+          db,
+          [STORE_HISTORY_STAGING, STORE_HISTORY_STAGING_MANIFESTS],
+          'strict'
+        );
+        let aborted = false;
+        const fail = (err: Error) => {
+          if (aborted) return;
+          aborted = true;
+          try {
+            tx.abort();
+          } catch {
+            // ignore
+          }
+          reject(err);
+        };
 
-      tx.onerror = () => {
-        if (!aborted) reject(tx.error || new Error('Save staging batch tx failed'));
-      };
-      tx.onabort = () => {
-        if (!aborted) reject(tx.error || new Error('Save staging batch tx aborted'));
-      };
-      tx.oncomplete = () => {
-        if (!aborted) {
-          recordStorageMutation();
-          resolve();
-        }
-      };
+        tx.onerror = () => {
+          if (!aborted) reject(tx.error || new Error('Save staging batch tx failed'));
+        };
+        tx.onabort = () => {
+          if (!aborted) reject(tx.error || new Error('Save staging batch tx aborted'));
+        };
+        tx.oncomplete = () => {
+          if (!aborted) {
+            recordStorageMutation();
+            resolve();
+          }
+        };
 
-      const manifestStore = tx.objectStore(STORE_HISTORY_STAGING_MANIFESTS);
-      const stagingStore = tx.objectStore(STORE_HISTORY_STAGING);
+        const manifestStore = tx.objectStore(STORE_HISTORY_STAGING_MANIFESTS);
+        const stagingStore = tx.objectStore(STORE_HISTORY_STAGING);
 
-      const mReq = manifestStore.get(batch.stagingId);
-      mReq.onerror = () => fail(mReq.error || new Error('Failed to read manifest for batch'));
-      mReq.onsuccess = () => {
-        const manifest = mReq.result as HistoryStagingManifestRecord | undefined;
-        if (!manifest) {
-          fail(new Error(`history_staging_missing: manifest not found for stagingId ${batch.stagingId}`));
-          return;
-        }
-        if (manifest.state !== 'open') {
-          fail(new Error(`history_staging_not_open: manifest in state ${manifest.state}`));
-          return;
-        }
-        if (batch.batchIndex < 0 || batch.batchIndex >= manifest.expectedBatchCount) {
-          fail(
-            new Error(
-              `history_batch_bounds: invalid batchIndex ${batch.batchIndex} (expected 0..${manifest.expectedBatchCount - 1})`
-            )
-          );
-          return;
-        }
-        if (batch.session && batch.session.sessionId !== manifest.sessionId) {
-          fail(
-            new Error(
-              `history_session_mismatch: batch session ${batch.session.sessionId} does not match manifest ${manifest.sessionId}`
-            )
-          );
-          return;
-        }
-
-        const bReq = stagingStore.get(batch.id);
-        bReq.onerror = () => fail(bReq.error || new Error('Failed to check existing batch'));
-        bReq.onsuccess = () => {
-          const existing = bReq.result as HistoryStagingBatchRecord | undefined;
-          if (existing) {
-            const isIdentical =
-              serializeHistoryStagingBatchForFingerprint(existing) ===
-              serializeHistoryStagingBatchForFingerprint(batch);
-            if (!isIdentical) {
-              fail(new Error(`history_batch_conflict: duplicate batch ${batch.id} with different payload`));
-              return;
-            }
-            // Idempotent re-ACK
+        const mReq = manifestStore.get(batch.stagingId);
+        mReq.onerror = () => fail(mReq.error || new Error('Failed to read manifest for batch'));
+        mReq.onsuccess = () => {
+          const manifest = mReq.result as HistoryStagingManifestRecord | undefined;
+          if (!manifest) {
+            fail(new Error(`history_staging_missing: manifest not found for stagingId ${batch.stagingId}`));
+            return;
+          }
+          if (manifest.state !== 'open') {
+            fail(new Error(`history_staging_not_open: manifest in state ${manifest.state}`));
+            return;
+          }
+          if (batch.batchIndex < 0 || batch.batchIndex >= manifest.expectedBatchCount) {
+            fail(
+              new Error(
+                `history_batch_bounds: invalid batchIndex ${batch.batchIndex} (expected 0..${manifest.expectedBatchCount - 1})`
+              )
+            );
+            return;
+          }
+          if (batch.session && batch.session.sessionId !== manifest.sessionId) {
+            fail(
+              new Error(
+                `history_session_mismatch: batch session ${batch.session.sessionId} does not match manifest ${manifest.sessionId}`
+              )
+            );
             return;
           }
 
-          stagingStore.put(batch);
-          manifest.receivedBatchCount++;
-          manifest.updatedAt = Date.now();
-          manifestStore.put(manifest);
+          const bReq = stagingStore.get(batch.id);
+          bReq.onerror = () => fail(bReq.error || new Error('Failed to check existing batch'));
+          bReq.onsuccess = () => {
+            const existing = bReq.result as HistoryStagingBatchRecord | undefined;
+            if (existing) {
+              const isIdentical =
+                serializeHistoryStagingBatchForFingerprint(existing) ===
+                serializeHistoryStagingBatchForFingerprint(batch);
+              if (!isIdentical) {
+                fail(new Error(`history_batch_conflict: duplicate batch ${batch.id} with different payload`));
+                return;
+              }
+              // Idempotent re-ACK
+              return;
+            }
+
+            stagingStore.put(batch);
+            manifest.receivedBatchCount++;
+            manifest.updatedAt = Date.now();
+            manifestStore.put(manifest);
+          };
         };
-      };
+      });
     });
   }
 
@@ -950,82 +965,88 @@ export class IndexedDbStorageRepository implements StorageRepository {
   }
 
   async clearHistoryStaging(stagingId: string): Promise<void> {
-    const db = await this.getDb();
-    return new Promise((resolve, reject) => {
-      const tx = createDurableWriteTransaction(
-        db,
-        [STORE_HISTORY_STAGING, STORE_HISTORY_STAGING_MANIFESTS],
-        'strict'
-      );
-      const manifestStore = tx.objectStore(STORE_HISTORY_STAGING_MANIFESTS);
-      const stagingStore = tx.objectStore(STORE_HISTORY_STAGING);
+    await this.ensureRecoveryChecked();
+    return withSharedStorageLock('clearHistoryStaging', async () => {
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
+      return new Promise<void>((resolve, reject) => {
+        const tx = createDurableWriteTransaction(
+          db,
+          [STORE_HISTORY_STAGING, STORE_HISTORY_STAGING_MANIFESTS],
+          'strict'
+        );
+        const manifestStore = tx.objectStore(STORE_HISTORY_STAGING_MANIFESTS);
+        const stagingStore = tx.objectStore(STORE_HISTORY_STAGING);
 
-      manifestStore.delete(stagingId);
+        manifestStore.delete(stagingId);
 
-      const index = stagingStore.index('stagingId');
-      const keyRangeFactory =
-        typeof IDBKeyRange !== 'undefined'
-          ? IDBKeyRange
-          : (globalThis as any)?.IDBKeyRange;
-      const keyRange = keyRangeFactory ? keyRangeFactory.only(stagingId) : null;
-      const req = index.openCursor(keyRange);
-      req.onsuccess = (e) => {
-        const cursor = (e.target as IDBRequest).result as IDBCursorWithValue | null;
-        if (cursor) {
-          cursor.delete();
-          cursor.continue();
-        }
-      };
-      req.onerror = () => reject(req.error || new Error('Failed to clear history staging cursor'));
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error || new Error('Clear history staging transaction failed'));
-      tx.onabort = () => reject(tx.error || new Error('Clear history staging transaction aborted'));
+        const index = stagingStore.index('stagingId');
+        const keyRangeFactory =
+          typeof IDBKeyRange !== 'undefined'
+            ? IDBKeyRange
+            : (globalThis as any)?.IDBKeyRange;
+        const keyRange = keyRangeFactory ? keyRangeFactory.only(stagingId) : null;
+        const req = index.openCursor(keyRange);
+        req.onsuccess = (e) => {
+          const cursor = (e.target as IDBRequest).result as IDBCursorWithValue | null;
+          if (cursor) {
+            cursor.delete();
+            cursor.continue();
+          }
+        };
+        req.onerror = () => reject(req.error || new Error('Failed to clear history staging cursor'));
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error || new Error('Clear history staging transaction failed'));
+        tx.onabort = () => reject(tx.error || new Error('Clear history staging transaction aborted'));
+      });
     });
   }
 
   async cleanupStaleHistoryStaging(ttlMs = 24 * 60 * 60 * 1000): Promise<number> {
-    const db = await this.getDb();
-    const cutoff = Date.now() - ttlMs;
-    return new Promise((resolve, reject) => {
-      const tx = createDurableWriteTransaction(
-        db,
-        [STORE_HISTORY_STAGING, STORE_HISTORY_STAGING_MANIFESTS],
-        'strict'
-      );
-      const manifestStore = tx.objectStore(STORE_HISTORY_STAGING_MANIFESTS);
-      const stagingStore = tx.objectStore(STORE_HISTORY_STAGING);
+    await this.ensureRecoveryChecked();
+    return withSharedStorageLock('cleanupStaleHistoryStaging', async () => {
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
+      const cutoff = Date.now() - ttlMs;
+      return new Promise<number>((resolve, reject) => {
+        const tx = createDurableWriteTransaction(
+          db,
+          [STORE_HISTORY_STAGING, STORE_HISTORY_STAGING_MANIFESTS],
+          'strict'
+        );
+        const manifestStore = tx.objectStore(STORE_HISTORY_STAGING_MANIFESTS);
+        const stagingStore = tx.objectStore(STORE_HISTORY_STAGING);
 
-      let cleaned = 0;
-      const curReq = manifestStore.openCursor();
-      curReq.onsuccess = (e) => {
-        const cursor = (e.target as IDBRequest).result as IDBCursorWithValue | null;
-        if (cursor) {
-          const record = cursor.value as HistoryStagingManifestRecord;
-          if (record.createdAt < cutoff || record.state === 'aborted' || record.state === 'completed') {
-            const stagingId = record.stagingId;
-            cursor.delete();
-            cleaned++;
+        let cleaned = 0;
+        const curReq = manifestStore.openCursor();
+        curReq.onsuccess = (e) => {
+          const cursor = (e.target as IDBRequest).result as IDBCursorWithValue | null;
+          if (cursor) {
+            const record = cursor.value as HistoryStagingManifestRecord;
+            if (record.createdAt < cutoff || record.state === 'aborted' || record.state === 'completed') {
+              const stagingId = record.stagingId;
+              cursor.delete();
+              cleaned++;
 
-            const bIndex = stagingStore.index('stagingId');
-            const keyRangeFactory =
-              typeof IDBKeyRange !== 'undefined'
-                ? IDBKeyRange
-                : (globalThis as any)?.IDBKeyRange;
-            const bReq = bIndex.openCursor(keyRangeFactory ? keyRangeFactory.only(stagingId) : null);
-            bReq.onsuccess = (be) => {
-              const bCursor = (be.target as IDBRequest).result as IDBCursorWithValue | null;
-              if (bCursor) {
-                bCursor.delete();
-                bCursor.continue();
-              }
-            };
+              const bIndex = stagingStore.index('stagingId');
+              const keyRangeFactory =
+                typeof IDBKeyRange !== 'undefined'
+                  ? IDBKeyRange
+                  : (globalThis as any)?.IDBKeyRange;
+              const bReq = bIndex.openCursor(keyRangeFactory ? keyRangeFactory.only(stagingId) : null);
+              bReq.onsuccess = (be) => {
+                const bCursor = (be.target as IDBRequest).result as IDBCursorWithValue | null;
+                if (bCursor) {
+                  bCursor.delete();
+                  bCursor.continue();
+                }
+              };
+            }
+            cursor.continue();
           }
-          cursor.continue();
-        }
-      };
+        };
 
-      tx.oncomplete = () => resolve(cleaned);
-      tx.onerror = () => reject(tx.error || new Error('Cleanup stale staging transaction failed'));
+        tx.oncomplete = () => resolve(cleaned);
+        tx.onerror = () => reject(tx.error || new Error('Cleanup stale staging transaction failed'));
+      });
     });
   }
 
@@ -1033,8 +1054,10 @@ export class IndexedDbStorageRepository implements StorageRepository {
     stagingId: string,
     plan: HistoryReconciliationPlan
   ): Promise<void> {
-    const db = await this.getDb();
-    return new Promise((resolve, reject) => {
+    await this.ensureRecoveryChecked();
+    return withSharedStorageLock('commitHistoryStagingPlan', async () => {
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
+      return new Promise<void>((resolve, reject) => {
       const stores = [
         STORE_CONVERSATIONS,
         STORE_MESSAGES,
@@ -1159,6 +1182,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
           curReq.onerror = () => fail(curReq.error || new Error('Failed to delete staging records'));
         };
       };
+    });
     });
   }
 
@@ -1744,12 +1768,14 @@ export class IndexedDbStorageRepository implements StorageRepository {
     attemptOnlyCount: number;
     unmatchedCapturesCount: number;
   }> {
-    const db = await this.getDb();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(
-        [STORE_MESSAGES, STORE_REVISIONS, STORE_RECOVERY_EVENTS],
-        'readwrite'
-      );
+    await this.ensureRecoveryChecked();
+    return withSharedStorageLock('repairCanonicalProjection', async () => {
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(
+          [STORE_MESSAGES, STORE_REVISIONS, STORE_RECOVERY_EVENTS],
+          'readwrite'
+        );
       const msgStore = tx.objectStore(STORE_MESSAGES);
       const revStore = tx.objectStore(STORE_REVISIONS);
       const recStore = tx.objectStore(STORE_RECOVERY_EVENTS);
@@ -1868,6 +1894,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
 
       tx.onerror = () => reject(tx.error || new Error('Transaction failed during repairCanonicalProjection'));
     });
+    });
   }
 
   // ── Atomic Synthetic Batch Persistence (ACK pipeline support) ──
@@ -1877,28 +1904,31 @@ export class IndexedDbStorageRepository implements StorageRepository {
     message: Message;
     revision: ResponseRevision;
   }): Promise<void> {
-    const db = await this.getDb();
-    return new Promise((resolve, reject) => {
-      const tx = createDurableWriteTransaction(
-        db,
-        [STORE_CONVERSATIONS, STORE_MESSAGES, STORE_REVISIONS],
-        'strict'
-      );
+    await this.ensureRecoveryChecked();
+    return withSharedStorageLock('saveSyntheticBatch', async () => {
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
+      return new Promise<void>((resolve, reject) => {
+        const tx = createDurableWriteTransaction(
+          db,
+          [STORE_CONVERSATIONS, STORE_MESSAGES, STORE_REVISIONS],
+          'strict'
+        );
 
-      const convStore = tx.objectStore(STORE_CONVERSATIONS);
-      const msgStore = tx.objectStore(STORE_MESSAGES);
-      const revStore = tx.objectStore(STORE_REVISIONS);
+        const convStore = tx.objectStore(STORE_CONVERSATIONS);
+        const msgStore = tx.objectStore(STORE_MESSAGES);
+        const revStore = tx.objectStore(STORE_REVISIONS);
 
-      convStore.put(data.conversation);
-      msgStore.put(data.message);
-      revStore.put(data.revision);
+        convStore.put(data.conversation);
+        msgStore.put(data.message);
+        revStore.put(data.revision);
 
-      tx.oncomplete = () => {
-        recordStorageMutation();
-        resolve();
-      };
-      tx.onerror = () => reject(tx.error || new Error('Batch transaction failed'));
-      tx.onabort = () => reject(tx.error || new Error('Batch transaction aborted'));
+        tx.oncomplete = () => {
+          recordStorageMutation();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error || new Error('Batch transaction failed'));
+        tx.onabort = () => reject(tx.error || new Error('Batch transaction aborted'));
+      });
     });
   }
 
@@ -2176,8 +2206,11 @@ export class IndexedDbStorageRepository implements StorageRepository {
   }
 
   async deleteConversationCascade(plan: ConversationDeletionPlan, activeStreamKeys: Set<string>): Promise<void> {
-    const db = await this.getDb();
-    return deleteConversationCascadeInternal(db, plan, activeStreamKeys);
+    await this.ensureRecoveryChecked();
+    return withSharedStorageLock('deleteConversationCascade', async () => {
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
+      return deleteConversationCascadeInternal(db, plan, activeStreamKeys);
+    });
   }
 
   async buildRawRetentionPlan(mode: RawRetentionMode, activeStreamKeys: Set<string>, now?: number): Promise<RawRetentionPlan> {
@@ -2186,18 +2219,25 @@ export class IndexedDbStorageRepository implements StorageRepository {
   }
 
   async executeRawRetentionPlan(plan: RawRetentionPlan, activeStreamKeys: Set<string>): Promise<ArchiveCleanupResult> {
-    const db = await this.getDb();
-    return executeRawRetentionPlanInternal(db, plan, activeStreamKeys);
+    await this.ensureRecoveryChecked();
+    return withSharedStorageLock('executeRawRetentionPlan', async () => {
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
+      return executeRawRetentionPlanInternal(db, plan, activeStreamKeys);
+    });
   }
 
   async clearRawEvidence(activeStreamCount: number): Promise<ArchiveCleanupResult> {
-    const db = await this.getDb();
-    return clearRawEvidenceInternal(db, activeStreamCount);
+    await this.ensureRecoveryChecked();
+    return withSharedStorageLock('clearRawEvidence', async () => {
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
+      return clearRawEvidenceInternal(db, activeStreamCount);
+    });
   }
 
   async clearEntireArchive(activeStreamCount: number): Promise<{ success: boolean; durationMs: number }> {
+    await this.ensureRecoveryChecked();
     return withExclusiveRestoreLock('clear', async () => {
-      const db = await this.getDb();
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
       return clearEntireArchiveInternal(db, activeStreamCount);
     });
   }
@@ -2332,43 +2372,66 @@ export class IndexedDbStorageRepository implements StorageRepository {
   }
 
   async recordContinuityReceipt(receipt: ContextContinuityReceipt): Promise<void> {
-    const db = await this.getDb();
-    return new Promise((resolve, reject) => {
-      const tx = createDurableWriteTransaction(db, STORE_CONTEXT_CONTINUITY_RECEIPTS, 'strict');
-      const store = tx.objectStore(STORE_CONTEXT_CONTINUITY_RECEIPTS);
-      const req = store.put(receipt);
-      req.onsuccess = () => {
-        recordStorageMutation();
-        resolve();
-      };
-      req.onerror = () => reject(req.error || new Error('Failed to record continuity receipt'));
+    await this.ensureRecoveryChecked();
+    return withSharedStorageLock('recordContinuityReceipt', async () => {
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
+      return new Promise<void>((resolve, reject) => {
+        const tx = createDurableWriteTransaction(db, STORE_CONTEXT_CONTINUITY_RECEIPTS, 'strict');
+        tx.oncomplete = () => {
+          recordStorageMutation();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error || new Error('Failed to record continuity receipt tx'));
+        tx.onabort = () => reject(tx.error || new Error('Record continuity receipt tx aborted'));
+        const store = tx.objectStore(STORE_CONTEXT_CONTINUITY_RECEIPTS);
+        const req = store.put(receipt);
+        req.onerror = () => reject(req.error || new Error('Failed to put continuity receipt'));
+      });
     });
   }
 
   async updateContinuityReceipt(id: string, updates: Partial<ContextContinuityReceipt>): Promise<void> {
-    const db = await this.getDb();
-    return new Promise((resolve, reject) => {
-      const tx = createDurableWriteTransaction(db, STORE_CONTEXT_CONTINUITY_RECEIPTS, 'strict');
-      const store = tx.objectStore(STORE_CONTEXT_CONTINUITY_RECEIPTS);
-      const getReq = store.get(id);
-      getReq.onerror = () => reject(getReq.error || new Error(`Failed to find continuity receipt ${id}`));
-      getReq.onsuccess = () => {
-        const existing = getReq.result as ContextContinuityReceipt | undefined;
-        if (!existing) {
-          return reject(new Error(`Continuity receipt ${id} not found`));
-        }
-        const merged: ContextContinuityReceipt = {
-          ...existing,
-          ...updates,
-          updatedAt: Date.now(),
+    await this.ensureRecoveryChecked();
+    return withSharedStorageLock('updateContinuityReceipt', async () => {
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
+      return new Promise<void>((resolve, reject) => {
+        const tx = createDurableWriteTransaction(db, STORE_CONTEXT_CONTINUITY_RECEIPTS, 'strict');
+        let aborted = false;
+        const fail = (err: Error) => {
+          if (aborted) return;
+          aborted = true;
+          try { tx.abort(); } catch {}
+          reject(err);
         };
-        const putReq = store.put(merged);
-        putReq.onsuccess = () => {
-          recordStorageMutation();
-          resolve();
+        tx.oncomplete = () => {
+          if (!aborted) {
+            recordStorageMutation();
+            resolve();
+          }
         };
-        putReq.onerror = () => reject(putReq.error || new Error(`Failed to update continuity receipt ${id}`));
-      };
+        tx.onerror = () => {
+          if (!aborted) reject(tx.error || new Error(`Failed to update continuity receipt tx ${id}`));
+        };
+        tx.onabort = () => {
+          if (!aborted) reject(tx.error || new Error(`Update continuity receipt tx aborted ${id}`));
+        };
+        const store = tx.objectStore(STORE_CONTEXT_CONTINUITY_RECEIPTS);
+        const getReq = store.get(id);
+        getReq.onerror = () => fail(getReq.error || new Error(`Failed to find continuity receipt ${id}`));
+        getReq.onsuccess = () => {
+          const existing = getReq.result as ContextContinuityReceipt | undefined;
+          if (!existing) {
+            return fail(new Error(`Continuity receipt ${id} not found`));
+          }
+          const merged: ContextContinuityReceipt = {
+            ...existing,
+            ...updates,
+            updatedAt: Date.now(),
+          };
+          const putReq = store.put(merged);
+          putReq.onerror = () => fail(putReq.error || new Error(`Failed to update continuity receipt ${id}`));
+        };
+      });
     });
   }
 

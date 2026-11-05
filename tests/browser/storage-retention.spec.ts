@@ -166,6 +166,7 @@ test.describe('E2E Browser Compatibility: Raw Evidence Retention & Storage Obser
       await new Promise<void>((res) => {
         tx.oncomplete = () => res();
       });
+      db.close();
     });
 
     // 2. Open Settings Tab
@@ -201,8 +202,8 @@ test.describe('E2E Browser Compatibility: Raw Evidence Retention & Storage Obser
     await expect(confirmCleanupBtn).toBeVisible();
     await confirmCleanupBtn.click();
 
-    // 8. Verify confirmation feedback banner appears
-    await expect(cleanupModal.locator('.modal-feedback-banner')).toBeVisible({ timeout: 5000 });
+    // 8. Verify confirmation feedback banner appears with successful pruned stream count
+    await expect(cleanupModal.locator('.modal-feedback-banner')).toContainText(/Pruned 1.*stream|Удалено 1.*поток/i, { timeout: 10000 });
 
     // 9. Inspect IndexedDB directly to verify only old healthy stream was pruned
     const counts = await sidepanel.evaluate(async () => {
@@ -225,6 +226,7 @@ test.describe('E2E Browser Compatibility: Raw Evidence Retention & Storage Obser
       const recStream = await new Promise((res) => { tx.objectStore('raw_streams').get('p-rec:s-rec').onsuccess = (e) => res((e.target as any).result); });
       const fltStream = await new Promise((res) => { tx.objectStore('raw_streams').get('p-flt:s-flt').onsuccess = (e) => res((e.target as any).result); });
       const oldMsg = await new Promise((res) => { tx.objectStore('messages').get('msg-old').onsuccess = (e) => res((e.target as any).result); });
+      db.close();
 
       return {
         hasOldStream: Boolean(oldStream),
