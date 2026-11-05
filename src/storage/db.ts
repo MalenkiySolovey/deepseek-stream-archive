@@ -15,9 +15,40 @@ export function openExtensionDatabase(idbFactory?: IDBFactory, dbName: string = 
   if (idbFactory) {
     const map = factoryDbMap.get(idbFactory);
     const cached = map?.get(dbName);
-    if (cached) return Promise.resolve(cached);
+    if (cached) {
+      if ((cached as any)._closed) {
+        map?.delete(dbName);
+        allActiveDatabases.delete(cached);
+      } else {
+        try {
+          // Probe if database connection is active
+          const probeStore = cached.objectStoreNames[0];
+          if (probeStore) {
+            const probeTx = cached.transaction([probeStore], 'readonly');
+            probeTx.abort();
+          }
+          return Promise.resolve(cached);
+        } catch {
+          map?.delete(dbName);
+          allActiveDatabases.delete(cached);
+        }
+      }
+    }
   } else if (dbName === DB_NAME && defaultDatabase) {
-    return Promise.resolve(defaultDatabase);
+    if ((defaultDatabase as any)._closed) {
+      defaultDatabase = null;
+    } else {
+      try {
+        const probeStore = defaultDatabase.objectStoreNames[0];
+        if (probeStore) {
+          const probeTx = defaultDatabase.transaction([probeStore], 'readonly');
+          probeTx.abort();
+        }
+        return Promise.resolve(defaultDatabase);
+      } catch {
+        defaultDatabase = null;
+      }
+    }
   }
 
   return new Promise((resolve, reject) => {

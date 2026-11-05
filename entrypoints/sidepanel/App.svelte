@@ -132,13 +132,24 @@
   // Context Continuity Settings State
   let continuitySettings = $state<ContextContinuitySettings>({ ...DEFAULT_CONTEXT_CONTINUITY_SETTINGS });
 
-  onMount(() => {
+  // Startup Crash Recovery Alert State
+  let startupCrashRecoveryAlert = $state<string | null>(null);
+
+  onMount(async () => {
     if (typeof window !== 'undefined') {
       (window as any).__recoverIncompleteRestoreIfAny = recoverIncompleteRestoreIfAny;
     }
-    recoverIncompleteRestoreIfAny().catch(() => {});
-    loadRecoverySettings();
-    loadContinuitySettings();
+    try {
+      const recovered = await recoverIncompleteRestoreIfAny();
+      if (recovered) {
+        console.info('[StreamArchive] Auto-recovered database from interrupted restore after browser restart.');
+      }
+    } catch (recErr) {
+      console.error('[StreamArchive] Startup crash recovery encountered error:', recErr);
+      startupCrashRecoveryAlert = 'Detected unfinished restore from a browser crash. If data appears missing, your pre-restore snapshot is preserved.';
+    }
+    await loadRecoverySettings();
+    await loadContinuitySettings();
   });
 
   async function loadRecoverySettings() {
@@ -734,6 +745,11 @@
   </header>
 
   <main class="app-body">
+    {#if startupCrashRecoveryAlert}
+      <div class="restore-error-banner" style="margin: 12px; border-radius: 8px;">
+        ⚠️ {startupCrashRecoveryAlert}
+      </div>
+    {/if}
     {#if activeTab === 'archive'}
       {#if selectedConversationId}
         <ConversationView

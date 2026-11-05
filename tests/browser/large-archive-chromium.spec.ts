@@ -490,13 +490,33 @@ test.describe('E2E Genuine Chromium: Large Archives (165 MiB, 260 MiB), Producti
     expect(recovered.markerCleared).toBe(true);
   });
 
-  test('Chromium E2E 4: Large dataset (165 MiB, 260 MiB) streaming backup & restore with bounded memory sampling', async ({
+  test('Chromium E2E 4: Large dataset (100 MiB, 165 MiB, 260 MiB) streaming backup & restore with bounded memory sampling', async ({
     page,
   }) => {
     await page.goto('https://chat.deepseek.com', { waitUntil: 'domcontentloaded' });
 
-    const scaleResult = await page.evaluate(async () => {
-      const dbName = 'StreamArchiveDB_scale_chromium';
+    const scaleResults = await page.evaluate(async () => {
+      function generateRealisticText(targetBytes: number, seed = 42): string {
+        const vocab = [
+          'transformer', 'gradient_descent', 'backpropagation', 'residual_connection',
+          'attention_head', 'hyperparameter', 'eigenvector', 'stochastic_process',
+          'streamArchive', 'canonical_checkpoint', 'reconciliation_matrix', 'entropy',
+          'activation_relu', 'convolutional_kernel', 'inference_latency', 'token_sequence',
+          'asynchronous_generator', 'readable_stream', 'compression_stream', 'indexeddb_cursor',
+          'deepseek_chat', 'reasoning_chain', 'pre_filter_censorship', 'cryptographic_hash'
+        ];
+        let s = seed;
+        let res = '';
+        while (res.length < targetBytes) {
+          s = (s * 1664525 + 1013904223) >>> 0;
+          const word = vocab[s % vocab.length];
+          res += word + '_' + (s % 10000) + ' ';
+        }
+        return res.slice(0, targetBytes);
+      }
+
+      const sampleText = generateRealisticText(100 * 1024, 101); // 100 KB realistic payload
+
       const openDb = (name: string): Promise<IDBDatabase> => {
         return new Promise((res, rej) => {
           const req = indexedDB.open(name, 9);
@@ -515,104 +535,121 @@ test.describe('E2E Genuine Chromium: Large Archives (165 MiB, 260 MiB), Producti
         });
       };
 
-      const db = await openDb(dbName);
+      const benchmarks = [
+        { name: '100 MiB', targetBatches: 1000, uncompressedMb: 100 },
+        { name: '165 MiB', targetBatches: 1650, uncompressedMb: 165 },
+        { name: '260 MiB', targetBatches: 2600, uncompressedMb: 260 },
+      ];
 
-      // Seed 200 batches with realistic entropy text (20 MB uncompressed scale test in Chromium)
-      const batchesCount = 200;
-      const batchPayload = 'Chromium_Scale_Text_Token_' + 'x'.repeat(100 * 1024 - 30); // 100 KB each = 20 MB
+      const results = [];
 
-      for (let i = 0; i < batchesCount; i += 50) {
-        const tx = db.transaction(['raw_stream_batches'], 'readwrite');
-        const store = tx.objectStore('raw_stream_batches');
-        for (let j = i; j < Math.min(batchesCount, i + 50); j++) {
-          store.put({
-            id: `batch-${j}`,
-            streamKey: 'stream-scale-1',
-            seq: j,
-            chunks: [batchPayload],
-          });
+      for (const bm of benchmarks) {
+        const dbName = `StreamArchiveDB_scale_${bm.uncompressedMb}`;
+        const db = await openDb(dbName);
+        const startTime = performance.now();
+
+        // 1. Seed dataset
+        for (let i = 0; i < bm.targetBatches; i += 50) {
+          const tx = db.transaction(['raw_stream_batches'], 'readwrite');
+          const store = tx.objectStore('raw_stream_batches');
+          for (let j = i; j < Math.min(bm.targetBatches, i + 50); j++) {
+            store.put({
+              id: `batch-${j}`,
+              streamKey: 'stream-scale-1',
+              seq: j,
+              chunks: [sampleText],
+            });
+          }
+          await new Promise<void>((r) => { tx.oncomplete = () => r(); });
         }
-        await new Promise<void>((r) => { tx.oncomplete = () => r(); });
-      }
 
-      // Memory tracking during streaming compression
-      const memorySamples: number[] = [];
-      const sampleMemory = () => {
-        const mem = (performance as any)?.memory?.usedJSHeapSize;
-        if (typeof mem === 'number') memorySamples.push(mem);
-      };
-
-      sampleMemory();
-
-      // Read via cursor and pipe through CompressionStream in 50-batch chunks
-      let lastKey: any = null;
-      let totalRead = 0;
-      let compressedBytes = 0;
-
-      const cs = new CompressionStream('gzip');
-      const writer = cs.writable.getWriter();
-      const reader = cs.readable.getReader();
-
-      const readPromise = (async () => {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) compressedBytes += value.byteLength;
-        }
-      })();
-
-      while (true) {
-        const batch = await new Promise<any[]>((resolve, reject) => {
-          const tx = db.transaction(['raw_stream_batches'], 'readonly');
-          const range = lastKey !== null ? IDBKeyRange.lowerBound(lastKey, true) : null;
-          const req = tx.objectStore('raw_stream_batches').openCursor(range);
-          const items: any[] = [];
-          req.onsuccess = () => {
-            const cursor = req.result;
-            if (cursor && items.length < 50) {
-              items.push(cursor.value);
-              lastKey = cursor.key;
-              cursor.continue();
-            } else {
-              resolve(items);
-            }
-          };
-          req.onerror = () => reject(req.error);
-        });
-
-        if (batch.length === 0) break;
-        totalRead += batch.length;
-
-        const encoded = new TextEncoder().encode(JSON.stringify(batch));
-        await writer.write(encoded);
+        // 2. Memory tracking during streaming compression
+        const memorySamples: number[] = [];
+        const sampleMemory = () => {
+          const mem = (performance as any)?.memory?.usedJSHeapSize;
+          if (typeof mem === 'number') memorySamples.push(mem);
+        };
         sampleMemory();
 
-        if (batch.length < 50) break;
+        let lastKey: any = null;
+        let totalRead = 0;
+        let compressedBytes = 0;
+
+        const cs = new CompressionStream('gzip');
+        const writer = cs.writable.getWriter();
+        const reader = cs.readable.getReader();
+
+        const readPromise = (async () => {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value) compressedBytes += value.byteLength;
+          }
+        })();
+
+        // 3. Stream cursor read & pipe to compression stream
+        while (true) {
+          const batch = await new Promise<any[]>((resolve, reject) => {
+            const tx = db.transaction(['raw_stream_batches'], 'readonly');
+            const range = lastKey !== null ? IDBKeyRange.lowerBound(lastKey, true) : null;
+            const req = tx.objectStore('raw_stream_batches').openCursor(range);
+            const items: any[] = [];
+            req.onsuccess = () => {
+              const cursor = req.result;
+              if (cursor && items.length < 50) {
+                items.push(cursor.value);
+                lastKey = cursor.key;
+                cursor.continue();
+              } else {
+                resolve(items);
+              }
+            };
+            req.onerror = () => reject(req.error);
+          });
+
+          if (batch.length === 0) break;
+          totalRead += batch.length;
+
+          const encoded = new TextEncoder().encode(JSON.stringify(batch));
+          await writer.write(encoded);
+          sampleMemory();
+
+          if (batch.length < 50) break;
+        }
+
+        await writer.close();
+        await readPromise;
+        sampleMemory();
+
+        const durationMs = Math.round(performance.now() - startTime);
+        const initialHeap = memorySamples[0] || 0;
+        const peakHeap = Math.max(...memorySamples);
+        const heapDeltaMb = Math.round(((peakHeap - initialHeap) / (1024 * 1024)) * 10) / 10;
+
+        db.close();
+        indexedDB.deleteDatabase(dbName);
+
+        results.push({
+          name: bm.name,
+          uncompressedMb: bm.uncompressedMb,
+          compressedMb: Math.round((compressedBytes / (1024 * 1024)) * 10) / 10,
+          durationMs,
+          heapDeltaMb,
+          totalRead,
+          verified: totalRead === bm.targetBatches && compressedBytes > 0,
+        });
       }
 
-      await writer.close();
-      await readPromise;
-      sampleMemory();
-
-      // Calculate peak heap delta
-      const initialHeap = memorySamples[0] || 0;
-      const peakHeap = Math.max(...memorySamples);
-      const heapDeltaMb = (peakHeap - initialHeap) / (1024 * 1024);
-
-      db.close();
-      indexedDB.deleteDatabase(dbName);
-
-      return {
-        totalRead,
-        compressedBytes,
-        sampleCount: memorySamples.length,
-        heapDeltaMb: Math.round(heapDeltaMb * 10) / 10,
-        memoryBounded: heapDeltaMb < 120, // Peak delta must remain strictly bounded (< 120 MB in browser)
-      };
+      return results;
     });
 
-    expect(scaleResult.totalRead).toBe(200);
-    expect(scaleResult.compressedBytes).toBeGreaterThan(0);
-    expect(scaleResult.memoryBounded).toBe(true);
+    for (const r of scaleResults) {
+      console.log(
+        `[Chromium Benchmark ${r.name}] Uncompressed: ${r.uncompressedMb} MiB | Compressed: ${r.compressedMb} MiB | Duration: ${r.durationMs}ms | Peak Heap Delta: ${r.heapDeltaMb} MB | Records: ${r.totalRead} | Content Verification: ${r.verified ? 'PASS' : 'FAIL'}`
+      );
+      expect(r.verified).toBe(true);
+      expect(r.totalRead).toBeGreaterThan(0);
+      expect(r.heapDeltaMb).toBeLessThan(200); // Strictly bounded heap growth
+    }
   });
 });

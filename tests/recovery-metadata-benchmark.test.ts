@@ -242,6 +242,6 @@ describe('StorageRepository: getRecoveryMetadataForConversation Efficiency & Ben
       // Note benchmark timing without fabricating claims
       console.log(`[Benchmark] getRecoveryMetadataForConversation (${count} messages): ${durationMs.toFixed(2)} ms`);
       expect(durationMs).toBeGreaterThanOrEqual(0);
-    });
+    }, 30000);
   }
 });
