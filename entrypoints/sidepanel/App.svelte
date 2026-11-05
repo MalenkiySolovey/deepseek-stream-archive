@@ -133,6 +133,8 @@
   let continuitySettings = $state<ContextContinuitySettings>({ ...DEFAULT_CONTEXT_CONTINUITY_SETTINGS });
 
   // Startup Crash Recovery Alert State
+  type ArchiveSafetyStatus = 'READY' | 'RECOVERING' | 'RECOVERY_BLOCKED' | 'RECOVERY_FAILED';
+  let archiveSafetyStatus = $state<ArchiveSafetyStatus>('RECOVERING');
   let startupCrashRecoveryAlert = $state<string | null>(null);
 
   onMount(async () => {
@@ -140,13 +142,23 @@
       (window as any).__recoverIncompleteRestoreIfAny = recoverIncompleteRestoreIfAny;
     }
     try {
-      const recovered = await recoverIncompleteRestoreIfAny();
-      if (recovered) {
+      const status = await recoverIncompleteRestoreIfAny();
+      if (status.state === 'not_required') {
+        archiveSafetyStatus = 'READY';
+      } else if (status.state === 'recovered') {
+        archiveSafetyStatus = 'READY';
         console.info('[StreamArchive] Auto-recovered database from interrupted restore after browser restart.');
+      } else if (status.state === 'blocked') {
+        archiveSafetyStatus = 'RECOVERY_BLOCKED';
+        startupCrashRecoveryAlert = `Recovery blocked: ${status.reason}. Please close other DeepSeek tabs or sidepanels.`;
+      } else if (status.state === 'failed') {
+        archiveSafetyStatus = 'RECOVERY_FAILED';
+        startupCrashRecoveryAlert = `CRITICAL: Crash recovery failed (${status.reason}). Writes and restores are disabled to protect data.`;
       }
-    } catch (recErr) {
+    } catch (recErr: any) {
       console.error('[StreamArchive] Startup crash recovery encountered error:', recErr);
-      startupCrashRecoveryAlert = 'Detected unfinished restore from a browser crash. If data appears missing, your pre-restore snapshot is preserved.';
+      archiveSafetyStatus = 'RECOVERY_FAILED';
+      startupCrashRecoveryAlert = `Detected unfinished restore from a browser crash. If data appears missing, your pre-restore snapshot is preserved. (${recErr?.message || 'Unknown error'})`;
     }
     await loadRecoverySettings();
     await loadContinuitySettings();
@@ -745,9 +757,17 @@
   </header>
 
   <main class="app-body">
-    {#if startupCrashRecoveryAlert}
-      <div class="restore-error-banner" style="margin: 12px; border-radius: 8px;">
-        ⚠️ {startupCrashRecoveryAlert}
+    {#if archiveSafetyStatus !== 'READY' || startupCrashRecoveryAlert}
+      <div class="restore-error-banner" style="margin: 12px; border-radius: 8px; background: rgba(220, 38, 38, 0.15); border: 1px solid #ef4444; color: #f87171;" role="alert">
+        {#if archiveSafetyStatus === 'RECOVERING'}
+          ⏳ Archive recovery is currently running in the background...
+        {:else if archiveSafetyStatus === 'RECOVERY_BLOCKED'}
+          ⛔ Archive recovery is blocked by another context. Please close other DeepSeek tabs or sidepanels.
+        {:else if archiveSafetyStatus === 'RECOVERY_FAILED'}
+          🚨 CRITICAL: Archive crash recovery failed. Writes and destructive operations are blocked to prevent data loss.
+        {:else if startupCrashRecoveryAlert}
+          ⚠️ {startupCrashRecoveryAlert}
+        {/if}
       </div>
     {/if}
     {#if activeTab === 'archive'}
@@ -1167,7 +1187,7 @@
                   class="backup-btn primary"
                   id="execute-restore-btn"
                   type="button"
-                  disabled={!restorePreflight.canRestore || (restoreMode === 'replace' && !replaceConfirmed)}
+                  disabled={archiveSafetyStatus !== 'READY' || !restorePreflight.canRestore || (restoreMode === 'replace' && !replaceConfirmed)}
                   onclick={handleExecuteRestore}
                 >
                   🚀 {t.restoreBtn}
@@ -1420,6 +1440,7 @@
                   class="backup-btn danger"
                   id="clear-all-archive-btn"
                   type="button"
+                  disabled={archiveSafetyStatus !== 'READY'}
                   onclick={() => { showClearArchiveModal = true; clearArchiveConfirmed = false; clearArchiveFeedback = null; }}
                 >
                   ⚠️ {t.clearArchiveBtn}

@@ -265,7 +265,7 @@ describe('Audit Reproduction: Data Integrity, Durable Mutations & Crash Resilien
 
     // 4. Trigger recovery
     const recovered = await recoverIncompleteRestoreIfAny(idb);
-    expect(recovered).toBe(true);
+    expect(recovered.state).toBe('recovered');
 
     // 5. Verify liveDb now contains the recovered data!
     const checkTx = liveDb.transaction([STORE_CONVERSATIONS, STORE_MESSAGES], 'readonly');

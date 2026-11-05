@@ -35,7 +35,11 @@ import {
   deleteExtensionDatabase,
   createDurableWriteTransaction,
 } from '../storage/db';
-import { acquireRestoreLock, type RestoreLockHandle } from './restore-lock';
+import {
+  withExclusiveRestoreLock,
+  acquireRestoreLock,
+  type RestoreLockHandle,
+} from './restore-lock';
 import type { RestorePlan, RestoreResult, RestoreMode, RestoreConflict } from './types';
 import type { Conversation, Message, ResponseRevision, RecoveryEvent } from '../core/models';
 import type { RawStreamRecord, RawStreamBatch } from '../storage/raw-journal/types';
@@ -70,19 +74,29 @@ const BATCH_SIZE = 200;
 
 let activeRestoreLock = false;
 
+export type RecoveryStatus =
+  | { state: 'not_required' }
+  | { state: 'recovered'; durationMs?: number; details?: string }
+  | { state: 'blocked'; reason: string }
+  | { state: 'failed'; reason: string; snapshotPreserved: boolean };
+
 export type RestoreJournalStage =
   | 'idle'
   | 'preparing_snapshot'
   | 'snapshot_verified'
   | 'commit_started'
-  | 'commit_completed'
+  | 'transfer_completed'
+  | 'verifying'
+  | 'commit_verified'
+  | 'cleanup_pending'
+  | 'completed'
   | 'rollback_required'
   | 'rollback_in_progress'
   | 'recovery_verified'
   // Legacy backward compatibility
   | 'snapshot_ready'
   | 'transferring'
-  | 'verifying'
+  | 'commit_completed'
   | 'rolling_back';
 
 export interface RestoreJournalMarker {
@@ -94,6 +108,7 @@ export interface RestoreJournalMarker {
   timestamp: number;
   operationId?: string;
   expectedCounts?: PortableBackupStoreCounts;
+  snapshotCounts?: Record<string, number>;
 }
 
 export type RestoreInterruptionPoint =
@@ -313,24 +328,41 @@ export async function getRestoreJournalMarker(idbFactory?: IDBFactory): Promise<
   });
 }
 
+async function getStoreRecordCount(db: IDBDatabase, storeName: string): Promise<number> {
+  return new Promise<number>((resolve) => {
+    try {
+      if (!db.objectStoreNames.contains(storeName)) {
+        return resolve(0);
+      }
+      const tx = db.transaction(storeName, 'readonly');
+      const req = tx.objectStore(storeName).count();
+      req.onsuccess = () => resolve(req.result || 0);
+      req.onerror = () => resolve(0);
+    } catch {
+      resolve(0);
+    }
+  });
+}
+
 /**
  * Recovers live database from snapshot if a previous restore was interrupted by a browser crash or kill.
  */
-export async function recoverIncompleteRestoreIfAny(idbFactory?: IDBFactory): Promise<boolean> {
+export async function recoverIncompleteRestoreIfAny(idbFactory?: IDBFactory): Promise<RecoveryStatus> {
   const marker = await getRestoreJournalMarker(idbFactory);
-  if (!marker) return false;
+  if (!marker) return { state: 'not_required' };
 
   let normalizedStage: RestoreJournalStage = marker.stage;
   if (marker.stage === ('snapshot_ready' as any)) normalizedStage = 'snapshot_verified';
   else if (marker.stage === ('transferring' as any)) normalizedStage = 'commit_started';
-  else if (marker.stage === ('verifying' as any)) normalizedStage = 'commit_completed';
+  else if (marker.stage === ('commit_completed' as any)) normalizedStage = 'commit_verified';
   else if (marker.stage === ('rolling_back' as any)) normalizedStage = 'rollback_in_progress';
 
   // If restore was interrupted BEFORE liveDb was modified, liveDb is 100% intact!
   if (
     normalizedStage === 'idle' ||
     normalizedStage === 'preparing_snapshot' ||
-    normalizedStage === 'snapshot_verified'
+    normalizedStage === 'snapshot_verified' ||
+    normalizedStage === 'completed'
   ) {
     console.info(`[Crash Recovery] Interrupted restore was in safe stage "${normalizedStage}". Live database was untouched. Cleaning temporary markers...`);
     await setRestoreJournalMarker(null, idbFactory);
@@ -342,48 +374,72 @@ export async function recoverIncompleteRestoreIfAny(idbFactory?: IDBFactory): Pr
       closeExtensionDatabase(idbFactory, marker.stagingDbName);
       await deleteExtensionDatabase(idbFactory, marker.stagingDbName);
     } catch {}
-    return false;
+    return { state: 'not_required' };
   }
 
-  let lock: RestoreLockHandle | null = null;
+  const startTime = Date.now();
+
   try {
-    lock = await acquireRestoreLock('recovery', 5000);
-  } catch (lockErr) {
-    console.warn('[Crash Recovery] Recovery lock could not be acquired (another context active):', lockErr);
-    return false;
-  }
+    return await withExclusiveRestoreLock('recovery', async (): Promise<RecoveryStatus> => {
+      console.warn(`[Crash Recovery] Detected unfinished restore from crash (stage: ${normalizedStage}, started: ${marker.timestamp}). Recovering live database...`);
 
-  console.warn(`[Crash Recovery] Detected unfinished restore from crash (stage: ${normalizedStage}, started: ${marker.timestamp}). Recovering live database...`);
-
-  let snapshotDb: IDBDatabase | null = null;
-  let liveDb: IDBDatabase | null = null;
-  try {
-    snapshotDb = await openExistingSnapshotWithoutCreating(idbFactory, marker.snapshotDbName);
-    if (!snapshotDb) {
-      console.error(
-        `[Crash Recovery] CRITICAL ERROR: Snapshot database "${marker.snapshotDbName}" does not exist or has invalid schema! ` +
-        `Refusing to touch live database "${marker.liveDbName}" to prevent data destruction.`
-      );
-      return false;
-    }
-
-    liveDb = await openExtensionDatabase(idbFactory, marker.liveDbName);
-
-    if (normalizedStage === 'commit_completed') {
-      let hasData = false;
+      let snapshotDb: IDBDatabase | null = null;
+      let liveDb: IDBDatabase | null = null;
       try {
-        const tx = liveDb.transaction(STORE_CONVERSATIONS, 'readonly');
-        const count = await new Promise<number>((res, rej) => {
-          const req = tx.objectStore(STORE_CONVERSATIONS).count();
-          req.onsuccess = () => res(req.result);
-          req.onerror = () => rej(req.error);
-        });
-        hasData = count > 0;
-      } catch {}
+        snapshotDb = await openExistingSnapshotWithoutCreating(idbFactory, marker.snapshotDbName);
+        if (!snapshotDb) {
+          console.error(
+            `[Crash Recovery] CRITICAL ERROR: Snapshot database "${marker.snapshotDbName}" does not exist or has invalid schema! ` +
+            `Refusing to touch live database "${marker.liveDbName}" to prevent data destruction.`
+          );
+          return {
+            state: 'failed',
+            reason: `Snapshot database "${marker.snapshotDbName}" does not exist or has invalid schema`,
+            snapshotPreserved: false,
+          };
+        }
 
-      if (hasData) {
-        const snapMatch = await verifyDatabaseEquality(snapshotDb, liveDb, EIGHT_SNAPSHOT_STORES);
-        if (snapMatch) {
+        // Validate snapshot non-emptiness & authenticity
+        let snapshotTotal = 0;
+        for (const store of EIGHT_SNAPSHOT_STORES) {
+          if (snapshotDb.objectStoreNames.contains(store)) {
+            const count = await getStoreRecordCount(snapshotDb, store);
+            snapshotTotal += count;
+          }
+        }
+
+        let expectedTotal = 0;
+        if (marker.expectedCounts) {
+          for (const k of Object.keys(marker.expectedCounts)) {
+            expectedTotal += (marker.expectedCounts as any)[k] || 0;
+          }
+        }
+
+        liveDb = await openExtensionDatabase(idbFactory, marker.liveDbName);
+        let liveTotal = 0;
+        for (const store of SIX_DURABLE_STORES) {
+          if (liveDb.objectStoreNames.contains(store)) {
+            const count = await getStoreRecordCount(liveDb, store);
+            liveTotal += count;
+          }
+        }
+
+        // If snapshot has 0 records but expected data > 0 OR liveDb had records:
+        if (snapshotTotal === 0 && (expectedTotal > 0 || liveTotal > 0)) {
+          console.error(
+            `[Crash Recovery] CRITICAL ERROR: Snapshot database "${marker.snapshotDbName}" has 0 records while data was expected! ` +
+            `Refusing to touch live database "${marker.liveDbName}" to prevent data destruction.`
+          );
+          return {
+            state: 'failed',
+            reason: `Snapshot database "${marker.snapshotDbName}" has 0 records while data was expected`,
+            snapshotPreserved: true,
+          };
+        }
+
+        // If commit was already verified before crash, retain the verified live data
+        if (normalizedStage === 'commit_verified' || normalizedStage === 'cleanup_pending') {
+          console.info(`[Crash Recovery] Commit was already verified before crash (stage: ${normalizedStage}). Completing cleanup without rollback...`);
           await setRestoreJournalMarker(null, idbFactory);
           if (snapshotDb) {
             try { snapshotDb.close(); } catch {}
@@ -393,60 +449,81 @@ export async function recoverIncompleteRestoreIfAny(idbFactory?: IDBFactory): Pr
           await deleteExtensionDatabase(idbFactory, marker.snapshotDbName);
           closeExtensionDatabase(idbFactory, marker.stagingDbName);
           await deleteExtensionDatabase(idbFactory, marker.stagingDbName);
-          return true;
+
+          return {
+            state: 'recovered',
+            durationMs: Date.now() - startTime,
+            details: 'Commit was verified before crash. Completed temporary database cleanup without rollback.',
+          };
+        }
+
+        // Unverified stage: rollback to snapshot
+        await setRestoreJournalMarker({
+          ...marker,
+          stage: 'rollback_in_progress',
+        }, idbFactory);
+
+        const storesToClear = (ALL_NINE_STORES as unknown as string[]).filter((s) => liveDb!.objectStoreNames.contains(s));
+        await new Promise<void>((resolve, reject) => {
+          const tx = liveDb!.transaction(storesToClear, 'readwrite');
+          tx.oncomplete = () => resolve();
+          tx.onabort = () => reject(tx.error || new Error('Live DB clear aborted during recovery'));
+          tx.onerror = () => reject(tx.error || new Error('Live DB clear error during recovery'));
+          for (const store of storesToClear) {
+            tx.objectStore(store).clear();
+          }
+        });
+
+        for (const store of EIGHT_SNAPSHOT_STORES) {
+          if (snapshotDb.objectStoreNames.contains(store) && liveDb.objectStoreNames.contains(store)) {
+            await copyStoreRecords(snapshotDb, liveDb, store, false);
+          }
+        }
+
+        const verified = await verifyDatabaseEquality(snapshotDb, liveDb, EIGHT_SNAPSHOT_STORES);
+        if (!verified) {
+          return {
+            state: 'failed',
+            reason: 'Crash recovery verification mismatch between snapshot and restored live database.',
+            snapshotPreserved: true,
+          };
+        }
+
+        await setRestoreJournalMarker(null, idbFactory);
+        if (snapshotDb) {
+          try { snapshotDb.close(); } catch {}
+          snapshotDb = null;
+        }
+        closeExtensionDatabase(idbFactory, marker.snapshotDbName);
+        await deleteExtensionDatabase(idbFactory, marker.snapshotDbName);
+        closeExtensionDatabase(idbFactory, marker.stagingDbName);
+        await deleteExtensionDatabase(idbFactory, marker.stagingDbName);
+
+        console.info('[Crash Recovery] Live database successfully recovered and verified from snapshot.');
+        return {
+          state: 'recovered',
+          durationMs: Date.now() - startTime,
+          details: 'Live database safely rolled back and verified from pre-crash snapshot.',
+        };
+      } catch (err: any) {
+        console.error('[Crash Recovery] Failed to recover from crash snapshot:', err);
+        return {
+          state: 'failed',
+          reason: err?.message || 'Unknown error during crash recovery',
+          snapshotPreserved: true,
+        };
+      } finally {
+        if (snapshotDb) {
+          try { snapshotDb.close(); } catch {}
         }
       }
-    }
-
-    await setRestoreJournalMarker({
-      ...marker,
-      stage: 'rollback_in_progress',
-    }, idbFactory);
-
-    const storesToClear = (ALL_NINE_STORES as unknown as string[]).filter((s) => liveDb!.objectStoreNames.contains(s));
-    await new Promise<void>((resolve, reject) => {
-      const tx = liveDb!.transaction(storesToClear, 'readwrite');
-      tx.oncomplete = () => resolve();
-      tx.onabort = () => reject(tx.error || new Error('Live DB clear aborted during recovery'));
-      tx.onerror = () => reject(tx.error || new Error('Live DB clear error during recovery'));
-      for (const store of storesToClear) {
-        tx.objectStore(store).clear();
-      }
-    });
-
-    for (const store of EIGHT_SNAPSHOT_STORES) {
-      if (snapshotDb.objectStoreNames.contains(store) && liveDb.objectStoreNames.contains(store)) {
-        await copyStoreRecords(snapshotDb, liveDb, store, false);
-      }
-    }
-
-    const verified = await verifyDatabaseEquality(snapshotDb, liveDb, EIGHT_SNAPSHOT_STORES);
-    if (!verified) {
-      throw new Error('Crash recovery verification mismatch between snapshot and restored live database.');
-    }
-
-    await setRestoreJournalMarker(null, idbFactory);
-    if (snapshotDb) {
-      try { snapshotDb.close(); } catch {}
-      snapshotDb = null;
-    }
-    closeExtensionDatabase(idbFactory, marker.snapshotDbName);
-    await deleteExtensionDatabase(idbFactory, marker.snapshotDbName);
-    closeExtensionDatabase(idbFactory, marker.stagingDbName);
-    await deleteExtensionDatabase(idbFactory, marker.stagingDbName);
-
-    console.info('[Crash Recovery] Live database successfully recovered and verified from snapshot.');
-    return true;
-  } catch (err) {
-    console.error('[Crash Recovery] Failed to recover from crash snapshot:', err);
-    return false;
-  } finally {
-    if (snapshotDb) {
-      try { snapshotDb.close(); } catch {}
-    }
-    if (lock) {
-      try { await lock.release(); } catch {}
-    }
+    }, 10_000);
+  } catch (lockErr: any) {
+    console.warn('[Crash Recovery] Recovery lock could not be acquired (another context active):', lockErr);
+    return {
+      state: 'blocked',
+      reason: lockErr?.message || 'Recovery lock could not be acquired',
+    };
   }
 }
 
@@ -1063,214 +1140,311 @@ export async function commitStagingReplaceToLive(
     throw new Error('Another restore operation is already in progress.');
   }
   activeRestoreLock = true;
-  let lock: RestoreLockHandle | null = null;
-
-  const startTime = Date.now();
-  const operationId = `replace-${startTime}-${Math.random().toString(36).slice(2, 7)}`;
-  let snapshotDb: IDBDatabase | null = null;
-  let snapshotCreated = false;
 
   try {
-    lock = await acquireRestoreLock('replace');
-    // Step 1: Create rollback snapshot covering all 8 persistent stores
-    await setRestoreJournalMarker({
-      type: 'replace',
-      stage: 'preparing_snapshot',
-      liveDbName: liveDb.name,
-      snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
-      stagingDbName: RESTORE_STAGING_DB_NAME,
-      timestamp: Date.now(),
-      operationId,
-      expectedCounts,
-    }, idbFactory);
+    return await withExclusiveRestoreLock('replace', async (): Promise<RestoreResult> => {
+      const startTime = Date.now();
+      const operationId = `replace-${startTime}-${Math.random().toString(36).slice(2, 7)}`;
+      let snapshotDb: IDBDatabase | null = null;
+      let snapshotCreated = false;
 
-    await deleteExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
-    snapshotDb = await openExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
-
-    for (const store of EIGHT_SNAPSHOT_STORES) {
-      if (liveDb.objectStoreNames.contains(store)) {
-        await copyStoreRecords(liveDb, snapshotDb, store, false);
+      // Calculate initial store counts of liveDb for snapshot verification
+      const snapshotCounts: Record<string, number> = {};
+      for (const store of EIGHT_SNAPSHOT_STORES) {
+        if (liveDb.objectStoreNames.contains(store)) {
+          snapshotCounts[store] = await getStoreRecordCount(liveDb, store);
+        }
       }
-    }
 
-    await triggerInterruptionPoint('after_snapshot_created');
-
-    // Deep-verify snapshot before clearing live database
-    const snapVerified = await verifyDatabaseEquality(liveDb, snapshotDb, EIGHT_SNAPSHOT_STORES);
-    if (!snapVerified) {
-      throw new Error('Pre-restore snapshot verification failed. Aborting to protect existing archive.');
-    }
-    snapshotCreated = true;
-
-    // Persist crash recovery marker
-    await setRestoreJournalMarker({
-      type: 'replace',
-      stage: 'snapshot_verified',
-      liveDbName: liveDb.name,
-      snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
-      stagingDbName: RESTORE_STAGING_DB_NAME,
-      timestamp: Date.now(),
-      operationId,
-      expectedCounts,
-    }, idbFactory);
-
-    await triggerInterruptionPoint('after_journal_persisted');
-
-    // Transition to commit_started
-    await setRestoreJournalMarker({
-      type: 'replace',
-      stage: 'commit_started',
-      liveDbName: liveDb.name,
-      snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
-      stagingDbName: RESTORE_STAGING_DB_NAME,
-      timestamp: Date.now(),
-      operationId,
-      expectedCounts,
-    }, idbFactory);
-
-    // Step 2: Clear live database
-    try {
-      const storesToClear = (ALL_NINE_STORES as unknown as string[]).filter((s) => liveDb.objectStoreNames.contains(s));
-      if (storesToClear.length > 0) {
-        await new Promise<void>((resolve, reject) => {
-          let tx: IDBTransaction;
-          try {
-            tx = createDurableWriteTransaction(liveDb, storesToClear, 'strict');
-          } catch (err) {
-            return reject(err);
-          }
-          tx.onabort = () => reject(tx.error || new Error('Transaction aborted'));
-          tx.onerror = () => reject(tx.error || new Error('Transaction error'));
-          tx.oncomplete = () => resolve();
-
-          for (const storeName of storesToClear) {
-            tx.objectStore(storeName).clear();
-          }
-        });
-      }
-    } catch (clearErr) {
-      throw new Error(`Failed to clear live database for replace: ${(clearErr as Error).message}`);
-    }
-
-    await triggerInterruptionPoint('after_live_db_cleared');
-
-    // Step 3: Copy from stagingDb to liveDb store-by-store in batches
-    const insertedCounts: PortableBackupStoreCounts = {
-      conversations: 0,
-      messages: 0,
-      revisions: 0,
-      recovery_events: 0,
-      raw_streams: 0,
-      raw_stream_batches: 0,
-    };
-    const insertedCountsMap = insertedCounts as Record<IncludedBackupStoreName, number>;
-    const expectedCountsMap = expectedCounts as Record<IncludedBackupStoreName, number>;
-
-    let transferError: Error | null = null;
-    let batchIndex = 0;
-    for (let sIdx = 0; sIdx < SIX_DURABLE_STORES.length; sIdx++) {
-      const store = SIX_DURABLE_STORES[sIdx];
-      if (!store) continue;
       try {
-        const c = await copyStoreRecords(stagingDb, liveDb, store, true);
-        insertedCountsMap[store] = c;
-        batchIndex++;
-        if (batchIndex === 1) {
-          await triggerInterruptionPoint('after_first_batch');
-        }
-        if (sIdx === Math.floor(SIX_DURABLE_STORES.length / 2)) {
-          await triggerInterruptionPoint('mid_transfer');
-        }
-      } catch (err) {
-        transferError = err as Error;
-        break;
-      }
-    }
-
-    await setRestoreJournalMarker({
-      type: 'replace',
-      stage: 'commit_completed',
-      liveDbName: liveDb.name,
-      snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
-      stagingDbName: RESTORE_STAGING_DB_NAME,
-      timestamp: Date.now(),
-      operationId,
-      expectedCounts,
-    }, idbFactory);
-
-    await triggerInterruptionPoint('after_full_transfer');
-
-    // Step 4: Verify post-commit store counts and deep equality
-    let verified = transferError === null;
-    if (verified) {
-      for (const store of SIX_DURABLE_STORES) {
-        if (insertedCountsMap[store] !== expectedCountsMap[store]) {
-          verified = false;
-          transferError = new Error(
-            `Store count mismatch in "${store}": expected ${expectedCountsMap[store]}, got ${insertedCountsMap[store]}`
-          );
-          break;
-        }
-      }
-    }
-
-    if (verified) {
-      const deepMatch = await verifyDatabaseEquality(stagingDb, liveDb, SIX_DURABLE_STORES);
-      if (!deepMatch) {
-        verified = false;
-        transferError = new Error('Post-replace deep content verification mismatch between staging and live databases.');
-      }
-    }
-
-    if (!verified) {
-      // ROLLBACK GUARD: Restore liveDb from snapshotDb!
-      console.error(`[Staging Replace] Transfer failed or verification failed (${transferError?.message}). Executing rollback snapshot...`);
-      let rollbackSucceeded = false;
-      try {
+        // Step 1: Create rollback snapshot covering all 8 persistent stores
         await setRestoreJournalMarker({
           type: 'replace',
-          stage: 'rollback_in_progress',
+          stage: 'preparing_snapshot',
           liveDbName: liveDb.name,
           snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
           stagingDbName: RESTORE_STAGING_DB_NAME,
           timestamp: Date.now(),
           operationId,
           expectedCounts,
+          snapshotCounts,
         }, idbFactory);
 
-        await new Promise<void>((resolve, reject) => {
-          const tx = liveDb.transaction(ALL_NINE_STORES as unknown as string[], 'readwrite');
-          for (const storeName of ALL_NINE_STORES) {
-            if (liveDb.objectStoreNames.contains(storeName)) {
-              tx.objectStore(storeName).clear();
-            }
-          }
-          tx.oncomplete = () => resolve();
-          tx.onabort = () => reject(tx.error || new Error('Rollback clear transaction aborted'));
-          tx.onerror = () => reject(tx.error || new Error('Rollback clear transaction error'));
-        });
+        await deleteExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
+        snapshotDb = await openExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
 
         for (const store of EIGHT_SNAPSHOT_STORES) {
-          if (liveDb.objectStoreNames.contains(store) && snapshotDb.objectStoreNames.contains(store)) {
-            await copyStoreRecords(snapshotDb, liveDb, store, false);
+          if (liveDb.objectStoreNames.contains(store)) {
+            await copyStoreRecords(liveDb, snapshotDb, store, false);
           }
         }
 
-        rollbackSucceeded = await verifyDatabaseEquality(snapshotDb, liveDb, EIGHT_SNAPSHOT_STORES);
-      } catch (rollbackErr) {
-        console.error('[Staging Replace] Rollback snapshot encountered error:', rollbackErr);
-        rollbackSucceeded = false;
-      }
+        await triggerInterruptionPoint('after_snapshot_created');
 
-      if (rollbackSucceeded) {
+        // Deep-verify snapshot before clearing live database
+        const snapVerified = await verifyDatabaseEquality(liveDb, snapshotDb, EIGHT_SNAPSHOT_STORES);
+        if (!snapVerified) {
+          throw new Error('Pre-restore snapshot verification failed. Aborting to protect existing archive.');
+        }
+        snapshotCreated = true;
+
+        // Persist crash recovery marker
+        await setRestoreJournalMarker({
+          type: 'replace',
+          stage: 'snapshot_verified',
+          liveDbName: liveDb.name,
+          snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
+          stagingDbName: RESTORE_STAGING_DB_NAME,
+          timestamp: Date.now(),
+          operationId,
+          expectedCounts,
+          snapshotCounts,
+        }, idbFactory);
+
+        await triggerInterruptionPoint('after_journal_persisted');
+
+        // Transition to commit_started
+        await setRestoreJournalMarker({
+          type: 'replace',
+          stage: 'commit_started',
+          liveDbName: liveDb.name,
+          snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
+          stagingDbName: RESTORE_STAGING_DB_NAME,
+          timestamp: Date.now(),
+          operationId,
+          expectedCounts,
+          snapshotCounts,
+        }, idbFactory);
+
+        // Step 2: Clear live database
+        try {
+          const storesToClear = (ALL_NINE_STORES as unknown as string[]).filter((s) => liveDb.objectStoreNames.contains(s));
+          if (storesToClear.length > 0) {
+            await new Promise<void>((resolve, reject) => {
+              let tx: IDBTransaction;
+              try {
+                tx = createDurableWriteTransaction(liveDb, storesToClear, 'strict');
+              } catch (err) {
+                return reject(err);
+              }
+              tx.onabort = () => reject(tx.error || new Error('Transaction aborted'));
+              tx.onerror = () => reject(tx.error || new Error('Transaction error'));
+              tx.oncomplete = () => resolve();
+
+              for (const storeName of storesToClear) {
+                tx.objectStore(storeName).clear();
+              }
+            });
+          }
+        } catch (clearErr) {
+          throw new Error(`Failed to clear live database for replace: ${(clearErr as Error).message}`);
+        }
+
+        await triggerInterruptionPoint('after_live_db_cleared');
+
+        // Step 3: Copy from stagingDb to liveDb store-by-store in batches
+        const insertedCounts: PortableBackupStoreCounts = {
+          conversations: 0,
+          messages: 0,
+          revisions: 0,
+          recovery_events: 0,
+          raw_streams: 0,
+          raw_stream_batches: 0,
+        };
+        const insertedCountsMap = insertedCounts as Record<IncludedBackupStoreName, number>;
+        const expectedCountsMap = expectedCounts as Record<IncludedBackupStoreName, number>;
+
+        let transferError: Error | null = null;
+        let batchIndex = 0;
+        for (let sIdx = 0; sIdx < SIX_DURABLE_STORES.length; sIdx++) {
+          const store = SIX_DURABLE_STORES[sIdx];
+          if (!store) continue;
+          try {
+            const c = await copyStoreRecords(stagingDb, liveDb, store, true);
+            insertedCountsMap[store] = c;
+            batchIndex++;
+            if (batchIndex === 1) {
+              await triggerInterruptionPoint('after_first_batch');
+            }
+            if (sIdx === Math.floor(SIX_DURABLE_STORES.length / 2)) {
+              await triggerInterruptionPoint('mid_transfer');
+            }
+          } catch (err) {
+            transferError = err as Error;
+            break;
+          }
+        }
+
+        await setRestoreJournalMarker({
+          type: 'replace',
+          stage: 'transfer_completed',
+          liveDbName: liveDb.name,
+          snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
+          stagingDbName: RESTORE_STAGING_DB_NAME,
+          timestamp: Date.now(),
+          operationId,
+          expectedCounts,
+          snapshotCounts,
+        }, idbFactory);
+
+        await triggerInterruptionPoint('after_full_transfer');
+
+        // Step 4: Verify post-commit store counts and deep equality
+        await setRestoreJournalMarker({
+          type: 'replace',
+          stage: 'verifying',
+          liveDbName: liveDb.name,
+          snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
+          stagingDbName: RESTORE_STAGING_DB_NAME,
+          timestamp: Date.now(),
+          operationId,
+          expectedCounts,
+          snapshotCounts,
+        }, idbFactory);
+
+        let verified = transferError === null;
+        if (verified) {
+          for (const store of SIX_DURABLE_STORES) {
+            if (insertedCountsMap[store] !== expectedCountsMap[store]) {
+              verified = false;
+              transferError = new Error(
+                `Store count mismatch in "${store}": expected ${expectedCountsMap[store]}, got ${insertedCountsMap[store]}`
+              );
+              break;
+            }
+          }
+        }
+
+        if (verified) {
+          const deepMatch = await verifyDatabaseEquality(stagingDb, liveDb, SIX_DURABLE_STORES);
+          if (!deepMatch) {
+            verified = false;
+            transferError = new Error('Post-replace deep content verification mismatch between staging and live databases.');
+          }
+        }
+
+        if (!verified) {
+          // ROLLBACK GUARD: Restore liveDb from snapshotDb!
+          console.error(`[Staging Replace] Transfer failed or verification failed (${transferError?.message}). Executing rollback snapshot...`);
+          let rollbackSucceeded = false;
+          try {
+            await setRestoreJournalMarker({
+              type: 'replace',
+              stage: 'rollback_in_progress',
+              liveDbName: liveDb.name,
+              snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
+              stagingDbName: RESTORE_STAGING_DB_NAME,
+              timestamp: Date.now(),
+              operationId,
+              expectedCounts,
+              snapshotCounts,
+            }, idbFactory);
+
+            await new Promise<void>((resolve, reject) => {
+              const tx = liveDb.transaction(ALL_NINE_STORES as unknown as string[], 'readwrite');
+              for (const storeName of ALL_NINE_STORES) {
+                if (liveDb.objectStoreNames.contains(storeName)) {
+                  tx.objectStore(storeName).clear();
+                }
+              }
+              tx.oncomplete = () => resolve();
+              tx.onabort = () => reject(tx.error || new Error('Rollback clear transaction aborted'));
+              tx.onerror = () => reject(tx.error || new Error('Rollback clear transaction error'));
+            });
+
+            for (const store of EIGHT_SNAPSHOT_STORES) {
+              if (liveDb.objectStoreNames.contains(store) && snapshotDb.objectStoreNames.contains(store)) {
+                await copyStoreRecords(snapshotDb, liveDb, store, false);
+              }
+            }
+
+            rollbackSucceeded = await verifyDatabaseEquality(snapshotDb, liveDb, EIGHT_SNAPSHOT_STORES);
+          } catch (rollbackErr) {
+            console.error('[Staging Replace] Rollback snapshot encountered error:', rollbackErr);
+            rollbackSucceeded = false;
+          }
+
+          if (rollbackSucceeded) {
+            await setRestoreJournalMarker(null, idbFactory);
+            closeExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
+            await deleteExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
+            closeExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME);
+            await deleteExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME);
+
+            return {
+              success: false,
+              mode: 'replace',
+              insertedCounts,
+              skippedCounts: {
+                conversations: 0,
+                messages: 0,
+                revisions: 0,
+                recovery_events: 0,
+                raw_streams: 0,
+                raw_stream_batches: 0,
+              },
+              verified: false,
+              durationMs: Date.now() - startTime,
+              error: `Restore aborted and rolled back: ${transferError?.message || 'Verification failed'}`,
+            };
+          } else {
+            console.error('[Staging Replace] Rollback failed! Snapshot preserved for emergency recovery.');
+            return {
+              success: false,
+              mode: 'replace',
+              insertedCounts,
+              skippedCounts: {
+                conversations: 0,
+                messages: 0,
+                revisions: 0,
+                recovery_events: 0,
+                raw_streams: 0,
+                raw_stream_batches: 0,
+              },
+              verified: false,
+              durationMs: Date.now() - startTime,
+              error: `Rollback verification failed! Your original database is preserved in snapshot "${RESTORE_SNAPSHOT_DB_NAME}".`,
+            };
+          }
+        }
+
+        // Step 5: Success! Set commit_verified then cleanup_pending
+        await setRestoreJournalMarker({
+          type: 'replace',
+          stage: 'commit_verified',
+          liveDbName: liveDb.name,
+          snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
+          stagingDbName: RESTORE_STAGING_DB_NAME,
+          timestamp: Date.now(),
+          operationId,
+          expectedCounts,
+          snapshotCounts,
+        }, idbFactory);
+
+        await setRestoreJournalMarker({
+          type: 'replace',
+          stage: 'cleanup_pending',
+          liveDbName: liveDb.name,
+          snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
+          stagingDbName: RESTORE_STAGING_DB_NAME,
+          timestamp: Date.now(),
+          operationId,
+          expectedCounts,
+          snapshotCounts,
+        }, idbFactory);
+
+        await triggerInterruptionPoint('before_journal_deletion');
         await setRestoreJournalMarker(null, idbFactory);
+        await triggerInterruptionPoint('after_journal_deletion');
+
+        await triggerInterruptionPoint('before_snapshot_deletion');
         closeExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
         await deleteExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
         closeExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME);
         await deleteExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME);
 
         return {
-          success: false,
+          success: true,
           mode: 'replace',
           insertedCounts,
           skippedCounts: {
@@ -1281,96 +1455,47 @@ export async function commitStagingReplaceToLive(
             raw_streams: 0,
             raw_stream_batches: 0,
           },
-          verified: false,
+          verified: true,
           durationMs: Date.now() - startTime,
-          error: `Restore aborted and rolled back: ${transferError?.message || 'Verification failed'}`,
         };
-      } else {
-        console.error('[Staging Replace] Rollback failed! Snapshot preserved for emergency recovery.');
-        return {
-          success: false,
-          mode: 'replace',
-          insertedCounts,
-          skippedCounts: {
-            conversations: 0,
-            messages: 0,
-            revisions: 0,
-            recovery_events: 0,
-            raw_streams: 0,
-            raw_stream_batches: 0,
-          },
-          verified: false,
-          durationMs: Date.now() - startTime,
-          error: `Rollback verification failed! Your original database is preserved in snapshot "${RESTORE_SNAPSHOT_DB_NAME}".`,
-        };
-      }
-    }
+      } catch (err) {
+        if (snapshotCreated && snapshotDb) {
+          try {
+            await new Promise<void>((resolve, reject) => {
+              const tx = liveDb.transaction(ALL_NINE_STORES as unknown as string[], 'readwrite');
+              for (const s of ALL_NINE_STORES) {
+                if (liveDb.objectStoreNames.contains(s)) {
+                  tx.objectStore(s).clear();
+                }
+              }
+              tx.oncomplete = () => resolve();
+              tx.onabort = () => reject(tx.error || new Error('Emergency rollback clear aborted'));
+              tx.onerror = () => reject(tx.error || new Error('Emergency rollback clear error'));
+            });
 
-    // Step 5: Success! Clean up temporary databases
-    await triggerInterruptionPoint('before_journal_deletion');
-    await setRestoreJournalMarker(null, idbFactory);
-    await triggerInterruptionPoint('after_journal_deletion');
-
-    await triggerInterruptionPoint('before_snapshot_deletion');
-    closeExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
-    await deleteExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
-    closeExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME);
-    await deleteExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME);
-
-    return {
-      success: true,
-      mode: 'replace',
-      insertedCounts,
-      skippedCounts: {
-        conversations: 0,
-        messages: 0,
-        revisions: 0,
-        recovery_events: 0,
-        raw_streams: 0,
-        raw_stream_batches: 0,
-      },
-      verified: true,
-      durationMs: Date.now() - startTime,
-    };
-  } catch (err) {
-    if (snapshotCreated && snapshotDb) {
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const tx = liveDb.transaction(ALL_NINE_STORES as unknown as string[], 'readwrite');
-          for (const s of ALL_NINE_STORES) {
-            if (liveDb.objectStoreNames.contains(s)) {
-              tx.objectStore(s).clear();
+            for (const store of EIGHT_SNAPSHOT_STORES) {
+              if (liveDb.objectStoreNames.contains(store) && snapshotDb.objectStoreNames.contains(store)) {
+                await copyStoreRecords(snapshotDb, liveDb, store, false);
+              }
             }
-          }
-          tx.oncomplete = () => resolve();
-          tx.onabort = () => reject(tx.error || new Error('Emergency rollback clear aborted'));
-          tx.onerror = () => reject(tx.error || new Error('Emergency rollback clear error'));
-        });
 
-        for (const store of EIGHT_SNAPSHOT_STORES) {
-          if (liveDb.objectStoreNames.contains(store) && snapshotDb.objectStoreNames.contains(store)) {
-            await copyStoreRecords(snapshotDb, liveDb, store, false);
+            const rollbackVerified = await verifyDatabaseEquality(snapshotDb, liveDb, EIGHT_SNAPSHOT_STORES);
+            if (rollbackVerified) {
+              await setRestoreJournalMarker(null, idbFactory);
+              closeExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
+              await deleteExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
+              closeExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME);
+              await deleteExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME);
+            }
+          } catch (rErr) {
+            console.error('[Staging Replace] Error in emergency rollback:', rErr);
           }
         }
-
-        const rollbackVerified = await verifyDatabaseEquality(snapshotDb, liveDb, EIGHT_SNAPSHOT_STORES);
-        if (rollbackVerified) {
-          await setRestoreJournalMarker(null, idbFactory);
-          closeExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
-          await deleteExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
-          closeExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME);
-          await deleteExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME);
-        }
-      } catch (rErr) {
-        console.error('[Staging Replace] Error in emergency rollback:', rErr);
+        throw err;
       }
-    }
-    throw err;
+    });
   } finally {
     activeRestoreLock = false;
-    if (lock) {
-      await lock.release();
-    }
   }
 }
 
@@ -1388,230 +1513,259 @@ export async function commitStagingMergeToLive(
     throw new Error('Another restore operation is already in progress.');
   }
   activeRestoreLock = true;
-  let lock: RestoreLockHandle | null = null;
-
-  const startTime = Date.now();
-  const operationId = `merge-${startTime}-${Math.random().toString(36).slice(2, 7)}`;
-  let snapshotDb: IDBDatabase | null = null;
-  let snapshotCreated = false;
 
   try {
-    lock = await acquireRestoreLock('merge');
-    if (!plan.valid || plan.conflicts.length > 0) {
-      throw new Error(`Merge conflict detected: ${plan.conflicts.map((c) => c.message).join('; ')}`);
-    }
+    return await withExclusiveRestoreLock('merge', async (): Promise<RestoreResult> => {
+      const startTime = Date.now();
+      const operationId = `merge-${startTime}-${Math.random().toString(36).slice(2, 7)}`;
+      let snapshotDb: IDBDatabase | null = null;
+      let snapshotCreated = false;
 
-    const stagingDb = customStagingDb || (await openExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME));
+      try {
+        if (!plan.valid || plan.conflicts.length > 0) {
+          throw new Error(`Merge conflict detected: ${plan.conflicts.map((c) => c.message).join('; ')}`);
+        }
 
-    // Step 1: Re-check conflicts immediately before applying to account for concurrent live changes
-    const recheckPlan = await buildRestorePlanFromStaging(liveDb, stagingDb, 'merge', plan.toInsertCounts || {
-      conversations: 0,
-      messages: 0,
-      revisions: 0,
-      recovery_events: 0,
-      raw_streams: 0,
-      raw_stream_batches: 0,
-    });
-    if (!recheckPlan.valid || recheckPlan.conflicts.length > 0) {
-      throw new Error(
-        `Merge aborted: database was modified concurrently since preflight. Conflicts: ${recheckPlan.conflicts.map((c) => c.message).join('; ')}`
-      );
-    }
+        const stagingDb = customStagingDb || (await openExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME));
 
-    // Step 2: Create pre-merge rollback snapshot of all 8 persistent stores
-    await setRestoreJournalMarker({
-      type: 'merge',
-      stage: 'preparing_snapshot',
-      liveDbName: liveDb.name,
-      snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
-      stagingDbName: RESTORE_STAGING_DB_NAME,
-      timestamp: Date.now(),
-      operationId,
-    }, idbFactory);
+        // Step 1: Re-check conflicts immediately before applying to account for concurrent live changes
+        const recheckPlan = await buildRestorePlanFromStaging(liveDb, stagingDb, 'merge', plan.toInsertCounts || {
+          conversations: 0,
+          messages: 0,
+          revisions: 0,
+          recovery_events: 0,
+          raw_streams: 0,
+          raw_stream_batches: 0,
+        });
+        if (!recheckPlan.valid || recheckPlan.conflicts.length > 0) {
+          throw new Error(
+            `Merge aborted: database was modified concurrently since preflight. Conflicts: ${recheckPlan.conflicts.map((c) => c.message).join('; ')}`
+          );
+        }
 
-    await deleteExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
-    snapshotDb = await openExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
-    for (const store of EIGHT_SNAPSHOT_STORES) {
-      if (liveDb.objectStoreNames.contains(store)) {
-        await copyStoreRecords(liveDb, snapshotDb, store, false);
-      }
-    }
+        // Step 2: Create pre-merge rollback snapshot of all 8 persistent stores
+        await setRestoreJournalMarker({
+          type: 'merge',
+          stage: 'preparing_snapshot',
+          liveDbName: liveDb.name,
+          snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
+          stagingDbName: RESTORE_STAGING_DB_NAME,
+          timestamp: Date.now(),
+          operationId,
+        }, idbFactory);
 
-    await triggerInterruptionPoint('after_snapshot_created');
-
-    const snapVerified = await verifyDatabaseEquality(liveDb, snapshotDb, EIGHT_SNAPSHOT_STORES);
-    if (!snapVerified) {
-      throw new Error('Pre-merge rollback snapshot verification failed.');
-    }
-    snapshotCreated = true;
-
-    // Persist crash-recovery marker
-    await setRestoreJournalMarker({
-      type: 'merge',
-      stage: 'snapshot_verified',
-      liveDbName: liveDb.name,
-      snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
-      stagingDbName: RESTORE_STAGING_DB_NAME,
-      timestamp: Date.now(),
-      operationId,
-    }, idbFactory);
-
-    await triggerInterruptionPoint('after_journal_persisted');
-
-    await setRestoreJournalMarker({
-      type: 'merge',
-      stage: 'commit_started',
-      liveDbName: liveDb.name,
-      snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
-      stagingDbName: RESTORE_STAGING_DB_NAME,
-      timestamp: Date.now(),
-      operationId,
-    }, idbFactory);
-
-    // Step 3: Stream non-conflicting records from stagingDb into liveDb in batches
-    const insertedCounts: PortableBackupStoreCounts = {
-      conversations: 0,
-      messages: 0,
-      revisions: 0,
-      recovery_events: 0,
-      raw_streams: 0,
-      raw_stream_batches: 0,
-    };
-    const insertedCountsMap = insertedCounts as Record<IncludedBackupStoreName, number>;
-
-    let batchCount = 0;
-    for (let sIdx = 0; sIdx < SIX_DURABLE_STORES.length; sIdx++) {
-      const store = SIX_DURABLE_STORES[sIdx];
-      if (!store) continue;
-      let lastKey: IDBValidKey | null = null;
-      while (true) {
-        const batch = await fetchStoreBatch(stagingDb, store, lastKey, BATCH_SIZE);
-        if (batch.length === 0) break;
-        lastKey = batch[batch.length - 1]!.key;
-
-        await new Promise<void>((resolve, reject) => {
-          let tx: IDBTransaction;
-          try {
-            tx = createDurableWriteTransaction(liveDb, store, 'strict');
-          } catch (err) {
-            return reject(err);
+        await deleteExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
+        snapshotDb = await openExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
+        for (const store of EIGHT_SNAPSHOT_STORES) {
+          if (liveDb.objectStoreNames.contains(store)) {
+            await copyStoreRecords(liveDb, snapshotDb, store, false);
           }
-          let hasConflict = false;
-          tx.onabort = () => {
-            if (hasConflict) {
-              reject(new Error(`Merge conflict detected: Concurrent modification on store "${store}".`));
-            } else {
-              reject(tx.error || new Error('Transaction aborted'));
-            }
-          };
-          tx.onerror = () => reject(tx.error || new Error('Transaction error'));
-          tx.oncomplete = () => resolve();
+        }
 
-          const liveStore = tx.objectStore(store);
-          for (const item of batch) {
-            const incoming = item.value;
-            const getReq = liveStore.get(incoming.id);
-            getReq.onsuccess = () => {
-              const existing = getReq.result;
-              if (!existing) {
-                liveStore.put(incoming);
-                insertedCountsMap[store]++;
-              } else {
-                // Key exists: check whether existing is identical or conflicting
-                if (!deepEqualRecords(store, existing, incoming)) {
-                  hasConflict = true;
-                  tx.abort();
+        await triggerInterruptionPoint('after_snapshot_created');
+
+        const snapVerified = await verifyDatabaseEquality(liveDb, snapshotDb, EIGHT_SNAPSHOT_STORES);
+        if (!snapVerified) {
+          throw new Error('Pre-merge rollback snapshot verification failed.');
+        }
+        snapshotCreated = true;
+
+        // Persist crash-recovery marker
+        await setRestoreJournalMarker({
+          type: 'merge',
+          stage: 'snapshot_verified',
+          liveDbName: liveDb.name,
+          snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
+          stagingDbName: RESTORE_STAGING_DB_NAME,
+          timestamp: Date.now(),
+          operationId,
+        }, idbFactory);
+
+        await triggerInterruptionPoint('after_journal_persisted');
+
+        await setRestoreJournalMarker({
+          type: 'merge',
+          stage: 'commit_started',
+          liveDbName: liveDb.name,
+          snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
+          stagingDbName: RESTORE_STAGING_DB_NAME,
+          timestamp: Date.now(),
+          operationId,
+        }, idbFactory);
+
+        // Step 3: Stream non-conflicting records from stagingDb into liveDb in batches
+        const insertedCounts: PortableBackupStoreCounts = {
+          conversations: 0,
+          messages: 0,
+          revisions: 0,
+          recovery_events: 0,
+          raw_streams: 0,
+          raw_stream_batches: 0,
+        };
+        const insertedCountsMap = insertedCounts as Record<IncludedBackupStoreName, number>;
+
+        let batchCount = 0;
+        for (let sIdx = 0; sIdx < SIX_DURABLE_STORES.length; sIdx++) {
+          const store = SIX_DURABLE_STORES[sIdx];
+          if (!store) continue;
+          let lastKey: IDBValidKey | null = null;
+          while (true) {
+            const batch = await fetchStoreBatch(stagingDb, store, lastKey, BATCH_SIZE);
+            if (batch.length === 0) break;
+            lastKey = batch[batch.length - 1]!.key;
+
+            await new Promise<void>((resolve, reject) => {
+              let tx: IDBTransaction;
+              try {
+                tx = createDurableWriteTransaction(liveDb, store, 'strict');
+              } catch (err) {
+                return reject(err);
+              }
+              let hasConflict = false;
+              tx.onabort = () => {
+                if (hasConflict) {
+                  reject(new Error(`Merge conflict detected: Concurrent modification on store "${store}".`));
+                } else {
+                  reject(tx.error || new Error('Transaction aborted'));
+                }
+              };
+              tx.onerror = () => reject(tx.error || new Error('Transaction error'));
+              tx.oncomplete = () => resolve();
+
+              const liveStore = tx.objectStore(store);
+              for (const item of batch) {
+                const incoming = item.value;
+                const getReq = liveStore.get(incoming.id);
+                getReq.onsuccess = () => {
+                  const existing = getReq.result;
+                  if (!existing) {
+                    liveStore.put(incoming);
+                    insertedCountsMap[store]++;
+                  } else {
+                    // Key exists: check whether existing is identical or conflicting
+                    if (!deepEqualRecords(store, existing, incoming)) {
+                      hasConflict = true;
+                      tx.abort();
+                    }
+                  }
+                };
+              }
+            });
+
+            batchCount++;
+            if (batchCount === 1) {
+              await triggerInterruptionPoint('after_first_batch');
+            }
+            if (sIdx === Math.floor(SIX_DURABLE_STORES.length / 2)) {
+              await triggerInterruptionPoint('mid_transfer');
+            }
+
+            if (batch.length < BATCH_SIZE) break;
+          }
+        }
+
+        await setRestoreJournalMarker({
+          type: 'merge',
+          stage: 'transfer_completed',
+          liveDbName: liveDb.name,
+          snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
+          stagingDbName: RESTORE_STAGING_DB_NAME,
+          timestamp: Date.now(),
+          operationId,
+        }, idbFactory);
+
+        await triggerInterruptionPoint('after_full_transfer');
+
+        await setRestoreJournalMarker({
+          type: 'merge',
+          stage: 'verifying',
+          liveDbName: liveDb.name,
+          snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
+          stagingDbName: RESTORE_STAGING_DB_NAME,
+          timestamp: Date.now(),
+          operationId,
+        }, idbFactory);
+
+        await setRestoreJournalMarker({
+          type: 'merge',
+          stage: 'commit_verified',
+          liveDbName: liveDb.name,
+          snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
+          stagingDbName: RESTORE_STAGING_DB_NAME,
+          timestamp: Date.now(),
+          operationId,
+        }, idbFactory);
+
+        await setRestoreJournalMarker({
+          type: 'merge',
+          stage: 'cleanup_pending',
+          liveDbName: liveDb.name,
+          snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
+          stagingDbName: RESTORE_STAGING_DB_NAME,
+          timestamp: Date.now(),
+          operationId,
+        }, idbFactory);
+
+        // Step 4: Success! Clean up marker and temporary databases
+        await triggerInterruptionPoint('before_journal_deletion');
+        await setRestoreJournalMarker(null, idbFactory);
+        await triggerInterruptionPoint('after_journal_deletion');
+
+        await triggerInterruptionPoint('before_snapshot_deletion');
+        closeExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
+        await deleteExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
+        closeExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME);
+        await deleteExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME);
+
+        return {
+          success: true,
+          mode: 'merge',
+          insertedCounts,
+          skippedCounts: { ...plan.toSkip },
+          verified: true,
+          durationMs: Date.now() - startTime,
+        };
+      } catch (err) {
+        console.error('[Staging Merge] Merge encountered error, executing rollback guard:', err);
+        if (snapshotCreated && snapshotDb) {
+          try {
+            await new Promise<void>((resolve, reject) => {
+              const tx = liveDb.transaction(ALL_NINE_STORES as unknown as string[], 'readwrite');
+              for (const s of ALL_NINE_STORES) {
+                if (liveDb.objectStoreNames.contains(s)) {
+                  tx.objectStore(s).clear();
                 }
               }
-            };
-          }
-        });
+              tx.oncomplete = () => resolve();
+              tx.onabort = () => reject(tx.error || new Error('Merge rollback clear aborted'));
+              tx.onerror = () => reject(tx.error || new Error('Merge rollback clear error'));
+            });
 
-        batchCount++;
-        if (batchCount === 1) {
-          await triggerInterruptionPoint('after_first_batch');
-        }
-        if (sIdx === Math.floor(SIX_DURABLE_STORES.length / 2)) {
-          await triggerInterruptionPoint('mid_transfer');
-        }
-
-        if (batch.length < BATCH_SIZE) break;
-      }
-    }
-
-    await setRestoreJournalMarker({
-      type: 'merge',
-      stage: 'commit_completed',
-      liveDbName: liveDb.name,
-      snapshotDbName: RESTORE_SNAPSHOT_DB_NAME,
-      stagingDbName: RESTORE_STAGING_DB_NAME,
-      timestamp: Date.now(),
-      operationId,
-    }, idbFactory);
-
-    await triggerInterruptionPoint('after_full_transfer');
-
-    // Step 4: Success! Clean up marker and temporary databases
-    await triggerInterruptionPoint('before_journal_deletion');
-    await setRestoreJournalMarker(null, idbFactory);
-    await triggerInterruptionPoint('after_journal_deletion');
-
-    await triggerInterruptionPoint('before_snapshot_deletion');
-    closeExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
-    await deleteExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
-    closeExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME);
-    await deleteExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME);
-
-    return {
-      success: true,
-      mode: 'merge',
-      insertedCounts,
-      skippedCounts: { ...plan.toSkip },
-      verified: true,
-      durationMs: Date.now() - startTime,
-    };
-  } catch (err) {
-    console.error('[Staging Merge] Merge encountered error, executing rollback guard:', err);
-    if (snapshotCreated && snapshotDb) {
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const tx = liveDb.transaction(ALL_NINE_STORES as unknown as string[], 'readwrite');
-          for (const s of ALL_NINE_STORES) {
-            if (liveDb.objectStoreNames.contains(s)) {
-              tx.objectStore(s).clear();
+            for (const store of EIGHT_SNAPSHOT_STORES) {
+              if (liveDb.objectStoreNames.contains(store) && snapshotDb.objectStoreNames.contains(store)) {
+                await copyStoreRecords(snapshotDb, liveDb, store, false);
+              }
             }
-          }
-          tx.oncomplete = () => resolve();
-          tx.onabort = () => reject(tx.error || new Error('Merge rollback clear aborted'));
-          tx.onerror = () => reject(tx.error || new Error('Merge rollback clear error'));
-        });
 
-        for (const store of EIGHT_SNAPSHOT_STORES) {
-          if (liveDb.objectStoreNames.contains(store) && snapshotDb.objectStoreNames.contains(store)) {
-            await copyStoreRecords(snapshotDb, liveDb, store, false);
+            const rollbackVerified = await verifyDatabaseEquality(snapshotDb, liveDb, EIGHT_SNAPSHOT_STORES);
+            if (rollbackVerified) {
+              await setRestoreJournalMarker(null, idbFactory);
+              closeExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
+              await deleteExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
+              closeExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME);
+              await deleteExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME);
+              console.info('[Staging Merge] Rollback to pre-merge state succeeded completely.');
+            } else {
+              console.error('[Staging Merge] Rollback verification failed! Snapshot preserved.');
+            }
+          } catch (rollbackErr) {
+            console.error('[Staging Merge] Catastrophic error during merge rollback:', rollbackErr);
           }
         }
-
-        const rollbackVerified = await verifyDatabaseEquality(snapshotDb, liveDb, EIGHT_SNAPSHOT_STORES);
-        if (rollbackVerified) {
-          await setRestoreJournalMarker(null, idbFactory);
-          closeExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
-          await deleteExtensionDatabase(idbFactory, RESTORE_SNAPSHOT_DB_NAME);
-          closeExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME);
-          await deleteExtensionDatabase(idbFactory, RESTORE_STAGING_DB_NAME);
-          console.info('[Staging Merge] Rollback to pre-merge state succeeded completely.');
-        } else {
-          console.error('[Staging Merge] Rollback verification failed! Snapshot preserved.');
-        }
-      } catch (rollbackErr) {
-        console.error('[Staging Merge] Catastrophic error during merge rollback:', rollbackErr);
+        throw err;
       }
-    }
-    throw err;
+    });
   } finally {
     activeRestoreLock = false;
-    if (lock) {
-      await lock.release();
-    }
   }
 }

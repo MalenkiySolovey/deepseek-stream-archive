@@ -1,26 +1,30 @@
 /**
- * Cross-Context Restore Lock Coordinator for Chrome MV3.
+ * Cross-Context Mutex & Read-Write Lock Coordinator for Chrome MV3.
  *
- * Ensures mutually exclusive execution of Restore (Replace / Merge / Crash Recovery)
- * across multiple Sidepanel instances, Background Service Worker, and options pages.
- *
- * Employs two complementary layers of protection:
- * 1. Web Locks API (navigator.locks):
- *    - Standard Chromium MV3 cross-tab / cross-worker mutex.
- *    - Automatically releases held locks if a renderer process, tab, or worker crashes.
- * 2. chrome.storage.local lease with heartbeat:
- *    - Provides cross-context inspectability and fallback for non-browser/test runners.
- *    - Lease expiration (default 60s) prevents permanent deadlocks from crashed owners.
+ * Implements genuine platform-level mutual exclusion using the Web Locks API (navigator.locks):
+ * 1. Mode 'exclusive':
+ *    - Used by destructive operations: Replace, Merge, Crash Recovery, and Clear Archive.
+ *    - Only ONE context across all tabs, workers, and sidepanels can execute exclusively.
+ *    - Automatically released by the browser kernel if a renderer process, tab, or worker crashes (SIGKILL, OOM).
+ * 2. Mode 'shared':
+ *    - Used by regular background and tab storage writes (messages, revisions, raw streams, continuity receipts).
+ *    - Multiple writes execute concurrently without contention.
+ *    - Queues safely when an exclusive Restore operation is in progress, preventing silent data loss during liveDb clear.
+ * 3. Fallback AsyncRwLock:
+ *    - Provides identical reader-writer lock semantics for non-browser Node.js test runners where navigator.locks is absent.
+ * 4. Diagnostic Lease in chrome.storage.local:
+ *    - Records operator, timestamps, and active stage for cross-context inspection and UI display without acting as an unatomic mutex.
  */
 
-const WEB_LOCK_NAME = 'streamarchive_restore_mutex';
-const STORAGE_LOCK_KEY = '__streamarchive_restore_lock__';
-const LOCK_LEASE_MS = 60_000;
-const HEARTBEAT_INTERVAL_MS = 10_000;
+export const WEB_LOCK_NAME = 'streamarchive_restore_mutex';
+export const STORAGE_LOCK_KEY = '__streamarchive_restore_lock__';
+export const LOCK_LEASE_MS = 60_000;
+export const HEARTBEAT_INTERVAL_MS = 10_000;
 
 export interface RestoreLockLease {
   lockId: string;
-  operation: 'replace' | 'merge' | 'recovery';
+  operation: string;
+  mode: 'exclusive' | 'shared';
   acquiredAt: number;
   expiresAt: number;
 }
@@ -30,22 +34,304 @@ export interface RestoreLockHandle {
   release: () => Promise<void>;
 }
 
-// In-memory fallback mutex for non-browser Node.js test runners
-let localFallbackOwner: string | null = null;
+// ─────────────────────────────────────────────────────────────────────────────
+// In-Memory Asynchronous Reader-Writer Lock for Node.js / Test Fallback
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface Waiter {
+  id: string;
+  mode: 'exclusive' | 'shared';
+  operation: string;
+  grant: () => void;
+  reject: (err: any) => void;
+  signal?: AbortSignal;
+}
+
+class AsyncRwLock {
+  private activeExclusive: string | null = null;
+  private activeShared = new Set<string>();
+  private queue: Waiter[] = [];
+
+  isExclusiveLocked(): boolean {
+    return this.activeExclusive !== null;
+  }
+
+  getActiveExclusive(): string | null {
+    return this.activeExclusive;
+  }
+
+  acquire(mode: 'exclusive' | 'shared', operation: string, signal?: AbortSignal): Promise<() => void> {
+    const id = `${mode}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+    return new Promise<() => void>((resolve, reject) => {
+      if (signal?.aborted) {
+        return reject(signal.reason || new Error('Lock acquisition aborted before acquire'));
+      }
+
+      const grant = () => {
+        if (mode === 'exclusive') {
+          this.activeExclusive = id;
+        } else {
+          this.activeShared.add(id);
+        }
+        resolve(() => this.release(id, mode));
+      };
+
+      // Check if can be granted immediately (FIFO fairness: queue must be empty for shared)
+      if (mode === 'shared') {
+        if (this.activeExclusive === null && this.queue.length === 0) {
+          grant();
+          return;
+        }
+      } else {
+        if (this.activeExclusive === null && this.activeShared.size === 0) {
+          grant();
+          return;
+        }
+      }
+
+      // Must queue
+      const waiter: Waiter = { id, mode, operation, grant, reject, signal };
+
+      const onAbort = () => {
+        const idx = this.queue.indexOf(waiter);
+        if (idx !== -1) {
+          this.queue.splice(idx, 1);
+        }
+        reject(signal?.reason || new Error(`[RestoreLock] Lock acquisition timed out for operation "${operation}"`));
+      };
+
+      if (signal) {
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      this.queue.push(waiter);
+    });
+  }
+
+  private release(id: string, mode: 'exclusive' | 'shared'): void {
+    if (mode === 'exclusive') {
+      if (this.activeExclusive === id) {
+        this.activeExclusive = null;
+      }
+    } else {
+      this.activeShared.delete(id);
+    }
+    this.pumpQueue();
+  }
+
+  private pumpQueue(): void {
+    if (this.activeExclusive !== null) {
+      return; // Still exclusively locked
+    }
+
+    if (this.queue.length === 0) {
+      return;
+    }
+
+    const next = this.queue[0];
+    if (!next) return;
+
+    if (next.mode === 'exclusive') {
+      if (this.activeShared.size === 0) {
+        this.queue.shift();
+        next.grant();
+      }
+      return;
+    }
+
+    // Next is shared: grant it and all subsequent consecutive shared waiters
+    while (this.queue.length > 0 && this.queue[0]?.mode === 'shared') {
+      const sharedWaiter = this.queue.shift()!;
+      sharedWaiter.grant();
+    }
+  }
+}
+
+const fallbackLock = new AsyncRwLock();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Diagnostic chrome.storage.local Lease Tracking
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function setStorageLease(lease: RestoreLockLease | null): Promise<void> {
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+      if (lease) {
+        await chrome.storage.local.set({ [STORAGE_LOCK_KEY]: lease });
+      } else {
+        await chrome.storage.local.remove(STORAGE_LOCK_KEY);
+      }
+    }
+  } catch {
+    // Non-blocking diagnostic tracking
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Core Web Lock Execution API
+// ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Checks whether a restore operation is currently in progress in any context.
+ * Executes a critical operation inside an exclusive Web Lock across all Chrome MV3 contexts.
+ * All other exclusive restore operations and regular shared storage writes will safely wait.
+ */
+export async function withExclusiveRestoreLock<T>(
+  operation: 'replace' | 'merge' | 'recovery' | 'clear' | string,
+  fn: () => Promise<T>,
+  timeoutMs: number = 30_000
+): Promise<T> {
+  const lockId = `exclusive-${operation}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const hasWebLocks = typeof navigator !== 'undefined' && typeof navigator.locks?.request === 'function';
+
+  let timer: any = null;
+  const controller = new AbortController();
+  if (timeoutMs > 0 && typeof setTimeout !== 'undefined') {
+    timer = setTimeout(() => {
+      controller.abort(
+        new Error(`[RestoreLock] Timed out waiting for exclusive restore lock for operation "${operation}" after ${timeoutMs}ms`)
+      );
+    }, timeoutMs);
+  }
+
+  let heartbeatInterval: any = null;
+  const startHeartbeat = () => {
+    heartbeatInterval = setInterval(async () => {
+      await setStorageLease({
+        lockId,
+        operation,
+        mode: 'exclusive',
+        acquiredAt: Date.now(),
+        expiresAt: Date.now() + LOCK_LEASE_MS,
+      });
+    }, HEARTBEAT_INTERVAL_MS);
+  };
+
+  const stopHeartbeat = () => {
+    if (heartbeatInterval) {
+      clearInterval(heartbeatInterval);
+      heartbeatInterval = null;
+    }
+  };
+
+  try {
+    if (hasWebLocks) {
+      return await navigator.locks.request(
+        WEB_LOCK_NAME,
+        { mode: 'exclusive', signal: controller.signal },
+        async () => {
+          if (timer) clearTimeout(timer);
+          await setStorageLease({
+            lockId,
+            operation,
+            mode: 'exclusive',
+            acquiredAt: Date.now(),
+            expiresAt: Date.now() + LOCK_LEASE_MS,
+          });
+          startHeartbeat();
+          try {
+            return await fn();
+          } finally {
+            stopHeartbeat();
+            await setStorageLease(null);
+          }
+        }
+      );
+    } else {
+      // Fallback for non-browser runner
+      const release = await fallbackLock.acquire('exclusive', operation, controller.signal);
+      if (timer) clearTimeout(timer);
+      await setStorageLease({
+        lockId,
+        operation,
+        mode: 'exclusive',
+        acquiredAt: Date.now(),
+        expiresAt: Date.now() + LOCK_LEASE_MS,
+      });
+      startHeartbeat();
+      try {
+        return await fn();
+      } finally {
+        stopHeartbeat();
+        await setStorageLease(null);
+        release();
+      }
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+    stopHeartbeat();
+  }
+}
+
+/**
+ * Executes a storage write operation inside a shared Web Lock.
+ * Runs concurrently with other shared storage writes, but automatically pauses
+ * if a destructive restore operation (Replace/Merge/Recovery) holds the exclusive lock.
+ */
+export async function withSharedStorageLock<T>(
+  operation: string,
+  fn: () => Promise<T>,
+  timeoutMs: number = 30_000
+): Promise<T> {
+  const hasWebLocks = typeof navigator !== 'undefined' && typeof navigator.locks?.request === 'function';
+
+  let timer: any = null;
+  const controller = new AbortController();
+  if (timeoutMs > 0 && typeof setTimeout !== 'undefined') {
+    timer = setTimeout(() => {
+      controller.abort(
+        new Error(`[RestoreLock] Timed out waiting for shared storage lock for operation "${operation}" after ${timeoutMs}ms`)
+      );
+    }, timeoutMs);
+  }
+
+  try {
+    if (hasWebLocks) {
+      return await navigator.locks.request(
+        WEB_LOCK_NAME,
+        { mode: 'shared', signal: controller.signal },
+        async () => {
+          if (timer) clearTimeout(timer);
+          return await fn();
+        }
+      );
+    } else {
+      const release = await fallbackLock.acquire('shared', operation, controller.signal);
+      if (timer) clearTimeout(timer);
+      try {
+        return await fn();
+      } finally {
+        release();
+      }
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Inspects whether an exclusive Restore operation is currently active.
  */
 export async function isRestoreLocked(): Promise<boolean> {
-  if (localFallbackOwner !== null) {
+  if (fallbackLock.isExclusiveLocked()) {
     return true;
+  }
+
+  if (typeof navigator !== 'undefined' && typeof navigator.locks?.query === 'function') {
+    try {
+      const snapshot = await navigator.locks.query();
+      const hasExclusive = snapshot.held?.some((l) => l.name === WEB_LOCK_NAME && l.mode === 'exclusive');
+      if (hasExclusive) return true;
+    } catch {
+      // ignore
+    }
   }
 
   try {
     if (typeof chrome !== 'undefined' && chrome.storage?.local) {
       const res = await chrome.storage.local.get(STORAGE_LOCK_KEY);
       const lease = res?.[STORAGE_LOCK_KEY] as RestoreLockLease | undefined;
-      if (lease && Date.now() < lease.expiresAt) {
+      if (lease && lease.mode === 'exclusive' && Date.now() < lease.expiresAt) {
         return true;
       }
     }
@@ -57,104 +343,35 @@ export async function isRestoreLocked(): Promise<boolean> {
 }
 
 /**
- * Acquires the cross-context restore lock for an active operation.
- * Throws if another context already holds the lock and did not release within timeoutMs.
+ * Legacy cooperative lock acquisition handle for backward compatibility.
  */
 export async function acquireRestoreLock(
-  operation: 'replace' | 'merge' | 'recovery',
+  operation: 'replace' | 'merge' | 'recovery' | string,
   timeoutMs: number = 10_000
 ): Promise<RestoreLockHandle> {
-  const lockId = `${operation}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-  const startTime = Date.now();
+  let releaseDeferred: (() => void) | null = null;
+  const lockAcquiredPromise = new Promise<void>((resolve, reject) => {
+    withExclusiveRestoreLock(
+      operation,
+      () =>
+        new Promise<void>((rel) => {
+          releaseDeferred = rel;
+          resolve();
+        }),
+      timeoutMs
+    ).catch(reject);
+  });
 
-  // 1. Wait until existing storage lease is released or expired
-  while (true) {
-    let activeLease: RestoreLockLease | null = null;
-    try {
-      if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-        const res = await chrome.storage.local.get(STORAGE_LOCK_KEY);
-        activeLease = (res?.[STORAGE_LOCK_KEY] as RestoreLockLease) || null;
-      }
-    } catch {
-      activeLease = null;
-    }
+  await lockAcquiredPromise;
+  const lockId = `handle-${operation}-${Date.now()}`;
 
-    if (!activeLease || Date.now() >= activeLease.expiresAt || activeLease.lockId === lockId) {
-      if (localFallbackOwner === null || localFallbackOwner === lockId) {
-        break; // Free to acquire
-      }
-    }
-
-    if (Date.now() - startTime >= timeoutMs) {
-      throw new Error(
-        `[RestoreLock] Could not acquire restore lock: another operation "${activeLease?.operation || 'restore'}" is currently in progress.`
-      );
-    }
-
-    await new Promise((r) => setTimeout(r, 100));
-  }
-
-  // 2. Set local and storage lease
-  localFallbackOwner = lockId;
-
-  const lease: RestoreLockLease = {
+  return {
     lockId,
-    operation,
-    acquiredAt: Date.now(),
-    expiresAt: Date.now() + LOCK_LEASE_MS,
-  };
-
-  try {
-    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-      await chrome.storage.local.set({ [STORAGE_LOCK_KEY]: lease });
-    }
-  } catch {
-    // Non-blocking
-  }
-
-  // 3. Heartbeat timer to renew lease during long-running operations
-  let heartbeatTimer: any = null;
-  const startHeartbeat = () => {
-    heartbeatTimer = setInterval(async () => {
-      try {
-        if (typeof chrome !== 'undefined' && chrome.storage?.local && localFallbackOwner === lockId) {
-          await chrome.storage.local.set({
-            [STORAGE_LOCK_KEY]: {
-              ...lease,
-              expiresAt: Date.now() + LOCK_LEASE_MS,
-            },
-          });
-        }
-      } catch {
-        // ignore
+    release: async () => {
+      if (releaseDeferred) {
+        releaseDeferred();
+        releaseDeferred = null;
       }
-    }, HEARTBEAT_INTERVAL_MS);
+    },
   };
-  startHeartbeat();
-
-  // 4. Release function
-  let released = false;
-  const release = async () => {
-    if (released) return;
-    released = true;
-    if (heartbeatTimer) {
-      clearInterval(heartbeatTimer);
-      heartbeatTimer = null;
-    }
-    if (localFallbackOwner === lockId) {
-      localFallbackOwner = null;
-    }
-    try {
-      if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-        const current = (await chrome.storage.local.get(STORAGE_LOCK_KEY)) as Record<string, any>;
-        if (current?.[STORAGE_LOCK_KEY]?.lockId === lockId) {
-          await chrome.storage.local.remove(STORAGE_LOCK_KEY);
-        }
-      }
-    } catch {
-      // ignore
-    }
-  };
-
-  return { lockId, release };
 }

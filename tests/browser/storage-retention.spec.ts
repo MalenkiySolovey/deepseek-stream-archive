@@ -9,7 +9,16 @@ test.describe('E2E Browser Compatibility: Raw Evidence Retention & Storage Obser
     // 1. Seed database with old healthy stream, recent stream, and protected recovery stream
     await sidepanel.evaluate(async () => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
-        const req = indexedDB.open('StreamArchiveDB');
+        const req = indexedDB.open('StreamArchiveDB', 9);
+        req.onupgradeneeded = (e) => {
+          const d = (e.target as any).result;
+          const stores = ['conversations', 'messages', 'revisions', 'recovery_events', 'raw_streams', 'raw_stream_batches', 'canonical_checkpoints', 'context_continuity_receipts'];
+          for (const s of stores) {
+            if (!d.objectStoreNames.contains(s)) {
+              d.createObjectStore(s, { keyPath: s === 'canonical_checkpoints' ? 'streamKey' : 'id' });
+            }
+          }
+        };
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });
@@ -198,7 +207,16 @@ test.describe('E2E Browser Compatibility: Raw Evidence Retention & Storage Obser
     // 9. Inspect IndexedDB directly to verify only old healthy stream was pruned
     const counts = await sidepanel.evaluate(async () => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
-        const req = indexedDB.open('StreamArchiveDB');
+        const req = indexedDB.open('StreamArchiveDB', 9);
+        req.onupgradeneeded = (e) => {
+          const d = (e.target as any).result;
+          const stores = ['conversations', 'messages', 'revisions', 'recovery_events', 'raw_streams', 'raw_stream_batches', 'canonical_checkpoints', 'context_continuity_receipts'];
+          for (const s of stores) {
+            if (!d.objectStoreNames.contains(s)) {
+              d.createObjectStore(s, { keyPath: s === 'canonical_checkpoints' ? 'streamKey' : 'id' });
+            }
+          }
+        };
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });

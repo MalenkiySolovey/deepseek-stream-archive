@@ -116,7 +116,7 @@ describe('Audit Defect Reproductions: Content Verification & Stale Journal Safet
     // If live database was wiped, countConv would be 0! It MUST be 1!
     expect(countConv).toBe(1);
     expect(countMsg).toBe(1);
-    expect(recovered).toBe(false);
+    expect(recovered.state).toBe('failed');
   });
 
   it('REPRODUCTION 3: commitStagingMergeToLive must detect concurrent modification collision on existing ID and abort with rollback', async () => {

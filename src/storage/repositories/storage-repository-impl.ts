@@ -33,7 +33,8 @@ import {
 } from '../schema';
 import { openExtensionDatabase, createDurableWriteTransaction } from '../db';
 import { recordStorageMutation, getStorageMutationEpoch, getDurableStorageMutationEpoch } from '../mutation-tracker';
-import { recoverIncompleteRestoreIfAny } from '../../restore/staging-service';
+import { recoverIncompleteRestoreIfAny, type RecoveryStatus } from '../../restore/staging-service';
+import { withSharedStorageLock, withExclusiveRestoreLock } from '../../restore/restore-lock';
 import {
   computeCanonicalCheckpointFingerprint,
   serializeHistoryStagingBatchForFingerprint,
@@ -79,45 +80,73 @@ import {
   type StorageMaintenanceStatus,
 } from '../retention';
 
+export class ArchiveRecoveryFailedError extends Error {
+  constructor(message: string, public readonly status: RecoveryStatus) {
+    super(message);
+    this.name = 'ArchiveRecoveryFailedError';
+  }
+}
+
+const factoryRecoveryMap = new Map<IDBFactory | 'default', Promise<RecoveryStatus>>();
+
+export function resetStorageRepositoryRecoveryCheck(factory?: IDBFactory): void {
+  const key = factory || 'default';
+  factoryRecoveryMap.delete(key);
+}
+
 export class IndexedDbStorageRepository implements StorageRepository {
-  constructor(private readonly idbFactory?: IDBFactory) {}
+  constructor(
+    private readonly idbFactory?: IDBFactory,
+    private readonly dbName?: string
+  ) {}
 
   async getMutationEpoch(): Promise<number> {
     const db = await this.getDb();
     return getDurableStorageMutationEpoch(db);
   }
 
-  private recoveryChecked = false;
+  private async ensureRecoveryChecked(): Promise<void> {
+    const key = this.idbFactory || 'default';
+    let promise = factoryRecoveryMap.get(key);
+    if (!promise) {
+      promise = recoverIncompleteRestoreIfAny(this.idbFactory);
+      factoryRecoveryMap.set(key, promise);
+    }
+    const status = await promise;
+    if (status.state === 'failed' || status.state === 'blocked') {
+      const reason = 'reason' in status ? status.reason : 'Crash recovery is blocked or failed';
+      throw new ArchiveRecoveryFailedError(
+        `Archive storage operation failed: Crash recovery failed or blocked (${reason}). Writes blocked to protect data integrity.`,
+        status
+      );
+    }
+  }
 
   private async getDb(): Promise<IDBDatabase> {
-    if (!this.recoveryChecked) {
-      this.recoveryChecked = true;
-      try {
-        await recoverIncompleteRestoreIfAny(this.idbFactory);
-      } catch {
-        // non-blocking crash recovery check
-      }
-    }
-    return openExtensionDatabase(this.idbFactory);
+    await this.ensureRecoveryChecked();
+    return openExtensionDatabase(this.idbFactory, this.dbName);
   }
 
   private async executeWrite(
     storeName: string,
     operation: (store: IDBObjectStore) => IDBRequest
   ): Promise<void> {
-    const db = await this.getDb();
-    return new Promise((resolve, reject) => {
-      const tx = createDurableWriteTransaction(db, storeName, 'strict');
-      const store = tx.objectStore(storeName);
-      const req = operation(store);
+    await this.ensureRecoveryChecked();
+    return withSharedStorageLock(`write-${storeName}`, async () => {
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
+      return new Promise((resolve, reject) => {
+        const tx = createDurableWriteTransaction(db, storeName, 'strict');
+        const store = tx.objectStore(storeName);
+        const req = operation(store);
 
-      req.onerror = () => reject(req.error || new Error(`Write request failed on store ${storeName}`));
-      tx.oncomplete = () => {
-        recordStorageMutation();
-        resolve();
-      };
-      tx.onerror = () => reject(tx.error || new Error(`Write transaction failed on store ${storeName}`));
-      tx.onabort = () => reject(tx.error || new Error(`Write transaction aborted on store ${storeName}`));
+        req.onerror = () => reject(req.error || new Error(`Write request failed on store ${storeName}`));
+        tx.oncomplete = () => {
+          recordStorageMutation();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error || new Error(`Write transaction failed on store ${storeName}`));
+        tx.onabort = () => reject(tx.error || new Error(`Write transaction aborted on store ${storeName}`));
+      });
     });
   }
 
@@ -169,19 +198,22 @@ export class IndexedDbStorageRepository implements StorageRepository {
 
   async saveMessages(messages: Message[]): Promise<void> {
     if (messages.length === 0) return;
-    const db = await this.getDb();
-    return new Promise((resolve, reject) => {
-      const tx = createDurableWriteTransaction(db, STORE_MESSAGES, 'strict');
-      const store = tx.objectStore(STORE_MESSAGES);
-      for (const msg of messages) {
-        store.put(msg);
-      }
-      tx.oncomplete = () => {
-        recordStorageMutation();
-        resolve();
-      };
-      tx.onerror = () => reject(tx.error || new Error('Failed to save batch of messages'));
-      tx.onabort = () => reject(tx.error || new Error('Save messages transaction aborted'));
+    await this.ensureRecoveryChecked();
+    return withSharedStorageLock('saveMessages', async () => {
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
+      return new Promise((resolve, reject) => {
+        const tx = createDurableWriteTransaction(db, STORE_MESSAGES, 'strict');
+        const store = tx.objectStore(STORE_MESSAGES);
+        for (const msg of messages) {
+          store.put(msg);
+        }
+        tx.oncomplete = () => {
+          recordStorageMutation();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error || new Error('Failed to save batch of messages'));
+        tx.onabort = () => reject(tx.error || new Error('Save messages transaction aborted'));
+      });
     });
   }
 
@@ -251,19 +283,22 @@ export class IndexedDbStorageRepository implements StorageRepository {
 
   async saveRevisions(revisions: ResponseRevision[]): Promise<void> {
     if (revisions.length === 0) return;
-    const db = await this.getDb();
-    return new Promise((resolve, reject) => {
-      const tx = createDurableWriteTransaction(db, STORE_REVISIONS, 'strict');
-      const store = tx.objectStore(STORE_REVISIONS);
-      for (const rev of revisions) {
-        store.put(rev);
-      }
-      tx.oncomplete = () => {
-        recordStorageMutation();
-        resolve();
-      };
-      tx.onerror = () => reject(tx.error || new Error('Failed to save batch of revisions'));
-      tx.onabort = () => reject(tx.error || new Error('Save revisions transaction aborted'));
+    await this.ensureRecoveryChecked();
+    return withSharedStorageLock('saveRevisions', async () => {
+      const db = await openExtensionDatabase(this.idbFactory, this.dbName);
+      return new Promise((resolve, reject) => {
+        const tx = createDurableWriteTransaction(db, STORE_REVISIONS, 'strict');
+        const store = tx.objectStore(STORE_REVISIONS);
+        for (const rev of revisions) {
+          store.put(rev);
+        }
+        tx.oncomplete = () => {
+          recordStorageMutation();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error || new Error('Failed to save batch of revisions'));
+        tx.onabort = () => reject(tx.error || new Error('Save revisions transaction aborted'));
+      });
     });
   }
 
@@ -2161,8 +2196,10 @@ export class IndexedDbStorageRepository implements StorageRepository {
   }
 
   async clearEntireArchive(activeStreamCount: number): Promise<{ success: boolean; durationMs: number }> {
-    const db = await this.getDb();
-    return clearEntireArchiveInternal(db, activeStreamCount);
+    return withExclusiveRestoreLock('clear', async () => {
+      const db = await this.getDb();
+      return clearEntireArchiveInternal(db, activeStreamCount);
+    });
   }
 
   async getStorageMaintenanceStatus(): Promise<StorageMaintenanceStatus> {
