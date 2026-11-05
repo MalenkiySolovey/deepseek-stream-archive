@@ -49,4 +49,5 @@ export interface RestoreResult {
   verified: boolean;
   durationMs: number;
   error?: string;
+  cleanupWarning?: string;
 }

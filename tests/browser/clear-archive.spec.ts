@@ -2,6 +2,7 @@ import { test, expect } from './extension-fixture';
 
 test.describe('E2E Browser Compatibility: Clear Entire Archive & Safe Deletion', () => {
   test('clears all 9 IndexedDB stores with explicit confirmation checkbox and preserves user settings', async ({
+    serviceWorker,
     loadSidepanel,
   }) => {
     const sidepanel = await loadSidepanel();
@@ -9,7 +10,43 @@ test.describe('E2E Browser Compatibility: Clear Entire Archive & Safe Deletion',
     // 1. Seed database with conversation, message, revision, raw stream, and staging record
     await sidepanel.evaluate(async () => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
-        const req = indexedDB.open('StreamArchiveDB');
+        const req = indexedDB.open('StreamArchiveDB', 9);
+        req.onupgradeneeded = (e) => {
+          const d = (e.target as any).result;
+          if (!d.objectStoreNames.contains('conversations')) {
+            const cs = d.createObjectStore('conversations', { keyPath: 'id' });
+            cs.createIndex('updatedAt', 'updatedAt', { unique: false });
+            cs.createIndex('remoteId', 'remoteId', { unique: false });
+          }
+          if (!d.objectStoreNames.contains('messages')) {
+            const ms = d.createObjectStore('messages', { keyPath: 'id' });
+            ms.createIndex('conversationId', 'conversationId', { unique: false });
+          }
+          if (!d.objectStoreNames.contains('revisions')) {
+            d.createObjectStore('revisions', { keyPath: 'id' });
+          }
+          if (!d.objectStoreNames.contains('recovery_events')) {
+            d.createObjectStore('recovery_events', { keyPath: 'id' });
+          }
+          if (!d.objectStoreNames.contains('raw_streams')) {
+            d.createObjectStore('raw_streams', { keyPath: 'id' });
+          }
+          if (!d.objectStoreNames.contains('raw_stream_batches')) {
+            d.createObjectStore('raw_stream_batches', { keyPath: 'id' });
+          }
+          if (!d.objectStoreNames.contains('canonical_checkpoints')) {
+            d.createObjectStore('canonical_checkpoints', { keyPath: 'streamKey' });
+          }
+          if (!d.objectStoreNames.contains('history_staging')) {
+            d.createObjectStore('history_staging', { keyPath: 'id' });
+          }
+          if (!d.objectStoreNames.contains('history_staging_manifests')) {
+            d.createObjectStore('history_staging_manifests', { keyPath: 'stagingId' });
+          }
+          if (!d.objectStoreNames.contains('context_continuity_receipts')) {
+            d.createObjectStore('context_continuity_receipts', { keyPath: 'id' });
+          }
+        };
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });
@@ -115,7 +152,7 @@ test.describe('E2E Browser Compatibility: Clear Entire Archive & Safe Deletion',
     // 8. Verify all 9 IndexedDB stores are 0
     const allCounts = await sidepanel.evaluate(async () => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
-        const req = indexedDB.open('StreamArchiveDB');
+        const req = indexedDB.open('StreamArchiveDB', 9);
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });

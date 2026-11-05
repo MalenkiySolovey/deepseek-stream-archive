@@ -182,13 +182,28 @@ describe('Crash Interruption Matrix (All 9 Lifecycle Points)', () => {
       setTestRestoreInterruptionHook(null);
       await recoverIncompleteRestoreIfAny(fakeFactory);
 
-      // Open liveDb and referenceLiveDb and perform deep content verification
-      const verifyLiveDb = await openExtensionDatabase(fakeFactory, liveDbName);
-      const referenceDb = await openExtensionDatabase(fakeFactory, referenceLiveDbName);
+      const isPreCommit = [
+        'after_snapshot_created',
+        'after_journal_persisted',
+        'after_live_db_cleared',
+        'after_first_batch',
+        'mid_transfer',
+        'after_full_transfer',
+      ].includes(point);
 
-      const isDataIntact = await verifyDatabaseEquality(verifyLiveDb, referenceDb, EIGHT_SNAPSHOT_STORES);
+      // Open liveDb and the appropriate reference DB (original data if pre-commit rollback, incoming data if post-commit confirmed)
+      const verifyLiveDb = await openExtensionDatabase(fakeFactory, liveDbName);
+      let targetReferenceDb: any;
+      if (isPreCommit) {
+        targetReferenceDb = await openExtensionDatabase(fakeFactory, referenceLiveDbName);
+      } else {
+        const referenceIncomingDbName = `test_incoming_${point.replace(/_/g, '-')}`;
+        targetReferenceDb = await seedStagingDatabase(referenceIncomingDbName, point);
+      }
+
+      const isDataIntact = await verifyDatabaseEquality(verifyLiveDb, targetReferenceDb, SIX_DURABLE_STORES);
       verifyLiveDb.close();
-      referenceDb.close();
+      targetReferenceDb.close();
 
       expect(isDataIntact).toBe(true);
     });

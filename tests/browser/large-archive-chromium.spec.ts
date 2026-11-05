@@ -1152,7 +1152,7 @@ test.describe('E2E Genuine Chromium: Large Archives (165 MiB, 260 MiB), Producti
           await new Promise<void>((r) => { bTx.oncomplete = () => r(); });
         }
 
-        // 2. Measure memory & streaming backup
+        // 2. Measure memory continuously during streaming backup & restore
         const memSamples: number[] = [];
         const sampleMem = () => {
           const m = (performance as any)?.memory?.usedJSHeapSize;
@@ -1164,6 +1164,7 @@ test.describe('E2E Genuine Chromium: Large Archives (165 MiB, 260 MiB), Producti
         const destination = new WritableStream<Uint8Array>({
           write(chunk) {
             chunks.push(chunk);
+            sampleMem();
           },
         });
 
@@ -1181,13 +1182,16 @@ test.describe('E2E Genuine Chromium: Large Archives (165 MiB, 260 MiB), Producti
           off += c.byteLength;
         }
 
-        const backupBlob = new Blob([combined], { type: 'application/gzip' });
+        // Genuine File abstraction verifying browser file streaming/slicing
+        const backupFile = new File([combined], `backup-${cfg.uncompressedMb}mb.streamarchive.jsonl.gz`, {
+          type: 'application/gzip',
+        });
 
         // 3. Execute Restore in Replace mode into clean dstDb
         const dstDb = await openDb(dstName);
         const restoreStartTime = performance.now();
         const executeRestoreFn = (window as any).__executeRestore;
-        const restoreRes = await executeRestoreFn(dstDb, backupBlob, 'replace', 0);
+        const restoreRes = await executeRestoreFn(dstDb, backupFile, 'replace', 0);
         const restoreDurationMs = Math.round(performance.now() - restoreStartTime);
         sampleMem();
 
@@ -1198,7 +1202,7 @@ test.describe('E2E Genuine Chromium: Large Archives (165 MiB, 260 MiB), Producti
 
         const initMem = memSamples[0] || 0;
         const peakMem = Math.max(...memSamples);
-        const heapDeltaMb = Math.round(((peakMem - initMem) / (1024 * 1024)) * 10) / 10;
+        const estimatedPeakHeapDeltaMb = Math.round(((peakMem - initMem) / (1024 * 1024)) * 10) / 10;
 
         srcDb.close();
         dstDb.close();
@@ -1212,7 +1216,9 @@ test.describe('E2E Genuine Chromium: Large Archives (165 MiB, 260 MiB), Producti
           compressedMb: Math.round((totalBytes / (1024 * 1024)) * 10) / 10,
           backupDurationMs,
           restoreDurationMs,
-          heapDeltaMb,
+          estimatedPeakHeapDeltaMb,
+          memoryType: 'V8 JS Heap (performance.memory.usedJSHeapSize)',
+          totalSamples: memSamples.length,
           restoreSuccess: restoreRes.success,
           restoreVerified: restoreRes.verified,
           databasesEqual: isEqual,
@@ -1222,7 +1228,7 @@ test.describe('E2E Genuine Chromium: Large Archives (165 MiB, 260 MiB), Producti
       console.log(
         `[Genuine Scale Pipeline: ${scaleResult.name}] Uncompressed: ${scaleResult.uncompressedMb} MiB | ` +
         `Compressed: ${scaleResult.compressedMb} MiB | Backup: ${scaleResult.backupDurationMs}ms | ` +
-        `Restore: ${scaleResult.restoreDurationMs}ms | Peak Heap Delta: ${scaleResult.heapDeltaMb} MB | ` +
+        `Restore: ${scaleResult.restoreDurationMs}ms | Estimated Peak V8 Heap Delta: ${scaleResult.estimatedPeakHeapDeltaMb} MB (${scaleResult.totalSamples} continuous samples) | ` +
         `Restore: ${scaleResult.restoreSuccess ? 'SUCCESS' : 'FAIL'} | ` +
         `Deep Equality: ${scaleResult.databasesEqual ? 'MATCH' : 'MISMATCH'}`
       );
