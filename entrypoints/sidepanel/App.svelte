@@ -591,18 +591,25 @@
   async function handleModeChange(newMode: RestoreMode) {
     restoreMode = newMode;
     replaceConfirmed = false;
-    if (cachedParsedBackup && restoreState === 'ready') {
+    if ((cachedSelectedFile || cachedParsedBackup) && restoreState === 'ready') {
       restoreState = 'validating';
       try {
         const repo = new IndexedDbStorageRepository();
-        const db = await repo.getDb();
         const activeStreamsCount = await getActiveStreamsCount();
-        const plan = await buildRestorePlan(db, cachedParsedBackup, newMode);
-        restorePreflight = {
-          ...restorePreflight!,
-          canRestore: activeStreamsCount === 0 && plan.valid,
-          plan,
-        };
+        const target = cachedSelectedFile || cachedParsedBackup;
+        const { preflight, backup } = await repo.validateAndPreflightRestore(
+          target as any,
+          activeStreamsCount,
+          newMode
+        );
+        if (!preflight.canRestore || !backup) {
+          restoreState = 'error';
+          const firstErr = preflight.validationErrors?.[0]?.message;
+          restoreError = firstErr || 'Failed to validate backup archive';
+          return;
+        }
+        cachedParsedBackup = backup;
+        restorePreflight = preflight;
         restoreState = 'ready';
       } catch (err) {
         restoreState = 'error';

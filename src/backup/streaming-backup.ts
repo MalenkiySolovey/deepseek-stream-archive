@@ -21,7 +21,7 @@ import {
   type PortableBackupFooterRecord,
 } from './format';
 import { DB_NAME, DB_VERSION } from '../storage/schema';
-import { getStorageMutationEpoch } from '../storage/mutation-tracker';
+import { getStorageMutationEpoch, getDurableStorageMutationEpoch } from '../storage/mutation-tracker';
 
 export interface StreamingBackupOptions {
   appVersion?: string;
@@ -128,6 +128,13 @@ export function createUncompressedBackupReadableStream(
   let totalRecordsProcessed = 0;
   let startEpoch: number | null = null;
 
+  const fetchEpoch = async (): Promise<number> => {
+    if (options.getMutationEpoch) {
+      return options.getMutationEpoch();
+    }
+    return getDurableStorageMutationEpoch(db);
+  };
+
   const assertStorageConsistency = async () => {
     if (options.getActiveStreamsCount) {
       const activeCount = await options.getActiveStreamsCount();
@@ -135,7 +142,7 @@ export function createUncompressedBackupReadableStream(
         throw new Error('Backup aborted: active DeepSeek generation stream detected during backup.');
       }
     }
-    const currentEpoch = options.getMutationEpoch ? await options.getMutationEpoch() : getStorageMutationEpoch();
+    const currentEpoch = await fetchEpoch();
     if (startEpoch !== null && currentEpoch !== startEpoch) {
       throw new Error('Backup aborted: database was modified during backup creation. Please retry when DeepSeek is idle.');
     }
@@ -152,7 +159,7 @@ export function createUncompressedBackupReadableStream(
                 throw new Error('Cannot create backup while active DeepSeek generation streams are running. Please wait for streaming to conclude.');
               }
             }
-            startEpoch = options.getMutationEpoch ? await options.getMutationEpoch() : getStorageMutationEpoch();
+            startEpoch = await fetchEpoch();
 
             const manifest: PortableBackupManifestRecord = {
               kind: 'manifest',

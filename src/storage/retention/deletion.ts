@@ -26,6 +26,7 @@ import {
 import type { Conversation, Message, ResponseRevision, RecoveryEvent } from '../../core/models';
 import type { RawStreamRecord } from '../raw-journal/types';
 import type { ConversationDeletionPlan } from './types';
+import { createDurableWriteTransaction } from '../db';
 
 function makeKeyRange(key: IDBValidKey): IDBKeyRange | IDBValidKey {
   return typeof IDBKeyRange !== 'undefined' ? IDBKeyRange.only(key) : key;
@@ -211,7 +212,7 @@ export async function deleteConversationCascade(
   return new Promise((resolve, reject) => {
     let tx: IDBTransaction;
     try {
-      tx = db.transaction(CASCADE_STORES as unknown as string[], 'readwrite');
+      tx = createDurableWriteTransaction(db, CASCADE_STORES as unknown as string[], 'strict');
     } catch (err) {
       return reject(new Error(`Failed to open deletion transaction: ${(err as Error).message}`));
     }

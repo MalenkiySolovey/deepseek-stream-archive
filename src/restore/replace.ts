@@ -23,6 +23,7 @@ import {
 } from '../storage/schema';
 import type { MaterializedPortableBackup } from '../backup/reader';
 import type { PortableBackupStoreCounts } from '../backup/format';
+import { createDurableWriteTransaction } from '../storage/db';
 
 export const ALL_ARCHIVE_STORES = [
   STORE_CONVERSATIONS,
@@ -57,7 +58,7 @@ export async function executeAtomicReplace(
   return new Promise((resolve, reject) => {
     let tx: IDBTransaction;
     try {
-      tx = db.transaction(ALL_NINE_STORES as unknown as string[], 'readwrite');
+      tx = createDurableWriteTransaction(db, ALL_NINE_STORES as unknown as string[], 'strict');
     } catch (err) {
       return reject(new Error(`Failed to open replace transaction: ${(err as Error).message}`));
     }

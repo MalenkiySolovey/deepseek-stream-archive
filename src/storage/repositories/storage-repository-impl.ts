@@ -95,7 +95,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
   ): Promise<void> {
     const db = await this.getDb();
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(storeName, 'readwrite');
+      const tx = createDurableWriteTransaction(db, storeName, 'strict');
       const store = tx.objectStore(storeName);
       const req = operation(store);
 
@@ -159,7 +159,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
     if (messages.length === 0) return;
     const db = await this.getDb();
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_MESSAGES, 'readwrite');
+      const tx = createDurableWriteTransaction(db, STORE_MESSAGES, 'strict');
       const store = tx.objectStore(STORE_MESSAGES);
       for (const msg of messages) {
         store.put(msg);
@@ -241,7 +241,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
     if (revisions.length === 0) return;
     const db = await this.getDb();
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_REVISIONS, 'readwrite');
+      const tx = createDurableWriteTransaction(db, STORE_REVISIONS, 'strict');
       const store = tx.objectStore(STORE_REVISIONS);
       for (const rev of revisions) {
         store.put(rev);
@@ -1832,9 +1832,10 @@ export class IndexedDbStorageRepository implements StorageRepository {
   }): Promise<void> {
     const db = await this.getDb();
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(
+      const tx = createDurableWriteTransaction(
+        db,
         [STORE_CONVERSATIONS, STORE_MESSAGES, STORE_REVISIONS],
-        'readwrite'
+        'strict'
       );
 
       const convStore = tx.objectStore(STORE_CONVERSATIONS);
@@ -2284,7 +2285,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
   async recordContinuityReceipt(receipt: ContextContinuityReceipt): Promise<void> {
     const db = await this.getDb();
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_CONTEXT_CONTINUITY_RECEIPTS, 'readwrite');
+      const tx = createDurableWriteTransaction(db, STORE_CONTEXT_CONTINUITY_RECEIPTS, 'strict');
       const store = tx.objectStore(STORE_CONTEXT_CONTINUITY_RECEIPTS);
       const req = store.put(receipt);
       req.onsuccess = () => {
@@ -2298,7 +2299,7 @@ export class IndexedDbStorageRepository implements StorageRepository {
   async updateContinuityReceipt(id: string, updates: Partial<ContextContinuityReceipt>): Promise<void> {
     const db = await this.getDb();
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_CONTEXT_CONTINUITY_RECEIPTS, 'readwrite');
+      const tx = createDurableWriteTransaction(db, STORE_CONTEXT_CONTINUITY_RECEIPTS, 'strict');
       const store = tx.objectStore(STORE_CONTEXT_CONTINUITY_RECEIPTS);
       const getReq = store.get(id);
       getReq.onerror = () => reject(getReq.error || new Error(`Failed to find continuity receipt ${id}`));

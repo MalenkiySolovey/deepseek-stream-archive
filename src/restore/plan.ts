@@ -43,6 +43,10 @@ export async function buildRestorePlan(
   backup: MaterializedPortableBackup,
   mode: RestoreMode
 ): Promise<RestorePlan> {
+  if (mode === 'merge' && (backup as any)._lightweight) {
+    throw new Error('Cannot build merge plan from lightweight inspection backup. Full records or staging database are required.');
+  }
+
   if (mode === 'replace') {
     return {
       mode: 'replace',

@@ -23,6 +23,7 @@ import type { Message, ResponseRevision, RecoveryEvent } from '../../core/models
 import type { RawStreamRecord } from '../raw-journal/types';
 import { evaluateRawStreamRetention, getCutoffTimestamp } from './policy';
 import type { ArchiveCleanupResult, RawRetentionMode, RawRetentionPlan } from './types';
+import { createDurableWriteTransaction } from '../db';
 
 function makeKeyRange(key: IDBValidKey): IDBKeyRange | IDBValidKey {
   return typeof IDBKeyRange !== 'undefined' ? IDBKeyRange.only(key) : key;
@@ -223,7 +224,7 @@ export async function executeRawRetentionPlan(
   return new Promise((resolve, reject) => {
     let tx: IDBTransaction;
     try {
-      tx = db.transaction([STORE_RAW_STREAMS, STORE_RAW_STREAM_BATCHES], 'readwrite');
+      tx = createDurableWriteTransaction(db, [STORE_RAW_STREAMS, STORE_RAW_STREAM_BATCHES], 'strict');
     } catch (err) {
       return reject(new Error(`Failed to open retention cleanup transaction: ${(err as Error).message}`));
     }
@@ -304,7 +305,7 @@ export async function clearRawEvidence(
   return new Promise((resolve, reject) => {
     let tx: IDBTransaction;
     try {
-      tx = db.transaction([STORE_RAW_STREAMS, STORE_RAW_STREAM_BATCHES], 'readwrite');
+      tx = createDurableWriteTransaction(db, [STORE_RAW_STREAMS, STORE_RAW_STREAM_BATCHES], 'strict');
     } catch (err) {
       return reject(new Error(`Failed to open clearRawEvidence transaction: ${(err as Error).message}`));
     }

@@ -1,10 +1,11 @@
-import { DB_NAME, DB_VERSION, configureDatabaseSchema } from './schema';
+import { DB_NAME, DB_VERSION, configureDatabaseSchema, STORE_CANONICAL_CHECKPOINTS } from './schema';
+import { recordStorageMutation, touchDurableMutationEpoch } from './mutation-tracker';
 
-const factoryDbMap = new WeakMap<IDBFactory, IDBDatabase>();
+const factoryDbMap = new WeakMap<IDBFactory, Map<string, IDBDatabase>>();
 let defaultDatabase: IDBDatabase | null = null;
 const allActiveDatabases = new Set<IDBDatabase>();
 
-export function openExtensionDatabase(idbFactory?: IDBFactory): Promise<IDBDatabase> {
+export function openExtensionDatabase(idbFactory?: IDBFactory, dbName: string = DB_NAME): Promise<IDBDatabase> {
   const factory = idbFactory || (typeof indexedDB !== 'undefined' ? indexedDB : null);
   if (!factory) {
     return Promise.reject(new Error('IndexedDB factory is not available in the current environment.'));
@@ -12,14 +13,15 @@ export function openExtensionDatabase(idbFactory?: IDBFactory): Promise<IDBDatab
 
   // Return cached instance if available and open
   if (idbFactory) {
-    const cached = factoryDbMap.get(idbFactory);
+    const map = factoryDbMap.get(idbFactory);
+    const cached = map?.get(dbName);
     if (cached) return Promise.resolve(cached);
-  } else if (defaultDatabase) {
+  } else if (dbName === DB_NAME && defaultDatabase) {
     return Promise.resolve(defaultDatabase);
   }
 
   return new Promise((resolve, reject) => {
-    const request = factory.open(DB_NAME, DB_VERSION);
+    const request = factory.open(dbName, DB_VERSION);
 
     request.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
@@ -29,13 +31,15 @@ export function openExtensionDatabase(idbFactory?: IDBFactory): Promise<IDBDatab
 
     request.onsuccess = () => {
       const db = request.result;
+      (db as any).__idbFactory = factory;
       allActiveDatabases.add(db);
 
       const cleanup = () => {
         allActiveDatabases.delete(db);
         if (idbFactory) {
-          factoryDbMap.delete(idbFactory);
-        } else if (defaultDatabase === db) {
+          const map = factoryDbMap.get(idbFactory);
+          map?.delete(dbName);
+        } else if (defaultDatabase === db && dbName === DB_NAME) {
           defaultDatabase = null;
         }
       };
@@ -51,8 +55,13 @@ export function openExtensionDatabase(idbFactory?: IDBFactory): Promise<IDBDatab
       };
 
       if (idbFactory) {
-        factoryDbMap.set(idbFactory, db);
-      } else {
+        let map = factoryDbMap.get(idbFactory);
+        if (!map) {
+          map = new Map();
+          factoryDbMap.set(idbFactory, map);
+        }
+        map.set(dbName, db);
+      } else if (dbName === DB_NAME) {
         defaultDatabase = db;
       }
 
@@ -60,26 +69,41 @@ export function openExtensionDatabase(idbFactory?: IDBFactory): Promise<IDBDatab
     };
 
     request.onerror = () => {
-      reject(request.error || new Error('Failed to open IndexedDB database.'));
+      reject(request.error || new Error(`Failed to open IndexedDB database "${dbName}".`));
     };
 
     request.onblocked = () => {
-      reject(new Error('IndexedDB database open request was blocked by an older connection.'));
+      reject(new Error(`IndexedDB database "${dbName}" open request was blocked by an older connection.`));
     };
   });
 }
 
-export function closeExtensionDatabase(idbFactory?: IDBFactory): void {
+export function closeExtensionDatabase(idbFactory?: IDBFactory, dbName?: string): void {
   if (idbFactory) {
-    const db = factoryDbMap.get(idbFactory);
-    if (db) {
-      try {
-        db.close();
-      } catch {
-        // ignore
+    const map = factoryDbMap.get(idbFactory);
+    if (map) {
+      if (dbName) {
+        const db = map.get(dbName);
+        if (db) {
+          try {
+            db.close();
+          } catch {
+            // ignore
+          }
+          map.delete(dbName);
+          allActiveDatabases.delete(db);
+        }
+      } else {
+        for (const db of map.values()) {
+          try {
+            db.close();
+          } catch {
+            // ignore
+          }
+          allActiveDatabases.delete(db);
+        }
+        map.clear();
       }
-      factoryDbMap.delete(idbFactory);
-      allActiveDatabases.delete(db);
     }
   } else {
     for (const db of allActiveDatabases) {
@@ -94,10 +118,29 @@ export function closeExtensionDatabase(idbFactory?: IDBFactory): void {
   }
 }
 
-import { recordStorageMutation } from './mutation-tracker';
+/**
+ * Completely deletes an IndexedDB database (e.g. for cleaning up staging databases).
+ */
+export async function deleteExtensionDatabase(idbFactory?: IDBFactory, dbName: string = DB_NAME): Promise<void> {
+  const factory = idbFactory || (typeof indexedDB !== 'undefined' ? indexedDB : null);
+  if (!factory) {
+    return Promise.reject(new Error('IndexedDB factory is not available in the current environment.'));
+  }
+
+  // Ensure connections to this database are closed first
+  closeExtensionDatabase(idbFactory, dbName);
+
+  return new Promise((resolve, reject) => {
+    const request = factory.deleteDatabase(dbName);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error || new Error(`Failed to delete IndexedDB database "${dbName}".`));
+    request.onblocked = () => resolve();
+  });
+}
 
 /**
  * Creates a readwrite transaction, preferring strict durability hint where supported.
+ * Automatically enlists `STORE_CANONICAL_CHECKPOINTS` to record durable mutation epoch.
  * Falls back to standard transaction if the environment rejects IDBTransactionOptions.
  */
 export function createDurableWriteTransaction(
@@ -105,12 +148,24 @@ export function createDurableWriteTransaction(
   storeNames: string | string[],
   durability: 'strict' | 'relaxed' | 'default' = 'strict'
 ): IDBTransaction {
+  const stores = Array.isArray(storeNames) ? [...storeNames] : [storeNames];
+
+  // Enlist canonical checkpoints store if present for durable mutation epoch tracking
+  if (
+    db.objectStoreNames.contains(STORE_CANONICAL_CHECKPOINTS) &&
+    !stores.includes(STORE_CANONICAL_CHECKPOINTS)
+  ) {
+    stores.push(STORE_CANONICAL_CHECKPOINTS);
+  }
+
   let tx: IDBTransaction;
   try {
-    tx = (db as any).transaction(storeNames, 'readwrite', { durability });
+    tx = (db as any).transaction(stores, 'readwrite', { durability });
   } catch {
-    tx = db.transaction(storeNames, 'readwrite');
+    tx = db.transaction(stores, 'readwrite');
   }
+
+  touchDurableMutationEpoch(tx);
 
   try {
     if (typeof tx.addEventListener === 'function') {
@@ -129,6 +184,3 @@ export function createDurableWriteTransaction(
  * Backward-compatible alias for createDurableWriteTransaction.
  */
 export const createRawWriteTransaction = createDurableWriteTransaction;
-
-
-
