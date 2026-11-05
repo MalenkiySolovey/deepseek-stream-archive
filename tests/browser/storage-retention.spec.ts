@@ -15,7 +15,16 @@ test.describe('E2E Browser Compatibility: Raw Evidence Retention & Storage Obser
           const stores = ['conversations', 'messages', 'revisions', 'recovery_events', 'raw_streams', 'raw_stream_batches', 'canonical_checkpoints', 'context_continuity_receipts'];
           for (const s of stores) {
             if (!d.objectStoreNames.contains(s)) {
-              d.createObjectStore(s, { keyPath: s === 'canonical_checkpoints' ? 'streamKey' : 'id' });
+              const st = d.createObjectStore(s, { keyPath: s === 'canonical_checkpoints' ? 'streamKey' : 'id' });
+              if (s === 'raw_stream_batches') {
+                st.createIndex('streamKey', 'streamKey', { unique: false });
+              }
+              if (s === 'messages') {
+                st.createIndex('conversationId', 'conversationId', { unique: false });
+              }
+              if (s === 'revisions' || s === 'recovery_events') {
+                st.createIndex('messageId', 'messageId', { unique: false });
+              }
             }
           }
         };
@@ -214,7 +223,16 @@ test.describe('E2E Browser Compatibility: Raw Evidence Retention & Storage Obser
           const stores = ['conversations', 'messages', 'revisions', 'recovery_events', 'raw_streams', 'raw_stream_batches', 'canonical_checkpoints', 'context_continuity_receipts'];
           for (const s of stores) {
             if (!d.objectStoreNames.contains(s)) {
-              d.createObjectStore(s, { keyPath: s === 'canonical_checkpoints' ? 'streamKey' : 'id' });
+              const st = d.createObjectStore(s, { keyPath: s === 'canonical_checkpoints' ? 'streamKey' : 'id' });
+              if (s === 'raw_stream_batches') {
+                st.createIndex('streamKey', 'streamKey', { unique: false });
+              }
+              if (s === 'messages') {
+                st.createIndex('conversationId', 'conversationId', { unique: false });
+              }
+              if (s === 'revisions' || s === 'recovery_events') {
+                st.createIndex('messageId', 'messageId', { unique: false });
+              }
             }
           }
         };

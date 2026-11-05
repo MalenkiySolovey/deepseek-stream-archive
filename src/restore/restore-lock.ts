@@ -407,8 +407,9 @@ export async function acquireRestoreLock(
   timeoutMs: number = 10_000
 ): Promise<RestoreLockHandle> {
   let releaseDeferred: (() => void) | null = null;
+  let lockPromiseDone: Promise<unknown>;
   const lockAcquiredPromise = new Promise<void>((resolve, reject) => {
-    withExclusiveRestoreLock(
+    lockPromiseDone = withExclusiveRestoreLock(
       operation,
       () =>
         new Promise<void>((rel) => {
@@ -428,6 +429,7 @@ export async function acquireRestoreLock(
       if (releaseDeferred) {
         releaseDeferred();
         releaseDeferred = null;
+        await lockPromiseDone;
       }
     },
   };

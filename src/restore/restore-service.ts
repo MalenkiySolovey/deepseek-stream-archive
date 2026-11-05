@@ -18,7 +18,12 @@ import {
   commitStagingReplaceToLive,
   commitStagingMergeToLive,
   createFreshInputStream,
+  createStagingDatabaseName,
+  createSnapshotDatabaseName,
+  closeExtensionDatabase,
+  deleteExtensionDatabase,
 } from './staging-service';
+import { withExclusiveRestoreLock } from './restore-lock';
 import type { RestoreMode, RestorePreflight, RestoreResult, RestorePlan } from './types';
 import {
   STORE_CONVERSATIONS,
@@ -148,10 +153,14 @@ export async function validateAndPreflightRestore(
   const rawInput = (input as any)?._lightweight ? (input as any)._rawInput : input;
 
   if (mode === 'merge') {
-    // For Merge mode, perform staging ingestion to evaluate full records with zero false conflicts
+    // For Merge mode, perform staging ingestion into an isolated preflight database to evaluate full records with zero false conflicts
+    const idbFactory = (db as any).factory ?? (db as any).__idbFactory ?? (typeof indexedDB !== 'undefined' ? indexedDB : undefined);
+    const preflightOpId = `preflight_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const stagingDbName = createStagingDatabaseName(preflightOpId);
+    let stagingDbInstance: IDBDatabase | null = null;
     try {
-      const idbFactory = (db as any).factory ?? (db as any).__idbFactory ?? (typeof indexedDB !== 'undefined' ? indexedDB : undefined);
-      const ingest = await ingestArchiveToStaging(rawInput, idbFactory);
+      const ingest = await ingestArchiveToStaging(rawInput, idbFactory, stagingDbName);
+      stagingDbInstance = ingest.stagingDb;
       const plan = await buildRestorePlanFromStaging(db, ingest.stagingDb, 'merge', ingest.counts);
       const canRestore = activeStreamsCount === 0 && plan.valid;
       const validationErrors: Array<{ code: string; message: string }> = plan.conflicts.map((c) => ({ code: c.code, message: c.message }));
@@ -207,6 +216,13 @@ export async function validateAndPreflightRestore(
           validationErrors: [{ code: 'preflight_failed', message: (err as Error).message }],
         },
       };
+    } finally {
+      if (stagingDbInstance) {
+        closeExtensionDatabase(idbFactory, stagingDbName);
+        try {
+          await deleteExtensionDatabase(idbFactory, stagingDbName);
+        } catch {}
+      }
     }
   }
 
@@ -396,46 +412,48 @@ export async function executeRestore(
 
   if (isPreMaterialized) {
     // In-memory materialized backup path (small archives & test fixtures)
-    const backup = backupOrInput as MaterializedPortableBackup;
-    const integrity = validateBackupReferentialIntegrity(backup);
-    if (!integrity.valid) {
-      throw new Error(`Referential integrity failed: ${integrity.errors.map((e) => e.message).join('; ')}`);
-    }
-
-    let insertedCounts: PortableBackupStoreCounts;
-    let skippedCounts: PortableBackupStoreCounts;
-
-    if (mode === 'replace') {
-      const res = await executeAtomicReplace(db, backup);
-      insertedCounts = res.insertedCounts;
-      skippedCounts = {
-        conversations: 0,
-        messages: 0,
-        revisions: 0,
-        recovery_events: 0,
-        raw_streams: 0,
-        raw_stream_batches: 0,
-      };
-    } else {
-      const plan = await buildRestorePlan(db, backup, 'merge');
-      if (!plan.valid || plan.conflicts.length > 0) {
-        throw new Error(`Merge conflict detected: ${plan.conflicts.map((c) => c.message).join('; ')}`);
+    return await withExclusiveRestoreLock(mode, async () => {
+      const backup = backupOrInput as MaterializedPortableBackup;
+      const integrity = validateBackupReferentialIntegrity(backup);
+      if (!integrity.valid) {
+        throw new Error(`Referential integrity failed: ${integrity.errors.map((e) => e.message).join('; ')}`);
       }
-      const res = await executeAtomicMerge(db, plan);
-      insertedCounts = res.insertedCounts;
-      skippedCounts = res.skippedCounts;
-    }
 
-    recordStorageMutation();
+      let insertedCounts: PortableBackupStoreCounts;
+      let skippedCounts: PortableBackupStoreCounts;
 
-    return {
-      success: true,
-      mode,
-      insertedCounts,
-      skippedCounts,
-      verified: true,
-      durationMs: Date.now() - startTime,
-    };
+      if (mode === 'replace') {
+        const res = await executeAtomicReplace(db, backup);
+        insertedCounts = res.insertedCounts;
+        skippedCounts = {
+          conversations: 0,
+          messages: 0,
+          revisions: 0,
+          recovery_events: 0,
+          raw_streams: 0,
+          raw_stream_batches: 0,
+        };
+      } else {
+        const plan = await buildRestorePlan(db, backup, 'merge');
+        if (!plan.valid || plan.conflicts.length > 0) {
+          throw new Error(`Merge conflict detected: ${plan.conflicts.map((c) => c.message).join('; ')}`);
+        }
+        const res = await executeAtomicMerge(db, plan);
+        insertedCounts = res.insertedCounts;
+        skippedCounts = res.skippedCounts;
+      }
+
+      recordStorageMutation();
+
+      return {
+        success: true,
+        mode,
+        insertedCounts,
+        skippedCounts,
+        verified: true,
+        durationMs: Date.now() - startTime,
+      };
+    });
   }
 
   // Bounded Staging Restore path for raw files / streams / large archives
@@ -444,19 +462,35 @@ export async function executeRestore(
     : backupOrInput;
 
   const idbFactory = (db as any).factory ?? (db as any).__idbFactory ?? (typeof indexedDB !== 'undefined' ? indexedDB : undefined);
-  const ingest = await ingestArchiveToStaging(rawInput, idbFactory);
+  const operationId = `restore_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const stagingDbName = createStagingDatabaseName(operationId);
+  const snapshotDbName = createSnapshotDatabaseName(operationId);
 
-  let result: RestoreResult;
-  if (mode === 'replace') {
-    result = await commitStagingReplaceToLive(db, ingest.stagingDb, ingest.counts, idbFactory);
-  } else {
-    const plan = await buildRestorePlanFromStaging(db, ingest.stagingDb, 'merge', ingest.counts);
-    result = await commitStagingMergeToLive(db, plan, idbFactory);
+  let ingestResult: { stagingDb: IDBDatabase; counts: PortableBackupStoreCounts } | null = null;
+  try {
+    const ingest = await ingestArchiveToStaging(rawInput, idbFactory, stagingDbName);
+    ingestResult = ingest;
+
+    let result: RestoreResult;
+    if (mode === 'replace') {
+      result = await commitStagingReplaceToLive(db, ingest.stagingDb, ingest.counts, idbFactory, snapshotDbName);
+    } else {
+      const plan = await buildRestorePlanFromStaging(db, ingest.stagingDb, 'merge', ingest.counts);
+      result = await commitStagingMergeToLive(db, plan, idbFactory, ingest.stagingDb, snapshotDbName);
+    }
+
+    if (result.success) {
+      recordStorageMutation();
+    }
+
+    return result;
+  } catch (err) {
+    if (ingestResult?.stagingDb) {
+      closeExtensionDatabase(idbFactory, stagingDbName);
+      try {
+        await deleteExtensionDatabase(idbFactory, stagingDbName);
+      } catch {}
+    }
+    throw err;
   }
-
-  if (result.success) {
-    recordStorageMutation();
-  }
-
-  return result;
 }

@@ -433,16 +433,32 @@ test.describe('E2E Genuine Chromium: Large Archives (165 MiB, 260 MiB), Producti
       await new Promise<void>((r) => { lTx.oncomplete = () => r(); });
       liveDb.close();
 
-      // Persist crash marker
+      // Persist crash marker into authoritative IndexedDB journal and diagnostic mirror
+      const markerObj = {
+        id: 'active',
+        type: 'replace',
+        stage: 'transferring',
+        liveDbName: 'StreamArchiveDB',
+        snapshotDbName: 'StreamArchiveDB_pre_restore_snapshot',
+        stagingDbName: 'StreamArchiveDB_restore_staging',
+        timestamp: Date.now(),
+      };
+
+      const jDb = await new Promise<IDBDatabase>((res, rej) => {
+        const req = indexedDB.open('StreamArchiveDB_restore_journal', 1);
+        req.onupgradeneeded = (e) => {
+          (e.target as any).result.createObjectStore('restore_journal_markers', { keyPath: 'id' });
+        };
+        req.onsuccess = () => res(req.result);
+        req.onerror = () => rej(req.error);
+      });
+      const jTx = jDb.transaction(['restore_journal_markers'], 'readwrite');
+      jTx.objectStore('restore_journal_markers').put(markerObj);
+      await new Promise<void>((r) => { jTx.oncomplete = () => r(); });
+      jDb.close();
+
       await chrome.storage.local.set({
-        __streamarchive_restore_marker__: {
-          type: 'replace',
-          stage: 'transferring',
-          liveDbName: 'StreamArchiveDB',
-          snapshotDbName: 'StreamArchiveDB_pre_restore_snapshot',
-          stagingDbName: 'StreamArchiveDB_restore_staging',
-          timestamp: Date.now(),
-        },
+        __streamarchive_restore_marker__: markerObj,
       });
 
       return { setupDone: true };

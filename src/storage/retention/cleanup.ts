@@ -261,19 +261,33 @@ export async function executeRawRetentionPlan(
     try {
       const rawStreamsStore = tx.objectStore(STORE_RAW_STREAMS);
       const rawBatchesStore = tx.objectStore(STORE_RAW_STREAM_BATCHES);
-      const batchIndex = rawBatchesStore.index('streamKey');
+      const hasStreamKeyIndex = rawBatchesStore.indexNames.contains('streamKey');
+      const batchIndex = hasStreamKeyIndex ? rawBatchesStore.index('streamKey') : null;
 
       for (const sKey of keysToDelete) {
         rawStreamsStore.delete(sKey);
 
-        const cursorReq = batchIndex.openCursor(makeKeyRange(sKey));
-        cursorReq.onsuccess = () => {
-          const cursor = cursorReq.result;
-          if (cursor) {
-            cursor.delete();
-            cursor.continue();
-          }
-        };
+        if (batchIndex) {
+          const cursorReq = batchIndex.openCursor(makeKeyRange(sKey));
+          cursorReq.onsuccess = () => {
+            const cursor = cursorReq.result;
+            if (cursor) {
+              cursor.delete();
+              cursor.continue();
+            }
+          };
+        } else {
+          const cursorReq = rawBatchesStore.openCursor();
+          cursorReq.onsuccess = () => {
+            const cursor = cursorReq.result;
+            if (cursor) {
+              if ((cursor.value as any)?.streamKey === sKey) {
+                cursor.delete();
+              }
+              cursor.continue();
+            }
+          };
+        }
       }
     } catch (err) {
       if (!settled) {
