@@ -709,9 +709,7 @@
     isRetryingCleanup = true;
     cleanupActionError = null;
     try {
-      const repo = new IndexedDbStorageRepository();
-      const db = await repo.getDb();
-      const idbFactory = (db as any).factory ?? (db as any).__idbFactory ?? (typeof indexedDB !== 'undefined' ? indexedDB : undefined);
+      const idbFactory = typeof indexedDB !== 'undefined' ? indexedDB : undefined;
       const res = await retryPendingRestoreCleanup(idbFactory);
       if (res.journalDeleted) {
         if (restoreResult) {
@@ -1279,7 +1277,7 @@
                     </div>
                   {/if}
                   {#if cleanupActionError}
-                    <div style="color: #ef4444; margin-bottom: 0.4rem;">{cleanupActionError}</div>
+                    <div class="cleanup-action-error" style="color: #ef4444; margin-bottom: 0.4rem;">{cleanupActionError}</div>
                   {/if}
                   <button
                     class="backup-btn primary"

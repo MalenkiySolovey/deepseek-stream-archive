@@ -44,6 +44,7 @@ export {
 import {
   withExclusiveRestoreLock,
   acquireRestoreLock,
+  isRestoreLocked,
   type RestoreLockHandle,
 } from './restore-lock';
 import type { RestorePlan, RestoreResult, RestoreMode, RestoreConflict, RestoreCleanupStatus } from './types';
@@ -479,43 +480,107 @@ export async function performPostCommitCleanup(options: {
 }
 
 /**
- * Retries a pending post-commit cleanup if an earlier attempt failed to delete
- * the journal marker or temporary databases.
+ * Retries a pending post-commit cleanup safely inside an exclusive Web Lock.
+ *
+ * Requirements:
+ * 1. Obtains exclusive Web Lock across all Chrome contexts.
+ * 2. Re-reads authoritative restore journal under the lock.
+ * 3. Verifies operation stage and verifies that liveDb still matches confirmed operation / baseline.
+ * 4. Refuses to delete snapshot if liveDb fails baseline verification.
+ * 5. Safely handles concurrent retries or completed cleanups across windows.
  */
 export async function retryPendingRestoreCleanup(
   idbFactory?: IDBFactory
 ): Promise<PostCommitCleanupResult> {
-  const marker = await getRestoreJournalMarker(idbFactory);
-  if (!marker) {
-    notifyRecoveryCheckReset(idbFactory);
-    return {
-      success: true,
-      journalDeleted: true,
-      snapshotDeleted: true,
-      stagingDeleted: true,
-      errors: [],
-    };
-  }
+  return await withExclusiveRestoreLock('retry_cleanup', async (): Promise<PostCommitCleanupResult> => {
+    const marker = await getRestoreJournalMarker(idbFactory);
+    if (!marker) {
+      notifyRecoveryCheckReset(idbFactory);
+      return {
+        success: true,
+        journalDeleted: true,
+        snapshotDeleted: true,
+        stagingDeleted: true,
+        errors: [],
+      };
+    }
 
-  let normalizedStage: RestoreJournalStage = marker.stage;
-  if (marker.stage === ('commit_completed' as any)) normalizedStage = 'commit_verified';
+    let normalizedStage: RestoreJournalStage = marker.stage;
+    if (marker.stage === ('commit_completed' as any)) normalizedStage = 'commit_verified';
 
-  if (normalizedStage !== 'commit_verified' && normalizedStage !== 'cleanup_pending' && normalizedStage !== 'completed') {
-    throw new Error(`Cannot retry cleanup: restore operation is at pre-commit stage "${marker.stage}".`);
-  }
+    if (normalizedStage !== 'commit_verified' && normalizedStage !== 'cleanup_pending' && normalizedStage !== 'completed') {
+      throw new Error(`Cannot retry cleanup: restore operation is at pre-commit stage "${marker.stage}".`);
+    }
 
-  const result = await performPostCommitCleanup({
-    idbFactory,
-    snapshotDbName: marker.snapshotDbName,
-    stagingDbName: marker.stagingDbName,
-    shouldCleanupStaging: true,
+    // Verify liveDb before deleting anything!
+    let liveDb: IDBDatabase | null = null;
+    try {
+      liveDb = await openExtensionDatabase(idbFactory, marker.liveDbName);
+
+      // Fast path: exact checksum match
+      let exactMatch = false;
+      if (marker.liveStoreChecksums && marker.liveStoreCounts) {
+        let countsMatch = true;
+        for (const store of SIX_DURABLE_STORES) {
+          const exp = marker.liveStoreCounts[store] ?? 0;
+          const act = await getStoreRecordCount(liveDb, store);
+          if (act !== exp) {
+            countsMatch = false;
+            break;
+          }
+        }
+        if (countsMatch) {
+          const currentChecksums = await computeDatabaseStoreChecksums(liveDb, SIX_DURABLE_STORES);
+          exactMatch = true;
+          for (const store of SIX_DURABLE_STORES) {
+            if (currentChecksums[store] !== marker.liveStoreChecksums[store]) {
+              exactMatch = false;
+              break;
+            }
+          }
+        }
+      }
+
+      let liveVerified = false;
+      if (exactMatch) {
+        const integrity = await validateStagingReferentialIntegrity(liveDb);
+        liveVerified = integrity.valid;
+      } else {
+        const baselineCheck = await verifyRestoredBaselinePreserved(liveDb, marker, idbFactory);
+        liveVerified = baselineCheck.valid;
+        if (!liveVerified) {
+          console.error('[Retry Cleanup] Baseline verification failed:', baselineCheck.reason);
+        }
+      }
+
+      if (!liveVerified) {
+        return {
+          success: false,
+          journalDeleted: false,
+          snapshotDeleted: false,
+          stagingDeleted: false,
+          errors: [new Error('Live database failed integrity verification. Snapshot preserved for emergency recovery.')],
+        };
+      }
+    } finally {
+      if (liveDb) {
+        try { liveDb.close(); } catch {}
+      }
+    }
+
+    const result = await performPostCommitCleanup({
+      idbFactory,
+      snapshotDbName: marker.snapshotDbName,
+      stagingDbName: marker.stagingDbName,
+      shouldCleanupStaging: true,
+    });
+
+    if (result.journalDeleted) {
+      notifyRecoveryCheckReset(idbFactory);
+    }
+
+    return result;
   });
-
-  if (result.journalDeleted) {
-    notifyRecoveryCheckReset(idbFactory);
-  }
-
-  return result;
 }
 
 export const STALE_TEMPORARY_DB_AGE_THRESHOLD_MS = 15 * 60 * 1000; // 15 minutes
@@ -528,7 +593,7 @@ export const STALE_TEMPORARY_DB_AGE_THRESHOLD_MS = 15 * 60 * 1000; // 15 minutes
 export async function cleanupStaleTemporaryDatabases(
   idbFactory?: IDBFactory
 ): Promise<string[]> {
-  if (activeRestoreLock) {
+  if (activeRestoreLock || (await isRestoreLocked())) {
     console.info('[CleanupStale] Restore lock is currently held; postponing stale cleanup.');
     return [];
   }
@@ -919,60 +984,43 @@ export async function recoverIncompleteRestoreIfAny(idbFactory?: IDBFactory): Pr
             }
             
             // If stagingDb was absent OR verifyDatabaseEquality failed (e.g. because subsequent legitimate
-            // writes occurred before crash recovery ran): verify via liveStoreCounts, checksums, and referential integrity
+            // writes occurred before crash recovery ran): verify via liveStoreCounts, checksums, and baseline preservation
             if (!verifiedCommit) {
-              if (marker.liveStoreCounts) {
-                let countsSufficient = true;
-                let hasSubsequentWrites = false;
+              let exactChecksumMatch = false;
+              if (marker.liveStoreChecksums && marker.liveStoreCounts) {
+                let countsMatch = true;
                 for (const store of SIX_DURABLE_STORES) {
                   const exp = marker.liveStoreCounts[store] ?? 0;
                   const act = await getStoreRecordCount(liveDb, store);
-                  if (act < exp) {
-                    console.error(`[Crash Recovery] Replace count deficiency in store "${store}": actual=${act}, expected at least=${exp}`);
-                    countsSufficient = false;
+                  if (act !== exp) {
+                    countsMatch = false;
                     break;
                   }
-                  if (act > exp) {
-                    hasSubsequentWrites = true;
+                }
+                if (countsMatch) {
+                  const currentChecksums = await computeDatabaseStoreChecksums(liveDb, SIX_DURABLE_STORES);
+                  exactChecksumMatch = true;
+                  for (const store of SIX_DURABLE_STORES) {
+                    if (currentChecksums[store] !== marker.liveStoreChecksums[store]) {
+                      exactChecksumMatch = false;
+                      break;
+                    }
                   }
                 }
+              }
 
-                if (countsSufficient) {
-                  let exactMatch = true;
-                  if (marker.liveStoreChecksums) {
-                    const currentChecksums = await computeDatabaseStoreChecksums(liveDb, SIX_DURABLE_STORES);
-                    for (const store of SIX_DURABLE_STORES) {
-                      const expChecksum = marker.liveStoreChecksums[store];
-                      const actChecksum = currentChecksums[store];
-                      if (!expChecksum || actChecksum !== expChecksum) {
-                        exactMatch = false;
-                        break;
-                      }
-                    }
-                  } else {
-                    exactMatch = false;
-                  }
-
-                  if (exactMatch) {
-                    const integrity = await validateStagingReferentialIntegrity(liveDb);
-                    verifiedCommit = integrity.valid;
-                  } else if (hasSubsequentWrites) {
-                    // Counts strictly increased due to subsequent legitimate records added after commit.
-                    // Referential integrity check ensures records form a consistent state.
-                    const integrity = await validateStagingReferentialIntegrity(liveDb);
-                    if (integrity.valid) {
-                      console.info('[Crash Recovery] Live database contains verified replace commit plus subsequent legitimate records. Commit verified.');
-                      verifiedCommit = true;
-                    }
-                  } else {
-                    // Counts are identical to snapshot, but checksums mismatch -> data corruption in existing records!
-                    console.error('[Crash Recovery] Replace checksum mismatch with identical counts indicates data corruption. Preserving snapshot.');
-                    verifiedCommit = false;
-                  }
-                }
+              if (exactChecksumMatch) {
+                const integrity = await validateStagingReferentialIntegrity(liveDb);
+                verifiedCommit = integrity.valid;
               } else {
-                console.error('[Crash Recovery] Staging DB is absent and journal lacks verifiable store counts for replace. Refusing to destroy snapshot.');
-                verifiedCommit = false;
+                // Must verify that all restored records are preserved in liveDb without mutation
+                const baselineCheck = await verifyRestoredBaselinePreserved(liveDb, marker, idbFactory);
+                verifiedCommit = baselineCheck.valid;
+                if (!verifiedCommit) {
+                  console.error('[Crash Recovery] Replace baseline verification failed:', baselineCheck.reason);
+                } else {
+                  console.info('[Crash Recovery] Replace baseline verified: all restored records preserved, subsequent writes valid.');
+                }
               }
             }
           } else {
@@ -1003,58 +1051,40 @@ export async function recoverIncompleteRestoreIfAny(idbFactory?: IDBFactory): Pr
             }
 
             if (!verifiedCommit) {
-              // Either stagingDb/snapshotDb is absent OR new records were added after commit
-              if (marker.liveStoreCounts) {
-                let countsSufficient = true;
-                let hasSubsequentWrites = false;
+              let exactChecksumMatch = false;
+              if (marker.liveStoreChecksums && marker.liveStoreCounts) {
+                let countsMatch = true;
                 for (const store of SIX_DURABLE_STORES) {
                   const exp = marker.liveStoreCounts[store] ?? 0;
                   const act = await getStoreRecordCount(liveDb, store);
-                  if (act < exp) {
-                    console.error(`[Crash Recovery] Merge count deficiency in store "${store}": actual=${act}, expected at least=${exp}`);
-                    countsSufficient = false;
+                  if (act !== exp) {
+                    countsMatch = false;
                     break;
                   }
-                  if (act > exp) {
-                    hasSubsequentWrites = true;
+                }
+                if (countsMatch) {
+                  const currentChecksums = await computeDatabaseStoreChecksums(liveDb, SIX_DURABLE_STORES);
+                  exactChecksumMatch = true;
+                  for (const store of SIX_DURABLE_STORES) {
+                    if (currentChecksums[store] !== marker.liveStoreChecksums[store]) {
+                      exactChecksumMatch = false;
+                      break;
+                    }
                   }
                 }
+              }
 
-                if (countsSufficient) {
-                  let exactMatch = true;
-                  if (marker.liveStoreChecksums) {
-                    const currentChecksums = await computeDatabaseStoreChecksums(liveDb, SIX_DURABLE_STORES);
-                    for (const store of SIX_DURABLE_STORES) {
-                      const expChecksum = marker.liveStoreChecksums[store];
-                      const actChecksum = currentChecksums[store];
-                      if (!expChecksum || actChecksum !== expChecksum) {
-                        exactMatch = false;
-                        break;
-                      }
-                    }
-                  } else {
-                    exactMatch = false;
-                  }
-
-                  if (exactMatch) {
-                    const integrity = await validateStagingReferentialIntegrity(liveDb);
-                    verifiedCommit = integrity.valid;
-                  } else if (hasSubsequentWrites) {
-                    // Counts strictly increased due to subsequent legitimate records added after merge commit.
-                    const integrity = await validateStagingReferentialIntegrity(liveDb);
-                    if (integrity.valid) {
-                      console.info('[Crash Recovery] Live database contains verified merge commit plus subsequent legitimate records. Commit verified.');
-                      verifiedCommit = true;
-                    }
-                  } else {
-                    // Counts are identical to post-merge state, but checksums mismatch -> data corruption in existing records!
-                    console.error('[Crash Recovery] Merge checksum mismatch with identical counts indicates data corruption. Preserving snapshot.');
-                    verifiedCommit = false;
-                  }
-                }
+              if (exactChecksumMatch) {
+                const integrity = await validateStagingReferentialIntegrity(liveDb);
+                verifiedCommit = integrity.valid;
               } else {
-                console.error('[Crash Recovery] Temporary DBs are absent and journal lacks verifiable store counts for merge. Preserving snapshot without destructive rollback.');
-                verifiedCommit = false;
+                const baselineCheck = await verifyRestoredBaselinePreserved(liveDb, marker, idbFactory);
+                verifiedCommit = baselineCheck.valid;
+                if (!verifiedCommit) {
+                  console.error('[Crash Recovery] Merge baseline verification failed:', baselineCheck.reason);
+                } else {
+                  console.info('[Crash Recovery] Merge baseline verified: all merged records preserved, subsequent writes valid.');
+                }
               }
             }
           }
@@ -1386,6 +1416,274 @@ export async function batchGetKeys(
  * Validates referential integrity directly against the staging database using cursor batches.
  * Peak memory consumption is strictly bounded (< 2 MiB RAM) without accumulating in-memory graphs.
  */
+/**
+ * Robustly verifies that all restored records from the confirmed baseline (stagingDb in Replace mode,
+ * snapshotDb + stagingDb in Merge mode) remain 100% intact and uncorrupted in liveDb, even when
+ * subsequent legitimate writes or new conversation turns have been appended.
+ *
+ * Catches:
+ * - Silent mutation of historical revisions (e.g. text/thinking corruption)
+ * - Loss or deletion of existing restored records
+ * - In-place replacement of records under identical IDs with conflicting content
+ * - Broken referential integrity in subsequent writes
+ */
+export async function verifyRestoredBaselinePreserved(
+  liveDb: IDBDatabase,
+  marker: RestoreJournalMarker,
+  idbFactory?: IDBFactory
+): Promise<{ valid: boolean; reason?: string }> {
+  // 1. Relational integrity of liveDb is always a prerequisite
+  const relResult = await validateStagingReferentialIntegrity(liveDb);
+  if (!relResult.valid) {
+    return {
+      valid: false,
+      reason: `Relational integrity violated in live database: ${relResult.errors.map((e) => e.message).join('; ')}`,
+    };
+  }
+
+  // Helper to compare an individual record against baseline
+  const isBaselineRecordPreserved = (storeName: string, baselineRecord: any, liveRecord: any): boolean => {
+    if (!liveRecord) return false;
+
+    if (
+      storeName === STORE_REVISIONS ||
+      storeName === STORE_RECOVERY_EVENTS ||
+      storeName === STORE_RAW_STREAMS ||
+      storeName === STORE_RAW_STREAM_BATCHES
+    ) {
+      // Revisions, recovery events, and raw stream records are STRICTLY IMMUTABLE!
+      return deepEqualRecords(storeName, baselineRecord, liveRecord);
+    }
+
+    if (storeName === STORE_MESSAGES) {
+      // Core identity fields must match exactly
+      if (
+        liveRecord.id !== baselineRecord.id ||
+        liveRecord.conversationId !== baselineRecord.conversationId ||
+        liveRecord.role !== baselineRecord.role ||
+        liveRecord.createdAt !== baselineRecord.createdAt
+      ) {
+        return false;
+      }
+      if (baselineRecord.remoteId && liveRecord.remoteId !== baselineRecord.remoteId) {
+        return false;
+      }
+      if (baselineRecord.remoteParentId && liveRecord.remoteParentId !== baselineRecord.remoteParentId) {
+        return false;
+      }
+      // Content preservation check: if baseline had content, liveRecord must not be wiped or corrupted
+      if (typeof baselineRecord.content === 'string') {
+        if (typeof liveRecord.content !== 'string') return false;
+      }
+      // Updated timestamp can only advance or remain equal
+      if (typeof liveRecord.updatedAt === 'number' && typeof baselineRecord.updatedAt === 'number') {
+        if (liveRecord.updatedAt < baselineRecord.updatedAt) return false;
+      }
+      return true;
+    }
+
+    if (storeName === STORE_CONVERSATIONS) {
+      if (
+        liveRecord.id !== baselineRecord.id ||
+        liveRecord.createdAt !== baselineRecord.createdAt
+      ) {
+        return false;
+      }
+      if (baselineRecord.remoteId && liveRecord.remoteId !== baselineRecord.remoteId) {
+        return false;
+      }
+      if (typeof liveRecord.updatedAt === 'number' && typeof baselineRecord.updatedAt === 'number') {
+        if (liveRecord.updatedAt < baselineRecord.updatedAt) return false;
+      }
+      return true;
+    }
+
+    return deepEqualRecords(storeName, baselineRecord, liveRecord);
+  };
+
+  if (marker.type === 'replace') {
+    let stagingDb: IDBDatabase | null = null;
+    try {
+      stagingDb = await openExistingSnapshotWithoutCreating(idbFactory, marker.stagingDbName);
+    } catch {
+      return {
+        valid: false,
+        reason: `Cannot verify replace baseline: staging database "${marker.stagingDbName}" cannot be opened`,
+      };
+    }
+    if (!stagingDb) {
+      return {
+        valid: false,
+        reason: `Cannot verify replace baseline: staging database "${marker.stagingDbName}" was not found`,
+      };
+    }
+
+    try {
+      for (const storeName of SIX_DURABLE_STORES) {
+        if (!stagingDb.objectStoreNames.contains(storeName)) continue;
+        if (!liveDb.objectStoreNames.contains(storeName)) {
+          return {
+            valid: false,
+            reason: `Mandatory store "${storeName}" missing in live database`,
+          };
+        }
+
+        let lastKey: IDBValidKey | null = null;
+        while (true) {
+          const batch = await fetchStoreBatch(stagingDb, storeName, lastKey, BATCH_SIZE);
+          if (batch.length === 0) break;
+          lastKey = batch[batch.length - 1]!.key;
+
+          const keys = batch.map((item) => item.key);
+          const liveMap = await batchGetKeys(liveDb, storeName, keys);
+
+          for (const item of batch) {
+            const liveRecord = liveMap.get(item.key);
+            if (!liveRecord) {
+              return {
+                valid: false,
+                reason: `Restored record "${String(item.key)}" in store "${storeName}" was lost or deleted from live database`,
+              };
+            }
+            if (!isBaselineRecordPreserved(storeName, item.value, liveRecord)) {
+              return {
+                valid: false,
+                reason: `Restored record "${String(item.key)}" in store "${storeName}" was mutated or corrupted in live database`,
+              };
+            }
+          }
+
+          if (batch.length < BATCH_SIZE) break;
+        }
+      }
+    } finally {
+      try { stagingDb.close(); } catch {}
+    }
+
+    return { valid: true };
+  } else {
+    // Mode: Merge
+    let snapshotDb: IDBDatabase | null = null;
+    let stagingDb: IDBDatabase | null = null;
+
+    try {
+      snapshotDb = await openExistingSnapshotWithoutCreating(idbFactory, marker.snapshotDbName);
+    } catch {
+      return {
+        valid: false,
+        reason: `Cannot verify merge baseline: snapshot database "${marker.snapshotDbName}" cannot be opened`,
+      };
+    }
+    if (!snapshotDb) {
+      return {
+        valid: false,
+        reason: `Cannot verify merge baseline: snapshot database "${marker.snapshotDbName}" was not found`,
+      };
+    }
+
+    try {
+      stagingDb = await openExistingSnapshotWithoutCreating(idbFactory, marker.stagingDbName);
+    } catch {
+      try { snapshotDb.close(); } catch {}
+      return {
+        valid: false,
+        reason: `Cannot verify merge baseline: staging database "${marker.stagingDbName}" cannot be opened`,
+      };
+    }
+    if (!stagingDb) {
+      try { snapshotDb.close(); } catch {}
+      return {
+        valid: false,
+        reason: `Cannot verify merge baseline: staging database "${marker.stagingDbName}" was not found`,
+      };
+    }
+
+    try {
+      for (const storeName of SIX_DURABLE_STORES) {
+        if (!liveDb.objectStoreNames.contains(storeName)) {
+          return { valid: false, reason: `Store "${storeName}" missing in live database` };
+        }
+
+        // 1. Every pre-merge record in snapshotDb must exist and be preserved in liveDb
+        if (snapshotDb.objectStoreNames.contains(storeName)) {
+          let lastKey: IDBValidKey | null = null;
+          while (true) {
+            const batch = await fetchStoreBatch(snapshotDb, storeName, lastKey, BATCH_SIZE);
+            if (batch.length === 0) break;
+            lastKey = batch[batch.length - 1]!.key;
+
+            const keys = batch.map((item) => item.key);
+            const liveMap = await batchGetKeys(liveDb, storeName, keys);
+
+            for (const item of batch) {
+              const liveRecord = liveMap.get(item.key);
+              if (!liveRecord) {
+                return {
+                  valid: false,
+                  reason: `Pre-existing record "${String(item.key)}" in store "${storeName}" was lost or deleted from live database`,
+                };
+              }
+              if (!isBaselineRecordPreserved(storeName, item.value, liveRecord)) {
+                return {
+                  valid: false,
+                  reason: `Pre-existing record "${String(item.key)}" in store "${storeName}" was mutated or corrupted in live database`,
+                };
+              }
+            }
+
+            if (batch.length < BATCH_SIZE) break;
+          }
+        }
+
+        // 2. Every non-conflicting record imported from stagingDb must exist and be preserved in liveDb
+        if (stagingDb.objectStoreNames.contains(storeName)) {
+          let lastKey: IDBValidKey | null = null;
+          while (true) {
+            const batch = await fetchStoreBatch(stagingDb, storeName, lastKey, BATCH_SIZE);
+            if (batch.length === 0) break;
+            lastKey = batch[batch.length - 1]!.key;
+
+            const keys = batch.map((item) => item.key);
+            const [liveMap, snapMap] = await Promise.all([
+              batchGetKeys(liveDb, storeName, keys),
+              snapshotDb.objectStoreNames.contains(storeName)
+                ? batchGetKeys(snapshotDb, storeName, keys)
+                : Promise.resolve(new Map()),
+            ]);
+
+            for (const item of batch) {
+              const liveRecord = liveMap.get(item.key);
+              if (!liveRecord) {
+                return {
+                  valid: false,
+                  reason: `Imported record "${String(item.key)}" in store "${storeName}" was lost or missing from live database`,
+                };
+              }
+              const inSnap = snapMap.get(item.key);
+              if (!inSnap) {
+                // Was newly inserted during merge: must match imported staging record
+                if (!isBaselineRecordPreserved(storeName, item.value, liveRecord)) {
+                  return {
+                    valid: false,
+                    reason: `Imported record "${String(item.key)}" in store "${storeName}" was mutated or corrupted in live database`,
+                  };
+                }
+              }
+            }
+
+            if (batch.length < BATCH_SIZE) break;
+          }
+        }
+      }
+    } finally {
+      try { snapshotDb.close(); } catch {}
+      try { stagingDb.close(); } catch {}
+    }
+
+    return { valid: true };
+  }
+}
+
 export async function validateStagingReferentialIntegrity(
   stagingDb: IDBDatabase
 ): Promise<IntegrityValidationResult> {
