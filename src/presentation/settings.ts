@@ -8,14 +8,17 @@
  */
 
 export type RecoveryDisplayMode = 'overlay' | 'inline';
+export type InlinePlacementMode = 'underneath' | 'replace';
 
 export interface RecoveryPresentationSettings {
   displayMode: RecoveryDisplayMode;
+  inlinePlacement: InlinePlacementMode;
   showThinkingInline: boolean;
 }
 
 export const DEFAULT_RECOVERY_PRESENTATION_SETTINGS: RecoveryPresentationSettings = {
   displayMode: 'overlay',
+  inlinePlacement: 'underneath',
   showThinkingInline: true,
 };
 
@@ -42,6 +45,12 @@ export function validateRecoveryPresentationSettings(raw: unknown): RecoveryPres
       ? (record.displayMode as RecoveryDisplayMode)
       : DEFAULT_RECOVERY_PRESENTATION_SETTINGS.displayMode;
 
+  const validPlacements: InlinePlacementMode[] = ['underneath', 'replace'];
+  const inlinePlacement: InlinePlacementMode =
+    typeof record.inlinePlacement === 'string' && validPlacements.includes(record.inlinePlacement as InlinePlacementMode)
+      ? (record.inlinePlacement as InlinePlacementMode)
+      : DEFAULT_RECOVERY_PRESENTATION_SETTINGS.inlinePlacement;
+
   const showThinkingInline =
     typeof record.showThinkingInline === 'boolean'
       ? record.showThinkingInline
@@ -49,6 +58,7 @@ export function validateRecoveryPresentationSettings(raw: unknown): RecoveryPres
 
   return {
     displayMode,
+    inlinePlacement,
     showThinkingInline,
   };
 }

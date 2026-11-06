@@ -17,6 +17,7 @@ import {
 import type { RestorePlan, RestoreResult } from './types';
 import type { PortableBackupStoreCounts } from '../backup/format';
 import { isRecordSemanticallyIdentical } from '../backup/record-validation';
+import { createDurableWriteTransaction } from '../storage/db';
 
 export const SIX_DURABLE_STORES = [
   STORE_CONVERSATIONS,
@@ -61,7 +62,7 @@ export async function executeAtomicMerge(
   return new Promise((resolve, reject) => {
     let tx: IDBTransaction;
     try {
-      tx = db.transaction(SIX_DURABLE_STORES as unknown as string[], 'readwrite');
+      tx = createDurableWriteTransaction(db, SIX_DURABLE_STORES as unknown as string[], 'strict');
     } catch (err) {
       return reject(new Error(`Failed to open merge transaction: ${(err as Error).message}`));
     }

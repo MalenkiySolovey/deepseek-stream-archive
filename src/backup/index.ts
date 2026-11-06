@@ -6,3 +6,4 @@ export * from './validator';
 export * from './save-file';
 export * from './reader';
 export * from './record-validation';
+export * from './streaming-backup';

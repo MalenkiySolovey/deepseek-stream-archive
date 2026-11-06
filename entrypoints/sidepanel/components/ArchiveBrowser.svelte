@@ -27,7 +27,7 @@
   let error = $state<string | null>(null);
   let searchQuery = $state<string>('');
 
-  let filteredItems = $derived<ArchiveConversationSummary[]>(() => {
+  let filteredItems = $derived.by<ArchiveConversationSummary[]>(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return items;
     return items.filter(
@@ -138,7 +138,7 @@
     <div class="error-banner">
       <strong>Error:</strong> {error}
     </div>
-  {:else if filteredItems().length === 0}
+  {:else if filteredItems.length === 0}
     <div class="empty-state">
       <div class="empty-icon">📂</div>
       <div class="empty-title">{t.emptyConversations}</div>
@@ -146,7 +146,7 @@
     </div>
   {:else}
     <div class="conversations-list">
-      {#each filteredItems() as item (item.id)}
+      {#each filteredItems as item (item.id)}
         <button
           class="conversation-card"
           type="button"

@@ -32,6 +32,13 @@
     isUnmatchedCapture,
     type ResponseRevision,
   } from '../../../src/core/models';
+  import {
+    buildConversationTree,
+    type ConversationTreeResult,
+    type ConversationTreeNode,
+    type ArchiveViewSelection,
+  } from '../../../src/core/conversation-tree';
+  import { IndexedDbStorageRepository } from '../../../src/storage/repositories/storage-repository-impl';
   import SafeMarkdown from './SafeMarkdown.svelte';
   import ContextContinuityPreviewModal from './ContextContinuityPreviewModal.svelte';
   import { getContextContinuitySettings } from '../../../src/context-continuity/settings';
@@ -69,6 +76,7 @@
 
   // Branch index per parent grouping
   let branchSelections = $state<Record<string, number>>({});
+  let viewSelection = $state<ArchiveViewSelection | null>(null);
 
   // Export Popover/Dialog State
   let showExportModal = $state(false);
@@ -85,24 +93,46 @@
     isExporting = true;
     exportStatusMessage = null;
     try {
-      const res = await new Promise<GetConversationExportResponse>((resolve) => {
-        if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-          const req: GetConversationExportRequest = {
-            type: MESSAGE_GET_CONVERSATION_EXPORT,
-            conversationId: detail!.conversation.id,
-          };
-          chrome.runtime.sendMessage(req, (r) => {
-            resolve(r || { success: false, error: 'No response from background worker' });
-          });
-        } else {
-          resolve({ success: false, error: 'Extension runtime unavailable' });
-        }
-      });
+      let exportModel: ConversationExportModel | null = null;
 
-      if (!res.success || !res.exportModel) {
-        exportStatusMessage = `${t.exportError}: ${res.error || 'Failed to retrieve conversation export model'}`;
-        isExporting = false;
-        return;
+      // 1. Primary: Direct sidepanel IndexedDB access (fast, zero IPC limits, handles thousands of turns)
+      try {
+        const repo = new IndexedDbStorageRepository();
+        exportModel = await repo.getConversationExportModel(detail.conversation.id, {
+          includeRevisions: exportIncludeRevisions,
+        });
+      } catch {
+        // Fall back to background worker message
+      }
+
+      // 2. Secondary fallback: Request from background worker with options & lastError handling
+      if (!exportModel) {
+        const res = await new Promise<GetConversationExportResponse>((resolve) => {
+          if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+            const req: GetConversationExportRequest = {
+              type: MESSAGE_GET_CONVERSATION_EXPORT,
+              conversationId: detail!.conversation.id,
+              includeRevisions: exportIncludeRevisions,
+            };
+            chrome.runtime.sendMessage(req, (r) => {
+              const lastErr = chrome.runtime?.lastError;
+              if (lastErr) {
+                resolve({ success: false, error: lastErr.message || 'Background worker communication error' });
+              } else {
+                resolve(r || { success: false, error: 'No response from background worker' });
+              }
+            });
+          } else {
+            resolve({ success: false, error: 'Extension runtime unavailable' });
+          }
+        });
+
+        if (!res.success || !res.exportModel) {
+          exportStatusMessage = `${t.exportError}: ${res.error || 'Failed to retrieve conversation export model'}`;
+          isExporting = false;
+          return;
+        }
+        exportModel = res.exportModel;
       }
 
       const options: ConversationExportOptions = {
@@ -119,11 +149,11 @@
       let ext: string;
 
       if (exportFormat === 'markdown') {
-        content = buildConversationMarkdown(res.exportModel, options);
+        content = buildConversationMarkdown(exportModel, options);
         mimeType = 'text/markdown;charset=utf-8';
         ext = 'md';
       } else {
-        content = buildConversationJson(res.exportModel, options);
+        content = buildConversationJson(exportModel, options);
         mimeType = 'application/json;charset=utf-8';
         ext = 'json';
       }
@@ -246,7 +276,7 @@
   let isArmed = $state(false);
 
   function getActiveLeafId(): string | undefined {
-    const list = visibleMessages();
+    const list = visibleMessages;
     return list[list.length - 1]?.id;
   }
 
@@ -375,6 +405,25 @@
     loading = true;
     error = null;
     try {
+      if (typeof chrome !== 'undefined' && chrome.storage?.local && conversationId) {
+        try {
+          const stored = await chrome.storage.local.get([
+            `archive_view_selection_${conversationId}`,
+            `branch_selections_${conversationId}`,
+          ]);
+          const savedView = stored[`archive_view_selection_${conversationId}`];
+          if (savedView && typeof savedView === 'object') {
+            viewSelection = savedView as ArchiveViewSelection;
+          }
+          const savedBranch = stored[`branch_selections_${conversationId}`];
+          if (savedBranch && typeof savedBranch === 'object') {
+            branchSelections = { ...savedBranch };
+          }
+        } catch {
+          // ignore
+        }
+      }
+
       if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
         const req: GetArchiveConversationRequest = {
           type: MESSAGE_GET_ARCHIVE_CONVERSATION,
@@ -404,104 +453,171 @@
     messages: ArchiveMessageSummary[];
   }
 
-  let logicalMessages = $derived<ArchiveMessageSummary[]>(() => {
+  let logicalMessages = $derived.by<ArchiveMessageSummary[]>(() => {
     if (!detail) return [];
     return detail.messages.filter((m) => isLogicalMessage(m));
   });
 
-  let unmatchedCaptures = $derived<ArchiveMessageSummary[]>(() => {
+  let unmatchedCaptures = $derived.by<ArchiveMessageSummary[]>(() => {
     if (!detail) return [];
     return detail.messages.filter((m) => isUnmatchedCapture(m));
   });
 
-  function getEffectiveParentKey(msg: ArchiveMessageSummary, allMsgs: ArchiveMessageSummary[]): string {
-    if (msg.parentId) {
-      return msg.parentId;
+  let conversationTree = $derived.by<ConversationTreeResult<ArchiveMessageSummary>>(() => {
+    return buildConversationTree(logicalMessages, {
+      conversation: detail?.conversation,
+      viewSelection,
+      branchSelections,
+      preferLatestByDefault: false,
+    });
+  });
+
+  let visibleMessages = $derived<ArchiveMessageSummary[]>(conversationTree.activePath);
+
+  let unlinkedMessages = $derived<ArchiveMessageSummary[]>(conversationTree.unlinkedMessages);
+
+  function getSiblingInfo(msg: ArchiveMessageSummary) {
+    const tree = conversationTree;
+    const node = tree.getNode(msg.id);
+    if (!node) {
+      return { count: 1, current: 1, key: '', isUserBranch: false, isAssistantVariant: false };
     }
-    if (msg.role === 'user') {
-      return '__root__';
+    const isUser = msg.role === 'user';
+    if (isUser && node.userBranchCount > 1) {
+      const key = node.parent ? node.parent.message.id : '__root__';
+      return {
+        count: node.userBranchCount,
+        current: node.userBranchIndex + 1,
+        key,
+        isUserBranch: true,
+        isAssistantVariant: false,
+      };
     }
-    const idx = allMsgs.findIndex((m) => m.id === msg.id);
-    if (idx > 0) {
-      for (let i = idx - 1; i >= 0; i--) {
-        if (allMsgs[i]!.role === 'user') {
-          return allMsgs[i]!.id;
+    if (!isUser && node.assistantVariantCount > 1) {
+      const key = node.parent ? node.parent.message.id : '__root__';
+      return {
+        count: node.assistantVariantCount,
+        current: node.assistantVariantIndex + 1,
+        key,
+        isUserBranch: false,
+        isAssistantVariant: true,
+      };
+    }
+    return { count: 1, current: 1, key: '', isUserBranch: false, isAssistantVariant: false };
+  }
+
+  async function switchBranch(key: string, delta: number, total: number) {
+    const tree = conversationTree;
+    let siblings: ConversationTreeNode<ArchiveMessageSummary>[] = [];
+    if (key === '__root__') {
+      siblings = tree.roots;
+    } else {
+      const parentNode = tree.getNode(key);
+      if (parentNode) {
+        siblings = parentNode.children;
+      }
+    }
+    if (siblings.length <= 1) return;
+
+    // Find current index of active node among siblings
+    let currentIndex = 0;
+    const currentSelectedId = viewSelection?.selectedChildByParent?.[key];
+    if (currentSelectedId) {
+      const foundIdx = siblings.findIndex((s) => s.message.id === currentSelectedId);
+      if (foundIdx >= 0) currentIndex = foundIdx;
+    } else {
+      const activeIdx = siblings.findIndex((s) => tree.activeMessageIds.has(s.message.id));
+      if (activeIdx >= 0) currentIndex = activeIdx;
+    }
+
+    const nextIndex = (currentIndex + delta + siblings.length) % siblings.length;
+    const nextNode = siblings[nextIndex]!;
+    const nextSelectedId = nextNode.message.id;
+
+    const updatedSelection: ArchiveViewSelection = {
+      conversationId,
+      selectedChildByParent: {
+        ...(viewSelection?.selectedChildByParent || {}),
+        [key]: nextSelectedId,
+      },
+      selectedRootId: key === '__root__' ? nextSelectedId : viewSelection?.selectedRootId,
+      updatedAt: Date.now(),
+    };
+
+    viewSelection = updatedSelection;
+    branchSelections = {
+      ...branchSelections,
+      [key]: nextIndex,
+    };
+
+    try {
+      if (typeof chrome !== 'undefined' && chrome.storage?.local && conversationId) {
+        await chrome.storage.local.set({
+          [`archive_view_selection_${conversationId}`]: updatedSelection,
+          [`branch_selections_${conversationId}`]: { ...branchSelections },
+        });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function goToObservedSession() {
+    const tree = conversationTree;
+    if (!tree.observedLeafId || tree.observedPath.length === 0) return;
+
+    const newSelectedChildByParent: Record<string, string> = {
+      ...(viewSelection?.selectedChildByParent || {}),
+    };
+    let rootId: string | undefined = undefined;
+
+    for (let i = 0; i < tree.observedPath.length; i++) {
+      const msg = tree.observedPath[i]!;
+      const parentKey = msg.parentId || '__root__';
+      newSelectedChildByParent[parentKey] = msg.id;
+      if (i === 0) {
+        rootId = msg.id;
+        newSelectedChildByParent['__root__'] = msg.id;
+      }
+    }
+
+    const updatedSelection: ArchiveViewSelection = {
+      conversationId,
+      selectedChildByParent: newSelectedChildByParent,
+      selectedRootId: rootId,
+      updatedAt: Date.now(),
+    };
+
+    viewSelection = updatedSelection;
+
+    const newBranchSelections: Record<string, number> = {};
+    for (let i = 0; i < tree.observedPath.length; i++) {
+      const node = tree.getNode(tree.observedPath[i]!.id);
+      if (node) {
+        if (node.isRoot && tree.roots.length > 1) {
+          newBranchSelections['__root__'] = node.userBranchIndex;
+        } else if (node.parent) {
+          const parentKey = node.parent.message.id;
+          if (node.message.role === 'user' && node.userBranchCount > 1) {
+            newBranchSelections[parentKey] = node.userBranchIndex;
+          } else if (node.message.role === 'assistant' && node.assistantVariantCount > 1) {
+            newBranchSelections[parentKey] = node.assistantVariantIndex;
+          }
         }
       }
     }
-    return '__root__';
-  }
+    branchSelections = newBranchSelections;
 
-  let visibleMessages = $derived<ArchiveMessageSummary[]>(() => {
-    const msgs = logicalMessages();
-    if (msgs.length === 0) return [];
-
-    // Group children by effective parentKey
-    const groups = new Map<string, ArchiveMessageSummary[]>();
-    for (const msg of msgs) {
-      const parentKey = getEffectiveParentKey(msg, msgs);
-      if (!groups.has(parentKey)) {
-        groups.set(parentKey, []);
+    try {
+      if (typeof chrome !== 'undefined' && chrome.storage?.local && conversationId) {
+        await chrome.storage.local.set({
+          [`archive_view_selection_${conversationId}`]: updatedSelection,
+          [`branch_selections_${conversationId}`]: { ...newBranchSelections },
+        });
       }
-      groups.get(parentKey)!.push(msg);
+    } catch {
+      // ignore
     }
-
-    // Sort siblings by createdAt ascending, then id
-    for (const list of groups.values()) {
-      list.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
-    }
-
-    const roots = groups.get('__root__') || [];
-    if (roots.length === 0) {
-      return [...msgs].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
-    }
-
-    // Traverse downward from active root to leaf
-    const result: ArchiveMessageSummary[] = [];
-    const visited = new Set<string>();
-
-    const rootIdx = branchSelections['__root__'] ?? 0;
-    let current: ArchiveMessageSummary | undefined =
-      roots[Math.max(0, Math.min(rootIdx, roots.length - 1))];
-
-    while (current && !visited.has(current.id)) {
-      visited.add(current.id);
-      result.push(current);
-
-      const children = groups.get(current.id);
-      if (!children || children.length === 0) {
-        break;
-      }
-
-      const selIdx = branchSelections[current.id] ?? 0;
-      const clampedIdx = Math.max(0, Math.min(selIdx, children.length - 1));
-      current = children[clampedIdx];
-    }
-
-    return result;
-  });
-
-  function getSiblingInfo(msg: ArchiveMessageSummary) {
-    if (!detail) return { count: 1, current: 1, key: '' };
-    const msgs = logicalMessages();
-    const parentKey = getEffectiveParentKey(msg, msgs);
-    const siblings = msgs
-      .filter((m) => getEffectiveParentKey(m, msgs) === parentKey)
-      .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
-
-    const activeIdx = branchSelections[parentKey] ?? 0;
-    const clampedIdx = Math.max(0, Math.min(activeIdx, siblings.length - 1));
-    return {
-      count: siblings.length,
-      current: clampedIdx + 1,
-      key: parentKey,
-    };
-  }
-
-  function switchBranch(key: string, delta: number, total: number) {
-    const current = branchSelections[key] ?? 0;
-    const next = (current + delta + total) % total;
-    branchSelections[key] = next;
   }
 
   function getActiveContent(msg: ArchiveMessageSummary): { text: string; thinking?: string } {
@@ -581,7 +697,7 @@
         {#if detail?.conversation.remoteId}
           <span class="meta-item remote">Remote: {detail.conversation.remoteId}</span>
         {/if}
-        <span class="meta-item">{logicalMessages().length} {t.messagesCount}</span>
+        <span class="meta-item">{logicalMessages.length} {t.messagesCount}</span>
       </div>
     </div>
     {#if detail}
@@ -646,8 +762,25 @@
     </div>
   {:else}
     <div class="messages-thread">
-      {#each visibleMessages() as msg (msg.id)}
+      {#if !conversationTree.isArchiveViewingObservedPath && conversationTree.observedLeafId}
+        <div class="observed-path-banner">
+          <div class="observed-path-info">
+            <span class="observed-path-icon">🧭</span>
+            <span class="observed-path-text">{t.observedPathNotification}</span>
+          </div>
+          <button
+            class="observed-path-btn"
+            type="button"
+            onclick={goToObservedSession}
+          >
+            {t.goToObservedSession}
+          </button>
+        </div>
+      {/if}
+
+      {#each visibleMessages as msg (msg.id)}
         {@const branchInfo = getSiblingInfo(msg)}
+        {@const node = conversationTree.getNode(msg.id)}
         {@const activeData = getActiveContent(msg)}
         {@const isAssistant = msg.role === 'assistant'}
         {@const isFiltered = msg.status === 'filtered' || (msg.recoveryEvents && msg.recoveryEvents.length > 0) || Boolean(msg.preferredRevision?.isLastGood)}
@@ -678,11 +811,13 @@
             <div class="header-actions">
               {#if branchInfo.count > 1}
                 <div class="branch-controls">
-                  <span class="branch-label">{t.branchXofY} {branchInfo.current} {t.of} {branchInfo.count}</span>
+                  <span class="branch-label">
+                    {branchInfo.isAssistantVariant ? t.responseXofY : t.promptXofY} {branchInfo.current} {t.of} {branchInfo.count}
+                  </span>
                   <button
                     class="branch-nav-btn"
                     type="button"
-                    title={t.prevBranch}
+                    title={branchInfo.isAssistantVariant ? t.prevResponse : t.prevPrompt}
                     onclick={() => switchBranch(branchInfo.key, -1, branchInfo.count)}
                   >
                     ‹
@@ -690,7 +825,7 @@
                   <button
                     class="branch-nav-btn"
                     type="button"
-                    title={t.nextBranch}
+                    title={branchInfo.isAssistantVariant ? t.nextResponse : t.nextPrompt}
                     onclick={() => switchBranch(branchInfo.key, 1, branchInfo.count)}
                   >
                     ›
@@ -708,7 +843,7 @@
             </div>
           </div>
 
-          {#if msg.remoteParentId && !msg.parentId}
+          {#if (msg.remoteParentId && !msg.parentId && !node?.parent && !node?.isRoot)}
             <div class="unresolved-parent-notice">
               ⚠️ {t.unresolvedParent} ({msg.remoteParentId})
             </div>
@@ -812,17 +947,68 @@
           {/if}
         </div>
       {/each}
-      {#if unmatchedCaptures().length > 0}
+      {#if unlinkedMessages.length > 0}
+        <div class="unlinked-turns-section">
+          <div class="unlinked-turns-header">
+            <span class="unlinked-icon">⚠️</span>
+            <div class="unlinked-header-text">
+              <span class="unlinked-title">{t.unlinkedTurnsTitle} ({unlinkedMessages.length})</span>
+              <span class="unlinked-desc">{t.unlinkedTurnsDesc}</span>
+            </div>
+          </div>
+          <div class="unlinked-turns-list">
+            {#each unlinkedMessages as um (um.id)}
+              {@const umData = getActiveContent(um)}
+              {@const detail = conversationTree.unlinkedDetails?.find((d) => d.message.id === um.id)}
+              <div class="unlinked-turn-card">
+                <div class="unmatched-card-meta">
+                  <span class="role-badge" class:asst={um.role === 'assistant'} class:usr={um.role === 'user'}>
+                    {um.role === 'assistant' ? t.roleAssistant : t.roleUser}
+                  </span>
+                  <span class="unmatched-pill">{um.status}</span>
+                  {#if detail?.reason}
+                    <span class="unmatched-pill unlinked-reason">{detail.reason}</span>
+                  {/if}
+                  <span class="unmatched-key">ID: {um.id}</span>
+                  {#if um.remoteId}
+                    <span class="unmatched-key">Remote: {um.remoteId}</span>
+                  {/if}
+                  {#if um.parentId}
+                    <span class="unmatched-key">Parent: {um.parentId}</span>
+                  {/if}
+                  {#if um.remoteParentId}
+                    <span class="unmatched-key">RemoteParent: {um.remoteParentId}</span>
+                  {/if}
+                  {#if um.sourceRawStreamKey}
+                    <span class="unmatched-key">Stream: {um.sourceRawStreamKey}</span>
+                  {/if}
+                  <button
+                    class="copy-btn mini"
+                    type="button"
+                    onclick={() => copyToClipboard(umData.text || um.content || '', um.id)}
+                  >
+                    {copiedId === um.id ? t.copiedText : t.copyText}
+                  </button>
+                </div>
+                <div class="unmatched-content">
+                  <SafeMarkdown content={umData.text || um.content || ''} />
+                </div>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
+      {#if unmatchedCaptures.length > 0}
         <div class="unmatched-captures-section">
           <div class="unmatched-captures-header">
             <span class="unmatched-icon">📡</span>
             <div class="unmatched-header-text">
-              <span class="unmatched-title">{t.unmatchedCapturesTitle} ({unmatchedCaptures().length})</span>
+              <span class="unmatched-title">{t.unmatchedCapturesTitle} ({unmatchedCaptures.length})</span>
               <span class="unmatched-desc">{t.unmatchedCapturesDesc}</span>
             </div>
           </div>
           <div class="unmatched-captures-list">
-            {#each unmatchedCaptures() as um (um.id)}
+            {#each unmatchedCaptures as um (um.id)}
               {@const umData = getActiveContent(um)}
               <div class="unmatched-capture-card">
                 <div class="unmatched-card-meta">
@@ -1912,6 +2098,12 @@
     font-size: 0.625rem;
   }
 
+  .unmatched-pill.unlinked-reason {
+    background: #b45309;
+    color: #fef3c7;
+    font-weight: 500;
+  }
+
   .unmatched-key {
     color: #a78bfa;
     font-family: monospace;
@@ -1926,5 +2118,93 @@
 
   .thinking-details.mini {
     margin-bottom: 0.5rem;
+  }
+
+  .unlinked-turns-section {
+    margin-top: 1rem;
+    padding: 0.875rem 1rem;
+    background: #171717;
+    border: 1px dashed #b45309;
+    border-radius: 0.5rem;
+  }
+
+  .unlinked-turns-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .unlinked-icon {
+    font-size: 1.125rem;
+  }
+
+  .unlinked-title {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: #fde68a;
+  }
+
+  .unlinked-desc {
+    font-size: 0.6875rem;
+    color: #94a3b8;
+  }
+
+  .unlinked-turns-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .unlinked-turn-card {
+    background: #1e1e1e;
+    border: 1px solid #3f3f46;
+    border-radius: 0.375rem;
+    padding: 0.75rem;
+  }
+
+  .observed-path-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.6rem 0.85rem;
+    background: rgba(30, 58, 138, 0.35);
+    border: 1px solid rgba(59, 130, 246, 0.45);
+    border-radius: 0.375rem;
+    margin-bottom: 0.75rem;
+    font-size: 0.8125rem;
+  }
+
+  .observed-path-info {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #93c5fd;
+  }
+
+  .observed-path-icon {
+    font-size: 1rem;
+  }
+
+  .observed-path-text {
+    line-height: 1.4;
+  }
+
+  .observed-path-btn {
+    background: #2563eb;
+    color: #ffffff;
+    border: 1px solid #3b82f6;
+    border-radius: 0.25rem;
+    padding: 0.25rem 0.65rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s;
+  }
+
+  .observed-path-btn:hover {
+    background: #1d4ed8;
   }
 </style>

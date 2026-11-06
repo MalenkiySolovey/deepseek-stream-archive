@@ -40,7 +40,9 @@ export class HistoryReconciler {
     const now = Date.now();
 
     // ── Phase 1: Conversation Reconciliation ──
-    const existingConv = await this.storage.getConversationByRemoteId(session.sessionId);
+    const existingConv =
+      (await this.storage.getConversationByRemoteId(session.sessionId)) ||
+      (await this.storage.getConversation(session.sessionId));
     let isNewConversation = false;
     let conversation: Conversation;
 
@@ -53,6 +55,7 @@ export class HistoryReconciler {
         title: session.title,
         createdAt: session.updatedAt || now,
         updatedAt: Math.max(session.updatedAt || now, now),
+        currentMessageId: session.currentMessageId || undefined,
       };
       isNewConversation = true;
     } else {
@@ -60,6 +63,7 @@ export class HistoryReconciler {
         ...existingConv,
         title: session.title || existingConv.title,
         updatedAt: Math.max(session.updatedAt || existingConv.updatedAt, existingConv.updatedAt),
+        currentMessageId: session.currentMessageId || existingConv.currentMessageId || undefined,
       };
     }
 
@@ -72,6 +76,15 @@ export class HistoryReconciler {
       }
     }
 
+    // Index unmatched provisional user messages for linking to authoritative server history
+    const unmatchedProvisionalUser = existingMessages.filter(
+      (m) => m.role === 'user' && !m.remoteId && m.identityState !== 'reconciled'
+    );
+    // Index unmatched provisional assistant messages for linking to authoritative server history
+    const unmatchedProvisionalAssistant = existingMessages.filter(
+      (m) => m.role === 'assistant' && !m.remoteId && m.identityState !== 'reconciled'
+    );
+
     let messagesCreated = 0;
     let messagesUpdated = 0;
     let revisionsCreated = 0;
@@ -80,7 +93,184 @@ export class HistoryReconciler {
     const revisionsToPut: ResponseRevision[] = [];
 
     for (const hm of messages) {
-      const existing = existingByRemoteId.get(hm.messageId);
+      let existing = existingByRemoteId.get(hm.messageId);
+
+      // Associate unmatched provisional user turn with authoritative history turn
+      if (!existing && hm.role === 'user') {
+        const matchIdx = unmatchedProvisionalUser.findIndex((cand) => {
+          // Content must always match between user turns
+          if (!cand.content || !hm.text || cand.content !== hm.text) {
+            return false;
+          }
+
+          if (hm.parentId) {
+            // Child turn: parent must be confirmed
+            if (cand.remoteParentId && cand.remoteParentId === hm.parentId) {
+              return true;
+            }
+            if (cand.parentId) {
+              const localParent = existingMessages.find((m) => m.id === cand.parentId);
+              if (localParent?.remoteId && localParent.remoteId === hm.parentId) {
+                return true;
+              }
+            }
+            // Without proven parentage, do not match child turns
+            return false;
+          } else {
+            // Root turn: cand must also be root (no parent)
+            if (cand.remoteParentId || cand.parentId) {
+              return false;
+            }
+            // Disambiguation: Ensure no other root candidate has the exact same content
+            const duplicateRoots = unmatchedProvisionalUser.filter(
+              (c) => !c.remoteParentId && !c.parentId && c.content === hm.text
+            );
+            // Invariant: Server history must also contain exactly ONE root message with this content
+            const serverDuplicateRoots = messages.filter(
+              (m) => m.role === 'user' && !m.parentId && m.text === hm.text
+            );
+            if (serverDuplicateRoots.length !== 1) {
+              return false;
+            }
+            if (duplicateRoots.length === 1) {
+              return true;
+            }
+            // If multiple provisional roots exist (e.g. from network transport retries),
+            // match the unique one that has a logical assistant child:
+            const candidatesWithLogicalChild = duplicateRoots.filter(
+              (c) =>
+                existingMessages.some(
+                  (m) => m.role === 'assistant' && m.parentId === c.id && isLogicalMessage(m)
+                ) ||
+                messagesToPut.some(
+                  (m) => m.role === 'assistant' && m.parentId === c.id && isLogicalMessage(m)
+                )
+            );
+            if (candidatesWithLogicalChild.length === 1 && candidatesWithLogicalChild[0]!.id === cand.id) {
+              return true;
+            }
+            return false;
+          }
+        });
+        if (matchIdx >= 0) {
+          existing = unmatchedProvisionalUser.splice(matchIdx, 1)[0]!;
+          existing.remoteId = hm.messageId;
+          existingByRemoteId.set(hm.messageId, existing);
+        }
+      }
+
+      // Associate unmatched provisional assistant turn with authoritative history turn
+      if (!existing && hm.role === 'assistant') {
+        const parentUser = hm.parentId ? existingByRemoteId.get(hm.parentId) : undefined;
+        const matchIdx = unmatchedProvisionalAssistant.findIndex((cand) => {
+          // 1. Negative parent disqualification:
+          if (cand.remoteParentId && hm.parentId && cand.remoteParentId !== hm.parentId) {
+            return false;
+          }
+          if (
+            parentUser &&
+            cand.parentId &&
+            cand.parentId !== parentUser.id &&
+            existingMessages.some((m) => m.id === cand.parentId)
+          ) {
+            return false;
+          }
+
+          // 2. Positive proof of identity requires confirmed parentage match or ghost parent with verified content:
+          const hasParentMatch = Boolean(
+            (parentUser && cand.parentId && cand.parentId === parentUser.id) ||
+            (cand.remoteParentId && hm.parentId && cand.remoteParentId === hm.parentId)
+          );
+
+          const isGhostParentWithContentMatch = Boolean(
+            parentUser &&
+            cand.parentId &&
+            !existingMessages.some((m) => m.id === cand.parentId) &&
+            cand.content &&
+            hm.text &&
+            cand.content.trim() === hm.text.trim()
+          );
+
+          if (!hasParentMatch && !isGhostParentWithContentMatch) {
+            // Invariant: Never match an assistant message without confirmed parentage or verified content proof!
+            // Identical text alone on live messages or conversation-wide uniqueness is NEVER proof of identity.
+            return false;
+          }
+
+          // 3. Content matching & Filtered message handling
+          const candText = (cand.content || '').trim();
+          const histText = (hm.text || '').trim();
+
+          const isCandFiltered = cand.status === 'filtered';
+          const isHmFiltered = hm.status === 'filtered' || hm.isFiltered || Boolean(hm.templateResponse);
+
+          // All candidates under this confirmed parent
+          const candidatesUnderParent = unmatchedProvisionalAssistant.filter((c) =>
+            Boolean(
+              (parentUser && c.parentId && c.parentId === parentUser.id) ||
+              (c.remoteParentId && hm.parentId && c.remoteParentId === hm.parentId) ||
+              (parentUser && c.parentId && !existingMessages.some((m) => m.id === c.parentId) && c.content && hm.text && c.content.trim() === hm.text.trim())
+            )
+          );
+
+          // Invariant: A filtered candidate can NEVER match a normal server message,
+          // and a normal candidate can NEVER match a filtered server message!
+          if (Boolean(isCandFiltered) !== Boolean(isHmFiltered)) {
+            return false;
+          }
+
+          if (isCandFiltered && isHmFiltered) {
+            // When a message is filtered, DeepSeek replaces server content with a canned template response.
+            // Consequently, candidate text (the pre-filter content) and server text (the template response)
+            // will NEVER match by content equality.
+            const filteredCandidates = candidatesUnderParent.filter((c) => c.status === 'filtered');
+            const filteredServer = messages.filter(
+              (m) =>
+                m.role === 'assistant' &&
+                (m.parentId || undefined) === (hm.parentId || undefined) &&
+                (m.status === 'filtered' || m.isFiltered || Boolean(m.templateResponse))
+            );
+
+            // Strict disambiguation: Only match if there is exactly 1 filtered candidate AND
+            // exactly 1 filtered server message under this confirmed parent!
+            // If there are multiple filtered regenerates or multiple filtered server messages,
+            // never guess! Keep them separate and leave remoteId unresolved.
+            if (filteredCandidates.length === 1 && filteredServer.length === 1) {
+              return cand.id === filteredCandidates[0]!.id;
+            }
+            return false;
+          }
+
+          if (candText !== histText) {
+            return false;
+          }
+
+          // 4. Disambiguation under this confirmed parent for normal messages:
+          const sameTextCandidatesUnderParent = candidatesUnderParent.filter(
+            (c) => (c.content || '').trim() === histText
+          );
+
+          // Server history messages under same parent with identical content (e.g. Regenerate responses with identical text)
+          const sameTextServerUnderParent = messages.filter(
+            (m) =>
+              m.role === 'assistant' &&
+              (m.parentId || undefined) === (hm.parentId || undefined) &&
+              (m.text || '').trim() === histText
+          );
+
+          // Invariant: If there are multiple regenerate variants with identical text under the same parent
+          // (either locally or on the server), do NOT guess! Keep records separate until proven.
+          return (
+            sameTextCandidatesUnderParent.length === 1 &&
+            sameTextServerUnderParent.length === 1
+          );
+        });
+        if (matchIdx >= 0) {
+          existing = unmatchedProvisionalAssistant.splice(matchIdx, 1)[0]!;
+          existing.remoteId = hm.messageId;
+          existingByRemoteId.set(hm.messageId, existing);
+        }
+      }
 
       if (existing) {
         // Message already exists from live streaming or previous history
@@ -222,6 +412,74 @@ export class HistoryReconciler {
       if (em.identityState === 'reconciled') {
         continue;
       }
+
+      if (em.role === 'user') {
+        // Distinguish genuine alternate user edit branches from unfulfilled technical transport retries:
+        // A technical transport retry:
+        // 1. Has NO logical assistant children in this conversation
+        // 2. An identical reconciled user turn exists in the conversation with identical parentage (both root or identical parent)
+        const hasLogicalAssistant =
+          existingMessages.some(
+            (a) => a.role === 'assistant' && a.parentId === em.id && isLogicalMessage(a)
+          ) ||
+          messagesToPut.some(
+            (a) => a.role === 'assistant' && a.parentId === em.id && isLogicalMessage(a)
+          );
+
+        const emParentKey = em.parentId || em.remoteParentId || '__root__';
+        const hasReconciledDuplicateTurn =
+          existingMessages.some((other) => {
+            if (other.id === em.id || other.role !== 'user' || other.identityState !== 'reconciled') return false;
+            if (other.content?.trim() !== em.content?.trim()) return false;
+            const otherParentKey = other.parentId || other.remoteParentId || '__root__';
+            return otherParentKey === emParentKey;
+          }) ||
+          messagesToPut.some((other) => {
+            if (other.id === em.id || other.role !== 'user' || other.identityState !== 'reconciled') return false;
+            if (other.content?.trim() !== em.content?.trim()) return false;
+            const otherParentKey = other.parentId || other.remoteParentId || '__root__';
+            return otherParentKey === emParentKey;
+          });
+
+        if (!hasLogicalAssistant && hasReconciledDuplicateTurn) {
+          if (em.projectionState !== 'attempt_only') {
+            const updatedMsg: Message = {
+              ...em,
+              projectionState: 'attempt_only',
+              parentId: undefined,
+              updatedAt: now,
+            };
+            const existingIdx = messagesToPut.findIndex((p) => p.id === em.id);
+            if (existingIdx >= 0) {
+              messagesToPut[existingIdx] = updatedMsg;
+            } else {
+              messagesToPut.push(updatedMsg);
+              messagesUpdated++;
+            }
+          }
+          continue;
+        }
+
+        // Genuine user turn (e.g. alternate user edit branch with content):
+        if (em.content && em.content.trim().length > 0) {
+          if (em.projectionState !== 'provisional_logical' && em.projectionState !== 'logical') {
+            const updatedMsg: Message = {
+              ...em,
+              projectionState: 'provisional_logical',
+              updatedAt: now,
+            };
+            const existingIdx = messagesToPut.findIndex((p) => p.id === em.id);
+            if (existingIdx >= 0) {
+              messagesToPut[existingIdx] = updatedMsg;
+            } else {
+              messagesToPut.push(updatedMsg);
+              messagesUpdated++;
+            }
+          }
+        }
+        continue;
+      }
+
       if (em.role !== 'assistant') {
         continue;
       }
@@ -242,6 +500,27 @@ export class HistoryReconciler {
             ...em,
             projectionState: 'provisional_logical',
             status: 'filtered',
+            updatedAt: now,
+          };
+          const existingIdx = messagesToPut.findIndex((p) => p.id === em.id);
+          if (existingIdx >= 0) {
+            messagesToPut[existingIdx] = updatedMsg;
+          } else {
+            messagesToPut.push(updatedMsg);
+            messagesUpdated++;
+          }
+        }
+        continue;
+      }
+
+      // Invariant: Completed assistant generations (e.g. from prior regenerate branches)
+      // must NOT be degraded to unmatched_capture or have parentId wiped!
+      // They represent legitimate alternate response variants in the conversation tree.
+      if (em.status === 'finished') {
+        if (em.projectionState !== 'provisional_logical' && em.projectionState !== 'logical') {
+          const updatedMsg: Message = {
+            ...em,
+            projectionState: 'provisional_logical',
             updatedAt: now,
           };
           const existingIdx = messagesToPut.findIndex((p) => p.id === em.id);
@@ -311,9 +590,58 @@ export class HistoryReconciler {
         continue;
       }
 
+      let expectedParentId: string | undefined;
       if (m.remoteParentId) {
-        const expectedParentId = remoteToLocalMap.get(m.remoteParentId);
-        if (expectedParentId && expectedParentId !== m.id) {
+        expectedParentId = remoteToLocalMap.get(m.remoteParentId);
+      }
+      if (!expectedParentId && m.parentId) {
+        if (remoteToLocalMap.has(m.parentId)) {
+          expectedParentId = remoteToLocalMap.get(m.parentId);
+        } else if (combinedMessages.has(m.parentId)) {
+          expectedParentId = m.parentId;
+        }
+      }
+      if (!expectedParentId && m.remoteParentId) {
+        const targetRemote = String(m.remoteParentId);
+        const sibling = Array.from(combinedMessages.values()).find(
+          (other) =>
+            other.id !== m.id &&
+            other.role === m.role &&
+            other.remoteParentId &&
+            String(other.remoteParentId) === targetRemote &&
+            other.parentId
+        );
+        if (sibling?.parentId && combinedMessages.has(sibling.parentId)) {
+          expectedParentId = sibling.parentId;
+        }
+      }
+      if (!expectedParentId && m.role === 'assistant') {
+        const candidateUser = Array.from(combinedMessages.values()).find(
+          (u) =>
+            u.role === 'user' &&
+            ((m.sourceRawStreamKey && u.sourceRawStreamKey === m.sourceRawStreamKey) ||
+              (m.remoteParentId && u.remoteId === m.remoteParentId))
+        );
+        if (candidateUser) {
+          expectedParentId = candidateUser.id;
+        }
+      }
+      if (!expectedParentId && m.parentId && combinedMessages.has(m.parentId)) {
+        expectedParentId = m.parentId;
+      }
+
+      if (expectedParentId && expectedParentId !== m.id) {
+          const parentMsg = combinedMessages.get(expectedParentId);
+          // Invariant: Assistant message parent MUST be a user message!
+          // User message parent MUST be an assistant message (or null).
+          const isRoleValid =
+            (m.role === 'assistant' && (!parentMsg || parentMsg.role === 'user')) ||
+            (m.role === 'user' && (!parentMsg || parentMsg.role === 'assistant'));
+
+          if (!isRoleValid) {
+            continue;
+          }
+
           // Cycle check: verify expectedParentId does not lead back to m.id
           let current: string | undefined = expectedParentId;
           let hasCycle = false;
@@ -325,8 +653,8 @@ export class HistoryReconciler {
               break;
             }
             visited.add(current);
-            const parentMsg = combinedMessages.get(current);
-            current = parentMsg?.parentId;
+            const parent = combinedMessages.get(current);
+            current = parent?.parentId;
           }
 
           if (!hasCycle && m.parentId !== expectedParentId) {
@@ -338,7 +666,6 @@ export class HistoryReconciler {
           }
         }
       }
-    }
 
     const plan: HistoryReconciliationPlan = {
       conversation,

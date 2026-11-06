@@ -17,6 +17,7 @@ export interface ReversibleHostMutation {
 
 export interface InlineRecoveryPresentationOptions {
   showThinkingInline: boolean;
+  inlinePlacement?: 'underneath' | 'replace';
   locale?: 'en' | 'ru';
   continuityStatus?: string;
   onCopyAnswer?: (text: string) => Promise<boolean> | boolean | void;

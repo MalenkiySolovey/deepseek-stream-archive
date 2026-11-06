@@ -4,6 +4,7 @@ import { normalizeRemoteId } from '../history/types';
 const CANDIDATE_CONTENT_SELECTORS = [
   '[data-message-content]',
   '.ds-markdown',
+  '.ds-assistant-message-main-content',
   '.markdown-body',
   'div[class*="content"]',
   'div[class*="message-content"]',
@@ -18,11 +19,18 @@ const CANDIDATE_TOOLBAR_SELECTORS = [
   'div[class*="operation"]',
 ];
 
+const CANDIDATE_MESSAGE_ID_ATTRS = [
+  'data-virtual-list-item-key',
+  'data-message-id',
+];
+
+const CANDIDATE_MESSAGE_QUERY = CANDIDATE_MESSAGE_ID_ATTRS.map((a) => `[${a}]`).join(', ');
+
 /**
  * Safely locates a message node in the DeepSeek DOM by its authoritative remote ID.
- * Uses direct attribute comparison on verified `data-message-id` attributes to prevent
- * CSS selector injection attacks and reject generic ambiguous IDs.
- * Returns viewport coordinates for floating anchored badge attachment.
+ * Uses direct attribute comparison on verified identity attributes (`data-virtual-list-item-key`,
+ * `data-message-id`, etc.) to prevent CSS selector injection attacks and reject generic ambiguous IDs.
+ * Returns viewport coordinates for floating anchored badge attachment or inline host insertion.
  * Guarantees zero DOM mutation and zero React state access.
  */
 export function locateMessageAnchor(
@@ -37,24 +45,26 @@ export function locateMessageAnchor(
   if (!normalized) return null;
 
   try {
-    // Only verified data-message-id attribute is considered strong identity authority.
-    // We scan data-message-id elements and check normalized equality directly rather than
+    // Only verified message identity attributes are considered strong identity authority.
+    // We scan candidate message key elements and check normalized equality directly rather than
     // interpolating unescaped user-controlled IDs into querySelector strings.
-    const elements = root.querySelectorAll('[data-message-id]');
+    const elements = root.querySelectorAll(CANDIDATE_MESSAGE_QUERY);
     for (let i = 0; i < elements.length; i++) {
       const el = elements[i] as HTMLElement;
-      const rawAttr = el.getAttribute('data-message-id');
-      if (rawAttr && normalizeRemoteId(rawAttr) === normalized) {
-        if (typeof el.getBoundingClientRect === 'function') {
-          const rect = el.getBoundingClientRect();
-          // Ensure element is connected to the DOM or has a layout bounding box
-          if (el.isConnected || rect.width > 0 || rect.height > 0) {
-            return {
-              remoteId: normalized,
-              element: el,
-              rect,
-              authority: 'verified_message_id_attribute',
-            };
+      for (const attr of CANDIDATE_MESSAGE_ID_ATTRS) {
+        const rawAttr = el.getAttribute(attr);
+        if (rawAttr && normalizeRemoteId(rawAttr) === normalized) {
+          if (typeof el.getBoundingClientRect === 'function') {
+            const rect = el.getBoundingClientRect();
+            // Ensure element is connected to the DOM or has a layout bounding box
+            if (el.isConnected || rect.width > 0 || rect.height > 0) {
+              return {
+                remoteId: normalized,
+                element: el,
+                rect,
+                authority: 'verified_message_id_attribute',
+              };
+            }
           }
         }
       }
@@ -97,10 +107,10 @@ export function findInlineInsertionPoint(
     }
   }
 
-  // Fallback toolbar heuristic: look for a child container holding multiple action buttons
+  // Fallback toolbar heuristic: look for a child container holding multiple action buttons or icon buttons
   if (!toolbarElement) {
     try {
-      const buttons = el.querySelectorAll('button');
+      const buttons = el.querySelectorAll('button, [role="button"], .ds-icon-button');
       if (buttons.length >= 2) {
         const firstBtn = buttons[0];
         if (firstBtn && firstBtn.parentElement && firstBtn.parentElement !== el && el.contains(firstBtn.parentElement)) {

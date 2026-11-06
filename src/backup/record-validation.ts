@@ -357,3 +357,61 @@ export function isRecordSemanticallyIdentical(
       return false;
   }
 }
+
+/**
+ * Fast canonical deep structural equality comparison.
+ * Compares objects, arrays, and primitive fields deterministically without allocating full string buffers.
+ */
+export function fastCanonicalEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== 'object' || a === null || typeof b !== 'object' || b === null) {
+    return a === b;
+  }
+
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (!fastCanonicalEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  if (Array.isArray(b)) return false;
+
+  const recA = a as Record<string, unknown>;
+  const recB = b as Record<string, unknown>;
+
+  const keysA = Object.keys(recA).filter((k) => recA[k] !== undefined);
+  const keysB = Object.keys(recB).filter((k) => recB[k] !== undefined);
+  if (keysA.length !== keysB.length) return false;
+
+  for (const k of keysA) {
+    if (!Object.prototype.hasOwnProperty.call(recB, k)) return false;
+    if (!fastCanonicalEqual(recA[k], recB[k])) return false;
+  }
+
+  return true;
+}
+
+/**
+ * Comprehensive deterministic deep equality for any database store record.
+ * Validates domain-specific semantic invariants as well as full field-level structural parity.
+ */
+export function deepEqualRecords(store: string, a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (!isObject(a) || !isObject(b)) return a === b;
+
+  if (
+    store === 'conversations' ||
+    store === 'messages' ||
+    store === 'revisions' ||
+    store === 'recovery_events' ||
+    store === 'raw_streams' ||
+    store === 'raw_stream_batches'
+  ) {
+    if (!isRecordSemanticallyIdentical(store, a, b)) {
+      return false;
+    }
+  }
+
+  return fastCanonicalEqual(a, b);
+}

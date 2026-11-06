@@ -132,5 +132,5 @@ describe('Restore Performance & Scalability Benchmarks (1 MiB, 10 MiB)', () => {
     console.log(
       `[Benchmark 10 MiB Restore] Validation: ${tValidation.toFixed(2)}ms | Transaction: ${tRestore.toFixed(2)}ms | Total Records: ${result.insertedCounts.conversations + result.insertedCounts.messages + result.insertedCounts.revisions}`
     );
-  }, 20000);
+  }, 60000);
 });

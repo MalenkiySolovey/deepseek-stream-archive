@@ -15,6 +15,7 @@ import {
   MESSAGE_FINALIZE_RAW_STREAM,
   MESSAGE_GET_RAW_JOURNAL_STATUS,
   MESSAGE_FORWARD_HISTORY_OBSERVATION,
+  MESSAGE_PERSIST_USER_TURN,
   MESSAGE_GET_ARCHIVE_SUMMARY,
   MESSAGE_PERSIST_CANONICAL_CHECKPOINT,
   MESSAGE_LIST_ARCHIVE_CONVERSATIONS,
@@ -49,6 +50,7 @@ import {
   MESSAGE_GET_CONTINUITY_RECEIPTS,
   MESSAGE_ARM_CONTINUITY_DELIVERY,
   MESSAGE_REVOKE_CONTINUITY_DELIVERY,
+  MESSAGE_RECORD_RECOVERY_DIAGNOSTIC,
 
   type SaveSyntheticBatchRequest,
   type SaveSyntheticBatchResponse,
@@ -73,6 +75,8 @@ import {
   type ForwardHistoryObservationResponse,
   type GetArchiveSummaryRequest,
   type GetArchiveSummaryResponse,
+  type PersistUserTurnRequest,
+  type PersistUserTurnResponse,
   type PersistCanonicalCheckpointRequest,
   type PersistCanonicalCheckpointResponse,
   type ListArchiveConversationsResponse,
@@ -84,6 +88,7 @@ import {
   validatePersistRawStreamOpenRequest,
   validatePersistRawBatchRequest,
   validateFinalizeRawStreamRequest,
+  validatePersistUserTurnRequest,
   validatePersistCanonicalCheckpointRequest,
   validateListArchiveConversationsRequest,
   validateGetArchiveConversationRequest,
@@ -108,6 +113,7 @@ import {
   validateBuildContextContinuityPlanRequest,
   validateGetContextContinuityStatusRequest,
   validateRecordContinuityReceiptRequest,
+  validateRecordRecoveryDiagnosticRequest,
   validateGetContinuityReceiptsRequest,
   validateArmContinuityDeliveryRequest,
   validateRevokeContinuityDeliveryRequest,
@@ -128,6 +134,11 @@ import type { MaterializedPortableBackup } from '../src/backup/reader';
 import type { DeepSeekProtocolDiagnosticsData } from '../src/adapters/deepseek/protocol/types';
 import { DEFAULT_DEEPSEEK_PROFILE } from '../src/adapters/deepseek/compatibility/profiles';
 import { HistoryReconciler } from '../src/core/reconciliation/history-reconciler';
+import { compareMessageOrder } from '../src/core/conversation-tree/tree';
+import {
+  persistUserTurnMessage,
+  persistCanonicalCheckpointMessage,
+} from '../src/core/recorder/checkpoint-persister';
 import { DeepSeekHistoryParser } from '../src/adapters/deepseek/history/parser';
 import type { DeepSeekParsedHistory } from '../src/adapters/deepseek/history/types';
 import type { PageRecoverySummary, PageRecoveryMessageSummary } from '../src/adapters/deepseek/dom/types';
@@ -168,6 +179,12 @@ export default defineBackground(() => {
   let runtimeRevisionsCommittedCount = 0;
   let runtimeHistoryObservationsCount = 0;
   let runtimeHistoryReconciliationsCount = 0;
+
+  const runtimeRecoveryDiagnostics: import('../src/bridge/messages').RuntimeRecoveryDiagnostics = {
+    successfulInlineRendersCount: 0,
+    fallbackRenderCount: 0,
+    domMappingErrorsCount: 0,
+  };
 
   let bridgeState: ObservationState = 'not_observed';
   const activeTransportStreams = new Set<string>(); // composite keys: `${producerSessionId}:${streamId}`
@@ -373,6 +390,32 @@ export default defineBackground(() => {
 
       const res: ForwardTransportEventResponse = { received: true };
       sendResponse(res);
+      return false;
+    }
+
+    // 2b. Recovery Diagnostic Recorded from Content Script
+    if (message.type === MESSAGE_RECORD_RECOVERY_DIAGNOSTIC) {
+      const req = validateRecordRecoveryDiagnosticRequest(message);
+      if (req) {
+        if (req.reason) {
+          runtimeRecoveryDiagnostics.lastReason = req.reason;
+          if (!runtimeRecoveryDiagnostics.reasonsBreakdown) {
+            runtimeRecoveryDiagnostics.reasonsBreakdown = {};
+          }
+          runtimeRecoveryDiagnostics.reasonsBreakdown[req.reason] =
+            (runtimeRecoveryDiagnostics.reasonsBreakdown[req.reason] || 0) + 1;
+        }
+        if (req.kind === 'inline_success' || req.reason === 'inline_rendering_succeeded') {
+          runtimeRecoveryDiagnostics.successfulInlineRendersCount++;
+        } else if (req.kind === 'fallback_render') {
+          runtimeRecoveryDiagnostics.fallbackRenderCount++;
+        } else if (req.kind === 'dom_mapping_error' || req.reason === 'dom_anchor_not_found') {
+          runtimeRecoveryDiagnostics.domMappingErrorsCount++;
+        }
+        sendResponse({ received: true });
+      } else {
+        sendResponse({ received: false });
+      }
       return false;
     }
 
@@ -623,6 +666,7 @@ export default defineBackground(() => {
             runtimeEpochId,
             runtimeStartedAt,
             durableArchiveEvidence,
+            runtimeRecovery: { ...runtimeRecoveryDiagnostics },
           };
           sendResponse(status);
         })
@@ -659,6 +703,7 @@ export default defineBackground(() => {
             ],
             runtimeEpochId,
             runtimeStartedAt,
+            runtimeRecovery: { ...runtimeRecoveryDiagnostics },
           });
         });
 
@@ -1152,6 +1197,60 @@ export default defineBackground(() => {
       return true;
     }
 
+    // 12b. Handle Immediate User Turn Persistence (Section 6)
+    if (message.type === MESSAGE_PERSIST_USER_TURN) {
+      const validated = validatePersistUserTurnRequest(message);
+      if (!validated) {
+        sendResponse({
+          success: false,
+          messageId: '',
+          error: 'Invalid user turn payload',
+        } as PersistUserTurnResponse);
+        return false;
+      }
+
+      const userMsg = validated.userMessage;
+      Promise.all([
+        storageRepo.getConversation(userMsg.conversationId),
+        storageRepo.getConversationByRemoteId(userMsg.conversationId),
+      ])
+        .then(async ([existingById, existingByRemote]) => {
+          let existingConv = existingById || existingByRemote;
+          if (!existingConv) {
+            await storageRepo.saveConversation({
+              id: userMsg.conversationId,
+              remoteId: userMsg.conversationId,
+              title: userMsg.content?.slice(0, 40).trim() || 'DeepSeek Chat',
+              createdAt: userMsg.createdAt,
+              updatedAt: userMsg.updatedAt,
+            });
+          } else {
+            userMsg.conversationId = existingConv.id;
+            await storageRepo.saveConversation({
+              ...existingConv,
+              remoteId: existingConv.remoteId || userMsg.conversationId,
+              updatedAt: userMsg.updatedAt,
+            });
+          }
+
+          const result = await persistUserTurnMessage(storageRepo, userMsg);
+          sendResponse({
+            success: result.success,
+            messageId: userMsg.id,
+            persistedAt: result.persistedAt,
+            error: result.error,
+          } as PersistUserTurnResponse);
+        })
+        .catch((err) => {
+          sendResponse({
+            success: false,
+            messageId: userMsg.id,
+            error: err instanceof Error ? err.message : String(err),
+          } as PersistUserTurnResponse);
+        });
+      return true;
+    }
+
     // 13. Handle Canonical Checkpoint Persistence
     if (message.type === MESSAGE_PERSIST_CANONICAL_CHECKPOINT) {
       const validated = validatePersistCanonicalCheckpointRequest(message);
@@ -1166,16 +1265,29 @@ export default defineBackground(() => {
         return false;
       }
 
-      storageRepo
-        .saveCanonicalCheckpoint(validated.checkpoint)
-        .then(() => {
+      (async () => {
+        try {
+          const checkpoint = validated.checkpoint;
+          const targetConvId =
+            checkpoint.conversation?.id || checkpoint.message.conversationId;
+
+          const result = await persistCanonicalCheckpointMessage(storageRepo, checkpoint);
+
+          if (!result.success) {
+            sendResponse({
+              success: false,
+              streamKey: result.streamKey,
+              checkpointSeq: result.checkpointSeq,
+              error: result.error,
+            } as PersistCanonicalCheckpointResponse);
+            return;
+          }
+
           runtimeCanonicalCheckpointsCount++;
-          runtimeRevisionsCommittedCount += validated.checkpoint.revisions.length;
+          runtimeRevisionsCommittedCount += checkpoint.revisions.length;
           lastPersistedAt = Date.now();
 
           // Advance continuity receipt lifecycle on canonical checkpoint
-          const targetConvId =
-            validated.checkpoint.conversation?.id || validated.checkpoint.message.conversationId;
           storageRepo
             .getContinuityReceiptsForConversation(targetConvId)
             .then((receipts) => {
@@ -1214,8 +1326,7 @@ export default defineBackground(() => {
             persistedAt: lastPersistedAt,
           };
           sendResponse(res);
-        })
-        .catch((err) => {
+        } catch (err) {
           logger.error('Failed to persist canonical checkpoint', err);
           const res: PersistCanonicalCheckpointResponse = {
             success: false,
@@ -1224,7 +1335,8 @@ export default defineBackground(() => {
             error: err instanceof Error ? err.message : String(err),
           };
           sendResponse(res);
-        });
+        }
+      })();
 
       return true;
     }
@@ -1512,7 +1624,9 @@ export default defineBackground(() => {
         return false;
       }
       storageRepo
-        .getConversationExportModel(validated.conversationId)
+        .getConversationExportModel(validated.conversationId, {
+          includeRevisions: validated.includeRevisions,
+        })
         .then((exportModel) => {
           if (!exportModel) {
             sendResponse({ success: false, error: 'conversation_not_found' });

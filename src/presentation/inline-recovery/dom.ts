@@ -73,13 +73,21 @@ export function mountInlineRecovery(
     return null;
   }
 
+  // Section 15: Content existence check (State 4 rejection)
+  const hasText = Boolean(content.text && content.text.trim().length > 0);
+  const hasThinking = Boolean(content.thinking && content.thinking.trim().length > 0);
+  if (!hasText && !hasThinking) {
+    return null;
+  }
+
   const locale = options?.locale || 'en';
   const remoteId = message.remoteId || message.messageId;
+  const isReplaceMode = options?.inlinePlacement === 'replace';
 
-  // 1. Reversible host style modification on placeholder
+  // 1. Reversible host style modification on placeholder (Mode B: Replace)
   let originalPlaceholderDisplay = '';
   const placeholder = target.placeholderElement;
-  if (placeholder) {
+  if (placeholder && isReplaceMode) {
     originalPlaceholderDisplay = placeholder.style.display || '';
     placeholder.style.display = 'none';
   }
@@ -99,7 +107,7 @@ export function mountInlineRecovery(
 
   if (!shadow) {
     // Fail-closed for inline recovery: restore placeholder and return null
-    if (placeholder) {
+    if (placeholder && isReplaceMode) {
       placeholder.style.display = originalPlaceholderDisplay;
     }
     return null;
@@ -120,10 +128,28 @@ export function mountInlineRecovery(
   const header = document.createElement('div');
   header.className = 'streamarchive-inline-header';
 
+  const headerCol = document.createElement('div');
+  headerCol.style.display = 'flex';
+  headerCol.style.flexDirection = 'column';
+
   const badge = document.createElement('span');
   badge.className = `streamarchive-inline-badge ${labelInfo.className}`;
-  badge.textContent = `${labelInfo.icon} ${labelInfo.badgeLabel}`;
-  header.appendChild(badge);
+  const badgeText = isReplaceMode
+    ? (locale === 'ru' ? '🛡️ Показана локально сохранённая версия' : '🛡️ Locally preserved version shown')
+    : `${labelInfo.icon} ${locale === 'ru' ? 'Локально сохранённый ответ' : 'Locally preserved response'}`;
+  badge.textContent = badgeText;
+  headerCol.appendChild(badge);
+
+  if (!isReplaceMode) {
+    const sub = document.createElement('span');
+    sub.className = 'streamarchive-inline-subtitle';
+    sub.textContent = locale === 'ru'
+      ? 'Сохранён до изменения или прерывания исходного ответа.'
+      : 'Preserved prior to modification or interruption of original response.';
+    headerCol.appendChild(sub);
+  }
+
+  header.appendChild(headerCol);
 
   // Optional Context Continuity status indicator (Section 46)
   if (options?.continuityStatus) {
@@ -135,16 +161,16 @@ export function mountInlineRecovery(
 
   root.appendChild(header);
 
-
   // DeepThink reasoning block (collapsed by default if enabled & present)
   const showThinking = options?.showThinkingInline !== false;
-  if (showThinking && content.thinking && content.thinking.trim().length > 0) {
+  if (showThinking && hasThinking && content.thinking) {
+    const thinkingText = content.thinking;
     const details = document.createElement('details');
     details.className = 'streamarchive-inline-thinking';
 
     const summary = document.createElement('summary');
     summary.className = 'streamarchive-inline-thinking-summary';
-    const thinkCount = content.thinking.length;
+    const thinkCount = thinkingText.length;
     const summaryText =
       locale === 'ru'
         ? `▶ 🧠 DeepThink — восстановлено локально (${thinkCount} симв.)`
@@ -154,7 +180,7 @@ export function mountInlineRecovery(
 
     const thinkingBody = document.createElement('div');
     thinkingBody.className = 'streamarchive-inline-thinking-body';
-    const thinkBlocks = parseSafeMarkdown(content.thinking);
+    const thinkBlocks = parseSafeMarkdown(thinkingText);
     thinkingBody.appendChild(
       renderSafeMarkdownToFragment(thinkBlocks, {
         codeCopyLabel: locale === 'ru' ? 'Копировать' : 'Copy code',
@@ -167,37 +193,49 @@ export function mountInlineRecovery(
     root.appendChild(details);
   }
 
-  // Response Body content rendered via safe markdown fragment
-  const body = document.createElement('div');
-  body.className = 'streamarchive-inline-body';
-  const textBlocks = parseSafeMarkdown(content.text);
-  body.appendChild(
-    renderSafeMarkdownToFragment(textBlocks, {
-      codeCopyLabel: locale === 'ru' ? 'Копировать' : 'Copy code',
-      codeCopiedLabel: locale === 'ru' ? 'Скопировано!' : 'Copied!',
-      onCopyCode: options?.onCopyCode,
-    })
-  );
-  root.appendChild(body);
+  // Section 15 State 3 vs States 1 & 2:
+  if (!hasText && hasThinking) {
+    const notice = document.createElement('div');
+    notice.className = 'streamarchive-inline-notice';
+    notice.textContent =
+      locale === 'ru'
+        ? 'Сохранены только рассуждения. Текст ответа не был получен или не найден.'
+        : 'Only reasoning preserved. Response text was not received or not found.';
+    root.appendChild(notice);
+  } else if (hasText) {
+    // Response Body content rendered via safe markdown fragment
+    const body = document.createElement('div');
+    body.className = 'streamarchive-inline-body';
+    const textBlocks = parseSafeMarkdown(content.text);
+    body.appendChild(
+      renderSafeMarkdownToFragment(textBlocks, {
+        codeCopyLabel: locale === 'ru' ? 'Копировать' : 'Copy code',
+        codeCopiedLabel: locale === 'ru' ? 'Скопировано!' : 'Copied!',
+        onCopyCode: options?.onCopyCode,
+      })
+    );
+    root.appendChild(body);
+  }
 
-  // Footer with Extension-Owned Copy Button
+  // Footer with Extension-Owned Action Buttons
   const footer = document.createElement('div');
   footer.className = 'streamarchive-inline-footer';
 
   const copyBtn = document.createElement('button');
   copyBtn.type = 'button';
   copyBtn.className = 'streamarchive-inline-copy-btn';
-  const copyLabel = locale === 'ru' ? 'Скопировать восстановленный ответ' : 'Copy recovered response';
+  const copyLabel = locale === 'ru' ? 'Скопировать сохранённый ответ' : 'Copy recovered response';
   const copiedLabel = locale === 'ru' ? 'Скопировано!' : 'Copied!';
   copyBtn.textContent = copyLabel;
 
   copyBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
     try {
+      const textToCopy = hasText ? content.text : (content.thinking || '');
       if (options?.onCopyAnswer) {
-        await options.onCopyAnswer(content.text);
+        await options.onCopyAnswer(textToCopy);
       } else if (typeof navigator !== 'undefined' && navigator.clipboard) {
-        await navigator.clipboard.writeText(content.text);
+        await navigator.clipboard.writeText(textToCopy);
       }
       copyBtn.textContent = copiedLabel;
       setTimeout(() => {
@@ -208,6 +246,26 @@ export function mountInlineRecovery(
     }
   });
   footer.appendChild(copyBtn);
+
+  // Section 12 Mode B: Reversible Toggle Button to view/hide original DeepSeek stub
+  if (isReplaceMode && placeholder) {
+    const toggleOrigBtn = document.createElement('button');
+    toggleOrigBtn.type = 'button';
+    toggleOrigBtn.className = 'streamarchive-inline-toggle-orig-btn';
+    let isOrigShown = false;
+    const showOrigLabel = locale === 'ru' ? 'Показать исходное сообщение DeepSeek' : 'Show original DeepSeek message';
+    const hideOrigLabel = locale === 'ru' ? 'Скрыть исходное сообщение DeepSeek' : 'Hide original DeepSeek message';
+    toggleOrigBtn.textContent = showOrigLabel;
+
+    toggleOrigBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      isOrigShown = !isOrigShown;
+      placeholder.style.display = isOrigShown ? originalPlaceholderDisplay || '' : 'none';
+      toggleOrigBtn.textContent = isOrigShown ? hideOrigLabel : showOrigLabel;
+    });
+    footer.appendChild(toggleOrigBtn);
+  }
+
   root.appendChild(footer);
 
   shadow.appendChild(root);
@@ -225,15 +283,13 @@ export function mountInlineRecovery(
       if (host.parentNode) {
         host.parentNode.removeChild(host);
       }
+      if (placeholder && isReplaceMode) {
+        placeholder.style.display = originalPlaceholderDisplay;
+      }
     } catch {
       // ignore
     }
     OWNED_INLINE_HOSTS.delete(host);
-
-    // Revert placeholder style cleanly
-    if (placeholder) {
-      placeholder.style.display = originalPlaceholderDisplay;
-    }
   };
 
   return {

@@ -16,6 +16,7 @@ describe('Recovery Presentation Settings Engine', () => {
     const settings = await getRecoveryPresentationSettings();
     expect(settings).toEqual({
       displayMode: 'overlay',
+      inlinePlacement: 'underneath',
       showThinkingInline: true,
     });
   });
@@ -32,6 +33,17 @@ describe('Recovery Presentation Settings Engine', () => {
     expect(reverted.displayMode).toBe('overlay');
   });
 
+  it('updates inlinePlacement toggle between underneath and replace', async () => {
+    const updated = await saveRecoveryPresentationSettings({ inlinePlacement: 'replace' });
+    expect(updated.inlinePlacement).toBe('replace');
+
+    const reloaded = await getRecoveryPresentationSettings();
+    expect(reloaded.inlinePlacement).toBe('replace');
+
+    const reverted = await saveRecoveryPresentationSettings({ inlinePlacement: 'underneath' });
+    expect(reverted.inlinePlacement).toBe('underneath');
+  });
+
   it('updates showThinkingInline boolean toggle', async () => {
     const updated = await saveRecoveryPresentationSettings({ showThinkingInline: false });
     expect(updated.showThinkingInline).toBe(false);
@@ -46,6 +58,7 @@ describe('Recovery Presentation Settings Engine', () => {
     expect(validateRecoveryPresentationSettings('invalid')).toEqual(DEFAULT_RECOVERY_PRESENTATION_SETTINGS);
     expect(validateRecoveryPresentationSettings({ displayMode: 'hack_mode', showThinkingInline: 'not_a_bool' })).toEqual({
       displayMode: 'overlay',
+      inlinePlacement: 'underneath',
       showThinkingInline: true,
     });
   });

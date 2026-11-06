@@ -74,6 +74,7 @@ export interface CanonicalStreamCoordinatorConfig {
   streamId: string;
   provisionalSessionId?: string;
   conversationTitle?: string;
+  clientTurnId?: string;
   requestPrompt?: string;
   requestParentMessageId?: string | null;
   onCheckpoint: (checkpoint: CanonicalCheckpointDto) => Promise<CanonicalCheckpointAck>;
@@ -159,9 +160,13 @@ export class CanonicalStreamCoordinator {
     this.maxRetries = config.maxRetries ?? config.maxRetryAttempts ?? 10;
     this.checkpointAttemptTimeoutMs = config.checkpointAttemptTimeoutMs ?? 15000;
 
-    if (config.requestPrompt && config.requestPrompt.trim().length > 0) {
-      const sanitizedKey = this.rawStreamKey.replace(/[^a-zA-Z0-9_-]/g, '_');
-      const userMessageId = `msg_user_${sanitizedKey}`;
+    const userMessageId =
+      config.clientTurnId ||
+      (config.requestPrompt && config.requestPrompt.trim().length > 0
+        ? `msg_user_${this.rawStreamKey.replace(/[^a-zA-Z0-9_-]/g, '_')}`
+        : undefined);
+
+    if (userMessageId && config.requestPrompt && config.requestPrompt.trim().length > 0) {
       this.userMessage = {
         id: userMessageId,
         conversationId: this.provisionalSessionId,
@@ -178,11 +183,12 @@ export class CanonicalStreamCoordinator {
     }
 
     const deterministicMessageId = makeProvisionalMessageId(this.rawStreamKey);
+    const isNewUserTurn = Boolean(this.userMessage?.id || config.clientTurnId);
     this.recorder = new CanonicalRevisionRecorder({
       conversationId: this.provisionalSessionId,
       messageId: deterministicMessageId,
-      parentId: this.userMessage?.id,
-      remoteParentId: config.requestParentMessageId || undefined,
+      parentId: isNewUserTurn ? (this.userMessage?.id || config.clientTurnId) : (config.requestParentMessageId || undefined),
+      remoteParentId: isNewUserTurn ? undefined : (config.requestParentMessageId || undefined),
       sourceRawStreamKey: this.rawStreamKey,
       flushIntervalMs: this.debounceMs,
       minCharsForFlush: config.minCharsForFlush ?? 50,
@@ -237,6 +243,10 @@ export class CanonicalStreamCoordinator {
 
   feedSemanticEvent(event: DeepSeekSemanticEvent): void {
     if (this.isDisposed || this.isTerminalCommitted || this.state === 'failed') return;
+
+    if (event.type === 'message_id_identified' && event.requestMessageId && this.userMessage) {
+      this.userMessage.remoteId = event.requestMessageId;
+    }
 
     this.recorder.feedSemanticEvent(event);
 
@@ -403,7 +413,14 @@ export class CanonicalStreamCoordinator {
         this.lastAckedStatus !== undefined &&
         messageSnapshot.status !== this.lastAckedStatus;
 
-      if (this.lastAckedSeq < 0 && !hasNewRevisions && !hasNewRecoveryEvents && !isFinal) {
+      if (
+        this.lastAckedSeq < 0 &&
+        !hasNewRevisions &&
+        !hasNewRecoveryEvents &&
+        !hasNewRemoteId &&
+        !hasStatusChange &&
+        !isFinal
+      ) {
         return null;
       }
 

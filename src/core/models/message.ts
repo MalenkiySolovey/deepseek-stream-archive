@@ -94,11 +94,14 @@ export function makeProvisionalMessageId(rawStreamKey: string): string {
  */
 export function mergeCanonicalMessage(
   existing: Message | undefined,
-  incoming: Message,
+  incoming: Message | (Omit<Message, 'parentId'> & { parentId?: string | null }),
   provenance: 'live' | 'history' | 'replay'
 ): Message {
   if (!existing) {
-    return incoming;
+    return {
+      ...incoming,
+      parentId: incoming.parentId || undefined,
+    };
   }
 
   // 1. Identity State: reconciled > provisional
@@ -122,13 +125,36 @@ export function mergeCanonicalMessage(
   // 3. Identity & Tree linkages:
   // Invariant: attempt_only and unmatched_capture messages NEVER branch under parent
   const remoteId = incoming.remoteId || existing.remoteId;
-  const parentId =
-    projectionState === 'attempt_only' || projectionState === 'unmatched_capture'
-      ? undefined
-      : incoming.parentId !== undefined
-      ? incoming.parentId
-      : existing.parentId;
-  const remoteParentId = incoming.remoteParentId || existing.remoteParentId;
+  let parentId: string | undefined;
+  if (projectionState === 'attempt_only' || projectionState === 'unmatched_capture') {
+    parentId = undefined;
+  } else if (existing.identityState === 'reconciled' && existing.parentId && provenance === 'live') {
+    // Invariant: Server history authoritative parentage must NOT be overwritten by live checkpoints
+    parentId = existing.parentId;
+  } else if (incoming.parentId === null) {
+    // Explicit unlinking requested: clear parentage
+    parentId = undefined;
+  } else if (
+    existing.parentId &&
+    incoming.parentId &&
+    incoming.parentId === incoming.remoteParentId &&
+    existing.parentId !== incoming.parentId
+  ) {
+    // Invariant: incoming has raw remoteParentId masquerading as local parentId; protect existing local parentId
+    parentId = existing.parentId;
+  } else if (typeof incoming.parentId === 'string' && incoming.parentId.trim().length > 0) {
+    parentId = incoming.parentId;
+  } else {
+    // Field omitted (undefined) -> preserve existing parentId
+    parentId = existing.parentId;
+  }
+
+  let remoteParentId: string | undefined;
+  if (existing.identityState === 'reconciled' && existing.remoteParentId && provenance === 'live') {
+    remoteParentId = existing.remoteParentId;
+  } else {
+    remoteParentId = incoming.remoteParentId || existing.remoteParentId;
+  }
   const content = incoming.content || existing.content;
   const sourceRawStreamKey = incoming.sourceRawStreamKey || existing.sourceRawStreamKey;
 

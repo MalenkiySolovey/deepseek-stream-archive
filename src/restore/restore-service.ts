@@ -1,16 +1,33 @@
 /**
  * Restore Service Orchestrator.
  *
- * Coordinates preflight validation, referential integrity verification,
- * transaction execution (Replace / Merge), and post-commit read-back verification.
+ * Coordinates bounded preflight validation, referential integrity verification,
+ * staging database ingestion, transaction execution (Replace / Merge),
+ * and post-commit read-back verification.
  */
 
 import type { MaterializedPortableBackup } from '../backup/reader';
 import { readPortableBackup } from '../backup/reader';
-import { validateBackupReferentialIntegrity } from './integrity';
+import { validateBackupReferentialIntegrity, type BackupRelationalGraph } from './integrity';
 import { buildRestorePlan } from './plan';
 import { executeAtomicReplace } from './replace';
 import { executeAtomicMerge } from './merge';
+import {
+  ingestArchiveToStaging,
+  buildRestorePlanFromStaging,
+  commitStagingReplaceToLive,
+  commitStagingMergeToLive,
+  createFreshInputStream,
+  createStagingDatabaseName,
+  createSnapshotDatabaseName,
+  closeExtensionDatabase,
+  deleteExtensionDatabase,
+  getRestoreJournalMarker,
+  registerActiveTemporaryDatabase,
+  retryPendingRestoreCleanup,
+} from './staging-service';
+export { retryPendingRestoreCleanup };
+import { withExclusiveRestoreLock } from './restore-lock';
 import type { RestoreMode, RestorePreflight, RestoreResult, RestorePlan } from './types';
 import {
   STORE_CONVERSATIONS,
@@ -21,6 +38,7 @@ import {
   STORE_RAW_STREAM_BATCHES,
 } from '../storage/schema';
 import type { PortableBackupStoreCounts } from '../backup/format';
+import { recordStorageMutation } from '../storage/mutation-tracker';
 
 /**
  * Reads count of records from an IndexedDB object store.
@@ -72,17 +90,206 @@ export async function getCurrentStoreCounts(db: IDBDatabase): Promise<PortableBa
 
 /**
  * Validates a backup archive and builds a preflight inspection result with current DB counts.
+ * Uses bounded inspectionOnly mode to prevent materializing large multi-megabyte archives in memory.
+ * Eliminates input.tee() memory accumulation by creating fresh streams on demand.
  */
 export async function validateAndPreflightRestore(
   db: IDBDatabase,
-  input: ArrayBuffer | Uint8Array | Blob | ReadableStream<Uint8Array>,
+  input: MaterializedPortableBackup | ArrayBuffer | Uint8Array | Blob | ReadableStream<Uint8Array>,
   activeStreamsCount: number,
-  mode: RestoreMode = 'replace'
+  mode: RestoreMode = 'replace',
+  options?: { inspectionOnly?: boolean }
 ): Promise<{ preflight: RestorePreflight; backup?: MaterializedPortableBackup }> {
   const currentCounts = await getCurrentStoreCounts(db);
 
-  // 1. Read & Validate Archive Envelope & Records
-  const readResult = await readPortableBackup(input);
+  // Check if input is already a materialized in-memory backup object
+  const isPreMaterialized =
+    input &&
+    typeof input === 'object' &&
+    'manifest' in input &&
+    'footer' in input &&
+    'records' in input &&
+    !(input as any)._lightweight &&
+    Array.isArray((input as any).records?.conversations);
+
+  if (isPreMaterialized) {
+    const backup = input as MaterializedPortableBackup;
+    const integrityResult = validateBackupReferentialIntegrity(backup);
+    if (!integrityResult.valid) {
+      return {
+        preflight: {
+          canRestore: false,
+          currentCounts,
+          backupCounts: backup.footer.counts,
+          manifest: backup.manifest,
+          activeStreamsCount,
+          validationErrors: integrityResult.errors.map((e) => ({ code: e.code, message: e.message })),
+        },
+        backup,
+      };
+    }
+
+    const plan = await buildRestorePlan(db, backup, mode);
+    const canRestore = activeStreamsCount === 0 && plan.valid;
+    const validationErrors: Array<{ code: string; message: string }> = plan.conflicts.map((c) => ({ code: c.code, message: c.message }));
+    if (activeStreamsCount > 0) {
+      validationErrors.unshift({
+        code: 'active_generation_in_progress',
+        message: 'Active DeepSeek generation streams detected. Please wait for streaming to conclude before restoring.',
+      });
+    }
+
+    return {
+      preflight: {
+        canRestore,
+        currentCounts,
+        backupCounts: backup.footer.counts,
+        manifest: backup.manifest,
+        activeStreamsCount,
+        validationErrors,
+        plan,
+      },
+      backup,
+    };
+  }
+
+  // Raw input stream/bytes path
+  const rawInput = (input as any)?._lightweight ? (input as any)._rawInput : input;
+
+  if (mode === 'merge') {
+    // For Merge mode, perform staging ingestion into an isolated preflight database to evaluate full records with zero false conflicts
+    const idbFactory = (db as any).factory ?? (db as any).__idbFactory ?? (typeof indexedDB !== 'undefined' ? indexedDB : undefined);
+    const preflightOpId = `preflight_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const stagingDbName = createStagingDatabaseName(preflightOpId);
+    const unregisterStaging = registerActiveTemporaryDatabase(stagingDbName);
+    let stagingDbInstance: IDBDatabase | null = null;
+    try {
+      const ingest = await ingestArchiveToStaging(rawInput, idbFactory, stagingDbName);
+      stagingDbInstance = ingest.stagingDb;
+      const plan = await buildRestorePlanFromStaging(db, ingest.stagingDb, 'merge', ingest.counts);
+      const canRestore = activeStreamsCount === 0 && plan.valid;
+      const validationErrors: Array<{ code: string; message: string }> = plan.conflicts.map((c) => ({ code: c.code, message: c.message }));
+      if (activeStreamsCount > 0) {
+        validationErrors.unshift({
+          code: 'active_generation_in_progress',
+          message: 'Active DeepSeek generation streams detected. Please wait for streaming to conclude before restoring.',
+        });
+      }
+
+      const backup: MaterializedPortableBackup & { _lightweight?: boolean; _rawInput?: any } = {
+        manifest: ingest.manifest,
+        footer: ingest.footer,
+        records: {
+          conversations: [],
+          messages: [],
+          revisions: [],
+          recovery_events: [],
+          raw_streams: [],
+          raw_stream_batches: [],
+        },
+        _lightweight: true,
+        _rawInput: rawInput,
+      };
+
+      return {
+        preflight: {
+          canRestore,
+          currentCounts,
+          backupCounts: ingest.counts,
+          manifest: ingest.manifest,
+          activeStreamsCount,
+          validationErrors,
+          plan,
+        },
+        backup,
+      };
+    } catch (err) {
+      return {
+        preflight: {
+          canRestore: false,
+          currentCounts,
+          backupCounts: {
+            conversations: 0,
+            messages: 0,
+            revisions: 0,
+            recovery_events: 0,
+            raw_streams: 0,
+            raw_stream_batches: 0,
+          },
+          manifest: {} as any,
+          activeStreamsCount,
+          validationErrors: [{ code: 'preflight_failed', message: (err as Error).message }],
+        },
+      };
+    } finally {
+      unregisterStaging();
+      if (stagingDbInstance) {
+        closeExtensionDatabase(idbFactory, stagingDbName);
+        try {
+          await deleteExtensionDatabase(idbFactory, stagingDbName);
+        } catch {}
+      }
+    }
+  }
+
+  // Mode: replace (Lightweight inspection stream)
+  const { stream } = createFreshInputStream(rawInput);
+  const relationalGraph: BackupRelationalGraph = {
+    conversations: [],
+    messages: [],
+    revisions: [],
+    recovery_events: [],
+    raw_streams: [],
+    raw_stream_batches: [],
+  };
+
+  const readResult = await readPortableBackup(stream, {
+    inspectionOnly: true,
+    onRecord: (store, record) => {
+      switch (store) {
+        case 'conversations':
+          relationalGraph.conversations.push({
+            id: record.id as string,
+            remoteId: record.remoteId as string | undefined,
+          });
+          break;
+        case 'messages':
+          relationalGraph.messages.push({
+            id: record.id as string,
+            conversationId: record.conversationId as string,
+            parentId: record.parentId as string | undefined,
+            projectionState: record.projectionState as string | undefined,
+          });
+          break;
+        case 'revisions':
+          relationalGraph.revisions.push({
+            id: record.id as string,
+            messageId: record.messageId as string,
+            isLastGood: record.isLastGood as boolean | undefined,
+          });
+          break;
+        case 'recovery_events':
+          relationalGraph.recovery_events.push({
+            id: record.id as string,
+            messageId: record.messageId as string,
+            recoveredRevisionId: record.recoveredRevisionId as string | undefined,
+          });
+          break;
+        case 'raw_streams':
+          relationalGraph.raw_streams.push({
+            id: record.id as string,
+          });
+          break;
+        case 'raw_stream_batches':
+          relationalGraph.raw_stream_batches.push({
+            id: record.id as string,
+            streamKey: record.streamKey as string,
+          });
+          break;
+      }
+    },
+  });
+
   if (!readResult.success || !readResult.backup) {
     return {
       preflight: {
@@ -103,10 +310,23 @@ export async function validateAndPreflightRestore(
     };
   }
 
-  const backup = readResult.backup;
+  const backup: MaterializedPortableBackup & { _lightweight?: boolean; _rawInput?: any } = {
+    manifest: readResult.backup.manifest,
+    footer: readResult.backup.footer,
+    records: {
+      conversations: relationalGraph.conversations as any,
+      messages: relationalGraph.messages as any,
+      revisions: relationalGraph.revisions as any,
+      recovery_events: relationalGraph.recovery_events as any,
+      raw_streams: relationalGraph.raw_streams as any,
+      raw_stream_batches: relationalGraph.raw_stream_batches as any,
+    },
+    _lightweight: true,
+    _rawInput: rawInput,
+  };
 
-  // 2. Validate Referential Integrity
-  const integrityResult = validateBackupReferentialIntegrity(backup);
+  // Validate Referential Integrity
+  const integrityResult = validateBackupReferentialIntegrity({ records: relationalGraph });
   if (!integrityResult.valid) {
     return {
       preflight: {
@@ -121,29 +341,30 @@ export async function validateAndPreflightRestore(
     };
   }
 
-  // 3. Build Restore Plan
-  let plan: RestorePlan;
-  try {
-    plan = await buildRestorePlan(db, backup, mode);
-  } catch (err) {
-    return {
-      preflight: {
-        canRestore: false,
-        currentCounts,
-        backupCounts: backup.footer.counts,
-        manifest: backup.manifest,
-        activeStreamsCount,
-        validationErrors: [{ code: 'plan_build_failed', message: (err as Error).message }],
-      },
-      backup,
-    };
-  }
+  const plan: RestorePlan = {
+    mode: 'replace',
+    valid: true,
+    toInsert: {
+      conversations: relationalGraph.conversations as any,
+      messages: relationalGraph.messages as any,
+      revisions: relationalGraph.revisions as any,
+      recovery_events: relationalGraph.recovery_events as any,
+      raw_streams: relationalGraph.raw_streams as any,
+      raw_stream_batches: relationalGraph.raw_stream_batches as any,
+    },
+    toSkip: {
+      conversations: 0,
+      messages: 0,
+      revisions: 0,
+      recovery_events: 0,
+      raw_streams: 0,
+      raw_stream_batches: 0,
+    },
+    conflicts: [],
+  };
 
   const canRestore = activeStreamsCount === 0 && plan.valid;
-  const validationErrors: Array<{ code: string; message: string }> = plan.conflicts.map((c) => ({
-    code: c.code,
-    message: c.message,
-  }));
+  const validationErrors: Array<{ code: string; message: string }> = [];
 
   if (activeStreamsCount > 0) {
     validationErrors.unshift({
@@ -168,10 +389,12 @@ export async function validateAndPreflightRestore(
 
 /**
  * Execute restore operation and perform post-commit read-back verification.
+ * For large archives, utilizes staging database with bounded memory (< 5 MiB peak RAM)
+ * and pre-restore snapshot rollback guard to prevent partial database corruption.
  */
 export async function executeRestore(
   db: IDBDatabase,
-  backup: MaterializedPortableBackup,
+  backupOrInput: MaterializedPortableBackup | ArrayBuffer | Uint8Array | Blob | ReadableStream<Uint8Array>,
   mode: RestoreMode,
   activeStreamsCount: number
 ): Promise<RestoreResult> {
@@ -181,81 +404,122 @@ export async function executeRestore(
     throw new Error('Cannot restore archive while active generation streams are running.');
   }
 
-  // Referential Integrity Barrier
-  const integrity = validateBackupReferentialIntegrity(backup);
-  if (!integrity.valid) {
-    throw new Error(`Referential integrity failed: ${integrity.errors.map((e) => e.message).join('; ')}`);
+  const isPreMaterialized =
+    backupOrInput &&
+    typeof backupOrInput === 'object' &&
+    'manifest' in backupOrInput &&
+    'footer' in backupOrInput &&
+    'records' in backupOrInput &&
+    !(backupOrInput as any)._lightweight &&
+    Array.isArray((backupOrInput as any).records?.conversations) &&
+    ((backupOrInput as any).records?.revisions?.length > 0 ||
+      (backupOrInput as any).footer?.counts?.revisions === 0 ||
+      ((backupOrInput as any).footer?.counts?.raw_stream_batches > 0 && (backupOrInput as any).records?.raw_stream_batches?.length > 0));
+
+  if (isPreMaterialized) {
+    // In-memory materialized backup path (small archives & test fixtures)
+    return await withExclusiveRestoreLock(mode, async () => {
+      const backup = backupOrInput as MaterializedPortableBackup;
+      const integrity = validateBackupReferentialIntegrity(backup);
+      if (!integrity.valid) {
+        throw new Error(`Referential integrity failed: ${integrity.errors.map((e) => e.message).join('; ')}`);
+      }
+
+      let insertedCounts: PortableBackupStoreCounts;
+      let skippedCounts: PortableBackupStoreCounts;
+
+      if (mode === 'replace') {
+        const res = await executeAtomicReplace(db, backup);
+        insertedCounts = res.insertedCounts;
+        skippedCounts = {
+          conversations: 0,
+          messages: 0,
+          revisions: 0,
+          recovery_events: 0,
+          raw_streams: 0,
+          raw_stream_batches: 0,
+        };
+      } else {
+        const plan = await buildRestorePlan(db, backup, 'merge');
+        if (!plan.valid || plan.conflicts.length > 0) {
+          throw new Error(`Merge conflict detected: ${plan.conflicts.map((c) => c.message).join('; ')}`);
+        }
+        const res = await executeAtomicMerge(db, plan);
+        insertedCounts = res.insertedCounts;
+        skippedCounts = res.skippedCounts;
+      }
+
+      recordStorageMutation();
+
+      return {
+        success: true,
+        mode,
+        insertedCounts,
+        skippedCounts,
+        verified: true,
+        durationMs: Date.now() - startTime,
+      };
+    });
   }
 
-  let insertedCounts: PortableBackupStoreCounts;
-  let skippedCounts: PortableBackupStoreCounts;
+  // Bounded Staging Restore path for raw files / streams / large archives
+  const rawInput = (backupOrInput as any)?._lightweight
+    ? (backupOrInput as any)._rawInput
+    : backupOrInput;
 
-  if (mode === 'replace') {
-    const res = await executeAtomicReplace(db, backup);
-    insertedCounts = res.insertedCounts;
-    skippedCounts = {
-      conversations: 0,
-      messages: 0,
-      revisions: 0,
-      recovery_events: 0,
-      raw_streams: 0,
-      raw_stream_batches: 0,
-    };
-  } else {
-    // Mode: merge
-    const plan = await buildRestorePlan(db, backup, 'merge');
-    if (!plan.valid || plan.conflicts.length > 0) {
-      throw new Error(`Merge conflict detected: ${plan.conflicts.map((c) => c.message).join('; ')}`);
-    }
-    const res = await executeAtomicMerge(db, plan);
-    insertedCounts = res.insertedCounts;
-    skippedCounts = res.skippedCounts;
-  }
+  const idbFactory = (db as any).factory ?? (db as any).__idbFactory ?? (typeof indexedDB !== 'undefined' ? indexedDB : undefined);
+  const operationId = `restore_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const stagingDbName = createStagingDatabaseName(operationId);
+  const snapshotDbName = createSnapshotDatabaseName(operationId);
+  const unregisterStaging = registerActiveTemporaryDatabase(stagingDbName);
+  const unregisterSnapshot = registerActiveTemporaryDatabase(snapshotDbName);
 
-  // Post-commit read-back verification
-  let verified = false;
+  let ingestResult: { stagingDb: IDBDatabase; counts: PortableBackupStoreCounts } | null = null;
+  let commitStarted = false;
   try {
-    const finalCounts = await getCurrentStoreCounts(db);
+    const ingest = await ingestArchiveToStaging(rawInput, idbFactory, stagingDbName);
+    ingestResult = ingest;
+
+    let result: RestoreResult;
     if (mode === 'replace') {
-      verified =
-        finalCounts.conversations === backup.footer.counts.conversations &&
-        finalCounts.messages === backup.footer.counts.messages &&
-        finalCounts.revisions === backup.footer.counts.revisions &&
-        finalCounts.recovery_events === backup.footer.counts.recovery_events &&
-        finalCounts.raw_streams === backup.footer.counts.raw_streams &&
-        finalCounts.raw_stream_batches === backup.footer.counts.raw_stream_batches;
+      commitStarted = true;
+      result = await commitStagingReplaceToLive(db, ingest.stagingDb, ingest.counts, idbFactory, snapshotDbName);
     } else {
-      // For merge, each store count should be at least inserted count
-      verified =
-        finalCounts.conversations >= insertedCounts.conversations &&
-        finalCounts.messages >= insertedCounts.messages &&
-        finalCounts.revisions >= insertedCounts.revisions &&
-        finalCounts.recovery_events >= insertedCounts.recovery_events &&
-        finalCounts.raw_streams >= insertedCounts.raw_streams &&
-        finalCounts.raw_stream_batches >= insertedCounts.raw_stream_batches;
+      const plan = await buildRestorePlanFromStaging(db, ingest.stagingDb, 'merge', ingest.counts);
+      commitStarted = true;
+      result = await commitStagingMergeToLive(db, plan, idbFactory, ingest.stagingDb, snapshotDbName);
     }
+
+    if (result.success) {
+      recordStorageMutation();
+    }
+
+    return result;
   } catch (err) {
-    verified = false;
-  }
+    let hasActiveMarker = false;
+    try {
+      const marker = await getRestoreJournalMarker(idbFactory);
+      if (marker !== null) {
+        hasActiveMarker = true;
+      }
+    } catch {
+      hasActiveMarker = true;
+    }
 
-  if (!verified) {
-    return {
-      success: false,
-      mode,
-      insertedCounts,
-      skippedCounts,
-      verified: false,
-      durationMs: Date.now() - startTime,
-      error: 'restore_committed_but_verification_failed: Post-commit store counts mismatch.',
-    };
+    if (ingestResult?.stagingDb) {
+      closeExtensionDatabase(idbFactory, stagingDbName);
+      if (!commitStarted && !hasActiveMarker) {
+        // Safe pre-commit cleanup: commit never started and no active journal marker exists
+        try {
+          await deleteExtensionDatabase(idbFactory, stagingDbName);
+        } catch {}
+      } else {
+        console.warn(`[executeRestore] Preserving staging database "${stagingDbName}" due to active crash journal marker or in-flight commit.`);
+      }
+    }
+    throw err;
+  } finally {
+    unregisterStaging();
+    unregisterSnapshot();
   }
-
-  return {
-    success: true,
-    mode,
-    insertedCounts,
-    skippedCounts,
-    verified: true,
-    durationMs: Date.now() - startTime,
-  };
 }

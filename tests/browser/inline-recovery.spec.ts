@@ -17,8 +17,9 @@ test.describe('E2E Browser Compatibility: Inline Recovered Responses in DeepSeek
     await sidepanel.locator('button.tab-btn:has-text("Settings"), button.tab-btn:has-text("Настройки")').click();
     await sidepanel.waitForSelector('.recovery-presentation-card');
 
-    // Click radio for inline mode
+    // Click radio for inline mode and replace placement
     await sidepanel.locator('input[type="radio"][value="inline"]').check();
+    await sidepanel.locator('input[type="radio"][value="replace"]').check();
     await sidepanel.waitForTimeout(300);
 
     // 2. Set up SSE endpoint for filtered generation

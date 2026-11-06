@@ -76,6 +76,7 @@ describe('Inline Recovery Lifecycle & Reversibility', () => {
     const onCopy = vi.fn();
     const handle = mountInlineRecovery(target!, summary, content, {
       showThinkingInline: true,
+      inlinePlacement: 'replace',
       onCopyAnswer: onCopy,
       locale: 'en',
     });
@@ -166,5 +167,41 @@ describe('Inline Recovery Lifecycle & Reversibility', () => {
     ledger.unmountAll();
     expect(ledger.size).toBe(0);
     expect(root.querySelectorAll('div[data-streamarchive-inline-recovery-host]').length).toBe(0);
+  });
+
+  it('Mode A: mounts inline recovery underneath original response without hiding placeholder', () => {
+    const { msgEl, placeholderEl, toolbarEl } = createCensoredMessageDom('m-underneath-1');
+
+    const anchor = locateMessageAnchor('m-underneath-1', root);
+    const target = findInlineInsertionPoint(anchor!);
+
+    const summary: PageRecoveryMessageSummary = {
+      messageId: 'm-underneath-1',
+      remoteId: 'm-underneath-1',
+      role: 'assistant',
+      status: 'filtered',
+      hasLastGood: true,
+      recoveryKind: 'authoritative_recovery',
+      presentationKind: 'pre_filter_recovery',
+      capturedAt: 1000,
+      recoveredRevisionId: 'rev-underneath',
+    };
+
+    const content: OverlayContentResult = {
+      text: 'Preserved response rendered underneath.',
+      thinking: 'Reasoning chain step 1.',
+    };
+
+    const handle = mountInlineRecovery(target!, summary, content, {
+      showThinkingInline: true,
+      inlinePlacement: 'underneath',
+      locale: 'ru',
+    });
+
+    expect(handle).not.toBeNull();
+    // Mode A: placeholder style must NOT be set to none
+    expect(placeholderEl.style.display).not.toBe('none');
+    expect(msgEl.querySelector('div[data-streamarchive-inline-recovery-host="m-underneath-1"]')).not.toBeNull();
+    handle?.unmount();
   });
 });

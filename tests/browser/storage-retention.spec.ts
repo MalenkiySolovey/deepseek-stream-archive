@@ -9,7 +9,25 @@ test.describe('E2E Browser Compatibility: Raw Evidence Retention & Storage Obser
     // 1. Seed database with old healthy stream, recent stream, and protected recovery stream
     await sidepanel.evaluate(async () => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
-        const req = indexedDB.open('StreamArchiveDB');
+        const req = indexedDB.open('StreamArchiveDB', 9);
+        req.onupgradeneeded = (e) => {
+          const d = (e.target as any).result;
+          const stores = ['conversations', 'messages', 'revisions', 'recovery_events', 'raw_streams', 'raw_stream_batches', 'canonical_checkpoints', 'context_continuity_receipts'];
+          for (const s of stores) {
+            if (!d.objectStoreNames.contains(s)) {
+              const st = d.createObjectStore(s, { keyPath: s === 'canonical_checkpoints' ? 'streamKey' : 'id' });
+              if (s === 'raw_stream_batches') {
+                st.createIndex('streamKey', 'streamKey', { unique: false });
+              }
+              if (s === 'messages') {
+                st.createIndex('conversationId', 'conversationId', { unique: false });
+              }
+              if (s === 'revisions' || s === 'recovery_events') {
+                st.createIndex('messageId', 'messageId', { unique: false });
+              }
+            }
+          }
+        };
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });
@@ -157,6 +175,7 @@ test.describe('E2E Browser Compatibility: Raw Evidence Retention & Storage Obser
       await new Promise<void>((res) => {
         tx.oncomplete = () => res();
       });
+      db.close();
     });
 
     // 2. Open Settings Tab
@@ -192,13 +211,31 @@ test.describe('E2E Browser Compatibility: Raw Evidence Retention & Storage Obser
     await expect(confirmCleanupBtn).toBeVisible();
     await confirmCleanupBtn.click();
 
-    // 8. Verify confirmation feedback banner appears
-    await expect(cleanupModal.locator('.modal-feedback-banner')).toBeVisible({ timeout: 5000 });
+    // 8. Verify confirmation feedback banner appears with successful pruned stream count
+    await expect(cleanupModal.locator('.modal-feedback-banner')).toContainText(/Pruned 1.*stream|Удалено 1.*поток/i, { timeout: 10000 });
 
     // 9. Inspect IndexedDB directly to verify only old healthy stream was pruned
     const counts = await sidepanel.evaluate(async () => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
-        const req = indexedDB.open('StreamArchiveDB');
+        const req = indexedDB.open('StreamArchiveDB', 9);
+        req.onupgradeneeded = (e) => {
+          const d = (e.target as any).result;
+          const stores = ['conversations', 'messages', 'revisions', 'recovery_events', 'raw_streams', 'raw_stream_batches', 'canonical_checkpoints', 'context_continuity_receipts'];
+          for (const s of stores) {
+            if (!d.objectStoreNames.contains(s)) {
+              const st = d.createObjectStore(s, { keyPath: s === 'canonical_checkpoints' ? 'streamKey' : 'id' });
+              if (s === 'raw_stream_batches') {
+                st.createIndex('streamKey', 'streamKey', { unique: false });
+              }
+              if (s === 'messages') {
+                st.createIndex('conversationId', 'conversationId', { unique: false });
+              }
+              if (s === 'revisions' || s === 'recovery_events') {
+                st.createIndex('messageId', 'messageId', { unique: false });
+              }
+            }
+          }
+        };
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });
@@ -207,6 +244,7 @@ test.describe('E2E Browser Compatibility: Raw Evidence Retention & Storage Obser
       const recStream = await new Promise((res) => { tx.objectStore('raw_streams').get('p-rec:s-rec').onsuccess = (e) => res((e.target as any).result); });
       const fltStream = await new Promise((res) => { tx.objectStore('raw_streams').get('p-flt:s-flt').onsuccess = (e) => res((e.target as any).result); });
       const oldMsg = await new Promise((res) => { tx.objectStore('messages').get('msg-old').onsuccess = (e) => res((e.target as any).result); });
+      db.close();
 
       return {
         hasOldStream: Boolean(oldStream),

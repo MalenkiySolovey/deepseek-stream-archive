@@ -5,7 +5,7 @@ import {
   type StreamArchiveBridgeEnvelope,
   type SyntheticTestPayload,
 } from './protocol';
-import type { TransportEvent, TransportKind, TransportEventType } from '../transport/types';
+import type { TransportEvent, TransportKind, TransportEventType, TransportMetadata } from '../transport/types';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -25,6 +25,7 @@ const ALLOWED_TYPES = new Set<BridgeEventType>([
   'history.abort',
   'continuity.dispatched',
   'continuity.skipped',
+  'user_turn.observed',
 ]);
 
 const VALID_TRANSPORTS = new Set<TransportKind>(['fetch', 'xhr']);
@@ -150,13 +151,45 @@ export function validateTransportEventPayload(payload: unknown): TransportEvent 
     ) {
       return null;
     }
-    result.metadata = {
+    const metadata: TransportMetadata = {
       method: payload.metadata.method,
       url: payload.metadata.url,
       status: typeof payload.metadata.status === 'number' ? payload.metadata.status : undefined,
       statusText: typeof payload.metadata.statusText === 'string' ? payload.metadata.statusText : undefined,
       contentType: typeof payload.metadata.contentType === 'string' ? payload.metadata.contentType : undefined,
     };
+
+    if (
+      typeof payload.metadata.clientTurnId === 'string' &&
+      payload.metadata.clientTurnId.trim().length > 0 &&
+      payload.metadata.clientTurnId.length <= MAX_ID_CHARS
+    ) {
+      metadata.clientTurnId = payload.metadata.clientTurnId.trim();
+    }
+
+    if (typeof payload.metadata.requestPrompt === 'string') {
+      metadata.requestPrompt = payload.metadata.requestPrompt;
+    }
+
+    if (payload.metadata.requestParentTurnId === null) {
+      metadata.requestParentTurnId = null;
+    } else if (
+      typeof payload.metadata.requestParentTurnId === 'string' &&
+      payload.metadata.requestParentTurnId.trim().length > 0 &&
+      payload.metadata.requestParentTurnId.length <= MAX_ID_CHARS
+    ) {
+      metadata.requestParentTurnId = payload.metadata.requestParentTurnId.trim();
+    }
+
+    if (
+      typeof payload.metadata.requestSessionId === 'string' &&
+      payload.metadata.requestSessionId.trim().length > 0 &&
+      payload.metadata.requestSessionId.length <= MAX_ID_CHARS
+    ) {
+      metadata.requestSessionId = payload.metadata.requestSessionId.trim();
+    }
+
+    result.metadata = metadata;
   }
 
   if (payload.reason !== undefined) {
@@ -967,6 +1000,7 @@ export function validateGetConversationExportRequest(
   return {
     type: 'STREAMARCHIVE_GET_CONVERSATION_EXPORT',
     conversationId: raw.conversationId.trim(),
+    includeRevisions: typeof raw.includeRevisions === 'boolean' ? raw.includeRevisions : undefined,
   };
 }
 
@@ -1329,6 +1363,105 @@ export function validateRevokeContinuityDeliveryRequest(
 
   return {
     type: 'STREAMARCHIVE_REVOKE_CONTINUITY_DELIVERY',
+    reason,
+  };
+}
+
+export function validateUserTurnObservedPayload(
+  raw: unknown
+): import('./protocol').UserTurnObservedPayload | null {
+  if (!isRecord(raw)) return null;
+
+  if (typeof raw.clientTurnId !== 'string' || raw.clientTurnId.trim().length === 0) return null;
+  if (typeof raw.prompt !== 'string' || raw.prompt.trim().length === 0) return null;
+  if (raw.transport !== 'fetch' && raw.transport !== 'xhr') return null;
+  if (typeof raw.timestamp !== 'number' || !Number.isFinite(raw.timestamp) || raw.timestamp <= 0) return null;
+
+  const sessionId = typeof raw.sessionId === 'string' && raw.sessionId.trim().length > 0
+    ? raw.sessionId.trim()
+    : undefined;
+  const parentTurnId = typeof raw.parentTurnId === 'string' && raw.parentTurnId.trim().length > 0
+    ? raw.parentTurnId.trim()
+    : raw.parentTurnId === null
+      ? null
+      : undefined;
+
+  return {
+    clientTurnId: raw.clientTurnId.trim(),
+    sessionId,
+    prompt: raw.prompt,
+    parentTurnId,
+    transport: raw.transport,
+    timestamp: raw.timestamp,
+  };
+}
+
+export function validatePersistUserTurnRequest(
+  raw: unknown
+): import('./messages').PersistUserTurnRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_PERSIST_USER_TURN') return null;
+  if (!isRecord(raw.userMessage)) return null;
+
+  const msg = raw.userMessage;
+  if (typeof msg.id !== 'string' || msg.id.trim().length === 0) return null;
+  if (typeof msg.conversationId !== 'string' || msg.conversationId.trim().length === 0) return null;
+  if (msg.role !== 'user') return null;
+
+  return {
+    type: 'STREAMARCHIVE_PERSIST_USER_TURN',
+    userMessage: {
+      id: String(msg.id),
+      conversationId: String(msg.conversationId),
+      remoteId: typeof msg.remoteId === 'string' ? msg.remoteId : undefined,
+      parentId: typeof msg.parentId === 'string' ? msg.parentId : undefined,
+      remoteParentId: typeof msg.remoteParentId === 'string' ? msg.remoteParentId : undefined,
+      role: 'user',
+      status: 'finished',
+      content: typeof msg.content === 'string' ? msg.content : '',
+      identityState: msg.identityState === 'reconciled' ? 'reconciled' : 'provisional',
+      projectionState: msg.projectionState === 'logical' ? 'logical' : 'provisional_logical',
+      sourceRawStreamKey: typeof msg.sourceRawStreamKey === 'string' ? msg.sourceRawStreamKey : undefined,
+      contextContinuityDeliveryId: typeof msg.contextContinuityDeliveryId === 'string' ? msg.contextContinuityDeliveryId : undefined,
+      createdAt: typeof msg.createdAt === 'number' && Number.isFinite(msg.createdAt) ? msg.createdAt : Date.now(),
+      updatedAt: typeof msg.updatedAt === 'number' && Number.isFinite(msg.updatedAt) ? msg.updatedAt : Date.now(),
+    },
+  };
+}
+
+const VALID_RECOVERY_DIAGNOSTIC_REASONS = new Set([
+  'recovery_record_absent',
+  'recovery_revision_missing',
+  'recovery_revision_empty',
+  'remote_identity_unresolved',
+  'dom_anchor_not_found',
+  'inline_target_not_found',
+  'recovery_content_failed',
+  'inline_rendering_succeeded',
+  'fallback_render',
+  'dom_mapping_error',
+]);
+
+export function validateRecordRecoveryDiagnosticRequest(
+  raw: unknown
+): import('./messages').RecordRecoveryDiagnosticRequest | null {
+  if (!isRecord(raw)) return null;
+  if (raw.type !== 'STREAMARCHIVE_RECORD_RECOVERY_DIAGNOSTIC') return null;
+
+  const validKinds = new Set(['inline_success', 'fallback_render', 'dom_mapping_error']);
+  const kind = typeof raw.kind === 'string' && validKinds.has(raw.kind) ? (raw.kind as any) : undefined;
+  const reason =
+    typeof raw.reason === 'string' && VALID_RECOVERY_DIAGNOSTIC_REASONS.has(raw.reason)
+      ? (raw.reason as any)
+      : undefined;
+
+  if (!kind && !reason) {
+    return null;
+  }
+
+  return {
+    type: 'STREAMARCHIVE_RECORD_RECOVERY_DIAGNOSTIC',
+    kind,
     reason,
   };
 }

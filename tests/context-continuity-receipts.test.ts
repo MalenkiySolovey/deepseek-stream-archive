@@ -117,9 +117,20 @@ describe('Context Continuity Receipts Ledger & Lifecycle', () => {
     };
     await repo.saveConversation(conv);
 
+    const user1: Message = {
+      id: 'user-rec-1',
+      conversationId: 'conv-rec-1',
+      role: 'user',
+      content: 'First user prompt',
+      status: 'finished',
+      identityState: 'provisional',
+      createdAt: 1050,
+      updatedAt: 1050,
+    };
     const msg1: Message = {
       id: 'msg-rec-1',
       conversationId: 'conv-rec-1',
+      parentId: 'user-rec-1',
       remoteId: 'remote-msg-1',
       role: 'assistant',
       status: 'interrupted',
@@ -128,11 +139,22 @@ describe('Context Continuity Receipts Ledger & Lifecycle', () => {
       createdAt: 1100,
       updatedAt: 1100,
     };
+    const user2: Message = {
+      id: 'user-rec-2',
+      conversationId: 'conv-rec-1',
+      parentId: 'msg-rec-1',
+      role: 'user',
+      content: 'Second user prompt',
+      status: 'finished',
+      identityState: 'provisional',
+      createdAt: 1150,
+      updatedAt: 1150,
+    };
     const msg2: Message = {
       id: 'msg-rec-2',
       conversationId: 'conv-rec-1',
       remoteId: 'remote-msg-2',
-      parentId: 'msg-rec-1',
+      parentId: 'user-rec-2',
       role: 'assistant',
       status: 'interrupted',
       identityState: 'reconciled',
@@ -177,7 +199,9 @@ describe('Context Continuity Receipts Ledger & Lifecycle', () => {
       detectedAt: 1200,
     };
 
+    await repo.saveMessage(user1);
     await repo.saveMessage(msg1);
+    await repo.saveMessage(user2);
     await repo.saveMessage(msg2);
     await repo.saveRevision(rev1);
     await repo.saveRevision(rev2);

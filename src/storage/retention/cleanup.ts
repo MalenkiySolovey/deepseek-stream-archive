@@ -23,6 +23,8 @@ import type { Message, ResponseRevision, RecoveryEvent } from '../../core/models
 import type { RawStreamRecord } from '../raw-journal/types';
 import { evaluateRawStreamRetention, getCutoffTimestamp } from './policy';
 import type { ArchiveCleanupResult, RawRetentionMode, RawRetentionPlan } from './types';
+import { createDurableWriteTransaction } from '../db';
+import { STORAGE_MUTATION_KEY, recordStorageMutation } from '../mutation-tracker';
 
 function makeKeyRange(key: IDBValidKey): IDBKeyRange | IDBValidKey {
   return typeof IDBKeyRange !== 'undefined' ? IDBKeyRange.only(key) : key;
@@ -223,7 +225,7 @@ export async function executeRawRetentionPlan(
   return new Promise((resolve, reject) => {
     let tx: IDBTransaction;
     try {
-      tx = db.transaction([STORE_RAW_STREAMS, STORE_RAW_STREAM_BATCHES], 'readwrite');
+      tx = createDurableWriteTransaction(db, [STORE_RAW_STREAMS, STORE_RAW_STREAM_BATCHES], 'strict');
     } catch (err) {
       return reject(new Error(`Failed to open retention cleanup transaction: ${(err as Error).message}`));
     }
@@ -259,19 +261,33 @@ export async function executeRawRetentionPlan(
     try {
       const rawStreamsStore = tx.objectStore(STORE_RAW_STREAMS);
       const rawBatchesStore = tx.objectStore(STORE_RAW_STREAM_BATCHES);
-      const batchIndex = rawBatchesStore.index('streamKey');
+      const hasStreamKeyIndex = rawBatchesStore.indexNames.contains('streamKey');
+      const batchIndex = hasStreamKeyIndex ? rawBatchesStore.index('streamKey') : null;
 
       for (const sKey of keysToDelete) {
         rawStreamsStore.delete(sKey);
 
-        const cursorReq = batchIndex.openCursor(makeKeyRange(sKey));
-        cursorReq.onsuccess = () => {
-          const cursor = cursorReq.result;
-          if (cursor) {
-            cursor.delete();
-            cursor.continue();
-          }
-        };
+        if (batchIndex) {
+          const cursorReq = batchIndex.openCursor(makeKeyRange(sKey));
+          cursorReq.onsuccess = () => {
+            const cursor = cursorReq.result;
+            if (cursor) {
+              cursor.delete();
+              cursor.continue();
+            }
+          };
+        } else {
+          const cursorReq = rawBatchesStore.openCursor();
+          cursorReq.onsuccess = () => {
+            const cursor = cursorReq.result;
+            if (cursor) {
+              if ((cursor.value as any)?.streamKey === sKey) {
+                cursor.delete();
+              }
+              cursor.continue();
+            }
+          };
+        }
       }
     } catch (err) {
       if (!settled) {
@@ -304,7 +320,7 @@ export async function clearRawEvidence(
   return new Promise((resolve, reject) => {
     let tx: IDBTransaction;
     try {
-      tx = db.transaction([STORE_RAW_STREAMS, STORE_RAW_STREAM_BATCHES], 'readwrite');
+      tx = createDurableWriteTransaction(db, [STORE_RAW_STREAMS, STORE_RAW_STREAM_BATCHES], 'strict');
     } catch (err) {
       return reject(new Error(`Failed to open clearRawEvidence transaction: ${(err as Error).message}`));
     }

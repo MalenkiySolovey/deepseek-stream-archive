@@ -16,6 +16,7 @@ import {
   validateHistoryStreamAbortPayload,
   validateContinuityDispatchedPayload,
   validateContinuitySkippedPayload,
+  validateUserTurnObservedPayload,
   MAX_HISTORY_TOTAL_CHARS,
   MAX_HISTORY_CHUNKS_COUNT,
 } from '../src/bridge/validation';
@@ -26,6 +27,7 @@ import {
   MESSAGE_NOTIFY_BRIDGE_OBSERVED,
   MESSAGE_RECORD_PROTOCOL_OBSERVATION,
   MESSAGE_FORWARD_HISTORY_OBSERVATION,
+  MESSAGE_PERSIST_USER_TURN,
   MESSAGE_PERSIST_CANONICAL_CHECKPOINT,
   MESSAGE_HISTORY_INGEST_OPEN,
   MESSAGE_HISTORY_INGEST_BATCH,
@@ -41,6 +43,8 @@ import {
   type NotifyBridgeObservedRequest,
   type RecordProtocolObservationRequest,
   type ForwardHistoryObservationRequest,
+  type PersistUserTurnRequest,
+  type PersistUserTurnResponse,
   type PersistCanonicalCheckpointRequest,
   type PersistCanonicalCheckpointResponse,
   type HistoryIngestOpenRequest,
@@ -220,6 +224,44 @@ export default defineContentScript({
         return;
       }
 
+      // 2b. Handle Immediate User Prompt Persistence (Section 6)
+      if (envelope.type === 'user_turn.observed') {
+        const payload = validateUserTurnObservedPayload(envelope.payload);
+        if (!payload) {
+          logger.warn('Bridge user_turn.observed rejected: malformed payload');
+          return;
+        }
+
+        const currentRouteSessionId = extractSessionIdFromUrl(window.location.href) || undefined;
+        const targetSessionId = payload.sessionId || currentRouteSessionId || `conv_${payload.clientTurnId}`;
+
+        const req: PersistUserTurnRequest = {
+          type: MESSAGE_PERSIST_USER_TURN,
+          userMessage: {
+            id: payload.clientTurnId,
+            conversationId: targetSessionId,
+            remoteParentId: payload.parentTurnId || undefined,
+            role: 'user',
+            status: 'finished',
+            content: payload.prompt,
+            identityState: 'provisional',
+            projectionState: 'provisional_logical',
+            createdAt: payload.timestamp,
+            updatedAt: payload.timestamp,
+          },
+        };
+
+        try {
+          const ack = await chrome.runtime.sendMessage<PersistUserTurnRequest, PersistUserTurnResponse>(req);
+          if (ack?.success) {
+            logger.info(`[StreamArchive] User prompt ${payload.clientTurnId} persisted immediately`);
+          }
+        } catch (err) {
+          logger.warn('[StreamArchive] Failed to persist user prompt turn', err);
+        }
+        return;
+      }
+
       // 3. Handle Transport Events & Stateful Stream Pipeline
       if (envelope.type === 'transport.event') {
         const transportEvent = validateTransportEventPayload(envelope.payload);
@@ -286,6 +328,7 @@ export default defineContentScript({
               streamId: transportEvent.streamId,
               provisionalSessionId:
                 transportEvent.metadata?.requestSessionId || currentRouteSessionId,
+              clientTurnId: transportEvent.metadata?.clientTurnId,
               requestPrompt: transportEvent.metadata?.requestPrompt,
               requestParentMessageId: transportEvent.metadata?.requestParentTurnId,
               conversationTitle:

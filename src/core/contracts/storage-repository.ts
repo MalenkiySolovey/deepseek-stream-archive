@@ -11,6 +11,16 @@ export interface ArchiveSummary {
   recoveryEventsCount: number;
   unmatchedCapturesCount?: number;
   attemptOnlyCount?: number;
+
+  // Structural Conversation Architecture diagnostics (Milestone Global Fix)
+  userMessagesCount?: number;
+  assistantMessagesCount?: number;
+  userPromptVariantsCount?: number;
+  assistantVariantsCount?: number;
+  unconfirmedParentMessagesCount?: number;
+  idConflictsCount?: number;
+  recoveriesWithTextCount?: number;
+  recoveriesWithThinkingOnlyCount?: number;
 }
 
 export interface CanonicalCheckpointData {
@@ -19,8 +29,8 @@ export interface CanonicalCheckpointData {
   isTerminal?: boolean;
   isFinal?: boolean;
   conversation?: Conversation;
-  userMessage?: Message;
-  message: Message;
+  userMessage?: Message | (Omit<Message, 'parentId'> & { parentId?: string | null });
+  message: Message | (Omit<Message, 'parentId'> & { parentId?: string | null });
   revisions: ResponseRevision[];
   recoveryEvents?: RecoveryEvent[];
 }
@@ -95,6 +105,9 @@ export interface PaginatedArchiveConversations {
 }
 
 export interface StorageRepository {
+  // Mutation generation & storage consistency
+  getMutationEpoch(): Promise<number>;
+
   // Conversation operations
   saveConversation(conversation: Conversation): Promise<void>;
   getConversation(id: string): Promise<Conversation | null>;
@@ -153,7 +166,10 @@ export interface StorageRepository {
   }>;
 
   // Export & Portable Backup operations
-  getConversationExportModel(conversationId: string): Promise<import('../../export/types').ConversationExportModel | null>;
+  getConversationExportModel(
+    conversationId: string,
+    options?: { includeRevisions?: boolean }
+  ): Promise<import('../../export/types').ConversationExportModel | null>;
   createPortableBackupSnapshot(options?: import('../../backup/snapshot').CreateSnapshotOptions): Promise<import('../../backup/snapshot').PortableBackupSnapshot>;
 
   // Restore & Safe Merge operations
@@ -163,7 +179,7 @@ export interface StorageRepository {
     mode?: import('../../restore/types').RestoreMode
   ): Promise<{ preflight: import('../../restore/types').RestorePreflight; backup?: import('../../backup/reader').MaterializedPortableBackup }>;
   executeRestore(
-    backup: import('../../backup/reader').MaterializedPortableBackup,
+    backup: import('../../backup/reader').MaterializedPortableBackup | ArrayBuffer | Uint8Array | Blob | ReadableStream<Uint8Array>,
     mode: import('../../restore/types').RestoreMode,
     activeStreamsCount: number
   ): Promise<import('../../restore/types').RestoreResult>;

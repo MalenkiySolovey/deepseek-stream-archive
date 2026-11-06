@@ -258,7 +258,7 @@ describe('Edit Branching & Sticky Filter Preservation (10 Core Regression Scenar
 
     const detail = await storageRepo.getArchiveConversation(sessionId);
     const msgs = detail!.messages;
-    const asstB = msgs.find((m) => m.sourceRawStreamKey?.includes('stream-fb'))!;
+    const asstB = msgs.find((m) => m.role === 'assistant' && m.sourceRawStreamKey?.includes('stream-fb'))!;
     expect(asstB).toBeDefined();
 
     // Sticky filter check

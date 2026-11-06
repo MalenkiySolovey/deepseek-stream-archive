@@ -22,22 +22,25 @@ import type { RawStreamRecord, RawStreamBatch } from '../storage/raw-journal/typ
 
 /**
  * Defensive Bounded Import Limits:
- * Derived from the 100 MiB source database ceiling + NDJSON serialization overhead:
- * - 100 MiB raw text compresses to ~15-25 MiB in gzip. Max compressed input: 50 MiB.
- * - Maximum decompressed text: 250 MiB (prevents gzip bomb memory exhaustion).
- * - Maximum records: 500,000 (prevents micro-record object explosion).
- * - Maximum line length: 10 MiB (prevents single-line memory exhaustion).
+ * Sized to accommodate large historical archives (e.g. 163+ MiB raw, up to 2 GiB uncompressed)
+ * with robust decompression bomb protection:
+ * - Maximum compressed input: 500 MiB (prevents multi-gigabyte raw payload ingestion).
+ * - Maximum decompressed text: 2048 MiB (2 GiB) (prevents gzip bomb memory exhaustion).
+ * - Maximum records: 5,000,000 (prevents micro-record object explosion).
+ * - Maximum line length: 50 MiB (allows massive thinking chains or responses).
  */
-export const MAX_IMPORT_COMPRESSED_BYTES = 50 * 1024 * 1024; // 50 MiB
-export const MAX_IMPORT_DECOMPRESSED_BYTES = 250 * 1024 * 1024; // 250 MiB
-export const MAX_IMPORT_RECORDS = 500_000;
-export const MAX_IMPORT_LINE_CHARS = 10 * 1024 * 1024; // 10 MiB
+export const MAX_IMPORT_COMPRESSED_BYTES = 500 * 1024 * 1024; // 500 MiB
+export const MAX_IMPORT_DECOMPRESSED_BYTES = 2048 * 1024 * 1024; // 2048 MiB (2 GiB)
+export const MAX_IMPORT_RECORDS = 5_000_000;
+export const MAX_IMPORT_LINE_CHARS = 50 * 1024 * 1024; // 50 MiB
 
 export interface ReadPortableBackupOptions {
   maxCompressedBytes?: number;
   maxDecompressedBytes?: number;
   maxRecords?: number;
   maxLineChars?: number;
+  inspectionOnly?: boolean;
+  onRecord?: (store: IncludedBackupStoreName, record: Record<string, unknown>) => Promise<void> | void;
 }
 
 export interface BackupValidationError {
@@ -218,7 +221,7 @@ export async function readPortableBackup(
   let currentStoreIndex = 0;
   let lastStoreKey: unknown = undefined;
 
-  function processLine(lineText: string, currentLineIndex: number): boolean {
+  async function processLine(lineText: string, currentLineIndex: number): Promise<boolean> {
     const trimmed = lineText.replace(/\r$/, '');
     if (trimmed.trim() === '') return true;
 
@@ -468,26 +471,32 @@ export async function readPortableBackup(
         return false;
       }
 
-      // Add to materialized records
-      switch (storeName) {
-        case 'conversations':
-          records.conversations.push(valRes.record as Conversation);
-          break;
-        case 'messages':
-          records.messages.push(valRes.record as Message);
-          break;
-        case 'revisions':
-          records.revisions.push(valRes.record as ResponseRevision);
-          break;
-        case 'recovery_events':
-          records.recovery_events.push(valRes.record as RecoveryEvent);
-          break;
-        case 'raw_streams':
-          records.raw_streams.push(valRes.record as RawStreamRecord);
-          break;
-        case 'raw_stream_batches':
-          records.raw_stream_batches.push(valRes.record as RawStreamBatch);
-          break;
+      // Add to materialized records (unless inspectionOnly mode is active for bounded memory)
+      if (!options?.inspectionOnly) {
+        switch (storeName) {
+          case 'conversations':
+            records.conversations.push(valRes.record as Conversation);
+            break;
+          case 'messages':
+            records.messages.push(valRes.record as Message);
+            break;
+          case 'revisions':
+            records.revisions.push(valRes.record as ResponseRevision);
+            break;
+          case 'recovery_events':
+            records.recovery_events.push(valRes.record as RecoveryEvent);
+            break;
+          case 'raw_streams':
+            records.raw_streams.push(valRes.record as RawStreamRecord);
+            break;
+          case 'raw_stream_batches':
+            records.raw_stream_batches.push(valRes.record as RawStreamBatch);
+            break;
+        }
+      }
+
+      if (options?.onRecord) {
+        await options.onRecord(storeName as IncludedBackupStoreName, valRes.record as Record<string, unknown>);
       }
 
       observedCounts[storeName as IncludedBackupStoreName]++;
@@ -522,7 +531,7 @@ export async function readPortableBackup(
         const remaining = textDecoder.decode();
         lineBuffer += remaining;
         if (lineBuffer.trim().length > 0) {
-          processLine(lineBuffer, lineIndex);
+          await processLine(lineBuffer, lineIndex);
           lineIndex++;
         }
         break;
@@ -556,7 +565,7 @@ export async function readPortableBackup(
           break;
         }
 
-        const continueParsing = processLine(line, lineIndex);
+        const continueParsing = await processLine(line, lineIndex);
         lineIndex++;
         if (!continueParsing) {
           // In case of fatal errors like unsupported version, abort reading early

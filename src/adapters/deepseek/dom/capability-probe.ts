@@ -10,6 +10,7 @@ const CANDIDATE_CONTAINER_SELECTORS = [
 ];
 
 const CANDIDATE_MESSAGE_SELECTORS = [
+  '[data-virtual-list-item-key]',
   '[data-message-id]',
   '[data-testid="chat-message"]',
   'div[class*="message-"]',
@@ -82,8 +83,10 @@ export function probeDeepSeekDom(
 
         for (let i = 0; i < nodes.length; i++) {
           const node = nodes[i] as HTMLElement;
-          // Only authoritative data-message-id provides strong identity
-          const rawId = node.getAttribute('data-message-id');
+          // Authoritative message key attributes provide strong identity
+          const rawId =
+            node.getAttribute('data-virtual-list-item-key') ||
+            node.getAttribute('data-message-id');
           if (rawId) {
             const normalized = normalizeRemoteId(rawId);
             if (normalized) {

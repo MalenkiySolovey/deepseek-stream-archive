@@ -8,6 +8,15 @@
 
 import type { MaterializedPortableBackup } from '../backup/reader';
 
+export interface BackupRelationalGraph {
+  conversations: Array<{ id: string; remoteId?: string }>;
+  messages: Array<{ id: string; conversationId: string; parentId?: string; projectionState?: string }>;
+  revisions: Array<{ id: string; messageId: string; isLastGood?: boolean }>;
+  recovery_events: Array<{ id: string; messageId: string; recoveredRevisionId?: string }>;
+  raw_streams: Array<{ id: string }>;
+  raw_stream_batches: Array<{ id: string; streamKey: string }>;
+}
+
 export interface IntegrityValidationError {
   code: string;
   message: string;
@@ -21,30 +30,30 @@ export interface IntegrityValidationResult {
 }
 
 /**
- * Validates relational invariants across all materialized records in a backup.
+ * Validates relational invariants across all materialized records or lightweight relational graph in a backup.
  * Pure function: does NOT perform I/O or database writes.
  */
 export function validateBackupReferentialIntegrity(
-  backup: MaterializedPortableBackup
+  backup: { records: BackupRelationalGraph } | MaterializedPortableBackup
 ): IntegrityValidationResult {
   const errors: IntegrityValidationError[] = [];
 
-  const conversationMap = new Map<string, (typeof backup.records.conversations)[0]>();
+  const conversationMap = new Map<string, { id: string; remoteId?: string }>();
   for (const conv of backup.records.conversations) {
     conversationMap.set(conv.id, conv);
   }
 
-  const messageMap = new Map<string, (typeof backup.records.messages)[0]>();
+  const messageMap = new Map<string, { id: string; conversationId: string; parentId?: string; projectionState?: string }>();
   for (const msg of backup.records.messages) {
     messageMap.set(msg.id, msg);
   }
 
-  const revisionMap = new Map<string, (typeof backup.records.revisions)[0]>();
+  const revisionMap = new Map<string, { id: string; messageId: string; isLastGood?: boolean }>();
   for (const rev of backup.records.revisions) {
     revisionMap.set(rev.id, rev);
   }
 
-  const rawStreamMap = new Map<string, (typeof backup.records.raw_streams)[0]>();
+  const rawStreamMap = new Map<string, { id: string }>();
   for (const stream of backup.records.raw_streams) {
     rawStreamMap.set(stream.id, stream);
   }

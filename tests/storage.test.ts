@@ -266,7 +266,8 @@ describe('IndexedDB Storage Repository & Schema', () => {
     const originalTx = db.transaction.bind(db);
     db.transaction = function (storeNames: any, mode: any) {
       const tx = originalTx(storeNames, mode);
-      if (mode === 'readwrite' && storeNames === STORE_CONVERSATIONS) {
+      const isTargetStore = storeNames === STORE_CONVERSATIONS || (Array.isArray(storeNames) && storeNames.includes(STORE_CONVERSATIONS));
+      if (mode === 'readwrite' && isTargetStore) {
         queueMicrotask(() => {
           try {
             tx.abort();

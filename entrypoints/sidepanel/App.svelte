@@ -19,10 +19,12 @@
   } from '../../src/context-continuity';
 
   import {
+    MESSAGE_GET_FOUNDATION_STATUS,
     MESSAGE_CREATE_PORTABLE_BACKUP_SNAPSHOT,
     MESSAGE_GET_STORAGE_USAGE_ESTIMATE,
     MESSAGE_RESTORE_PREVIEW,
     MESSAGE_EXECUTE_RESTORE,
+    type FoundationStatusResponse,
     MESSAGE_GET_STORAGE_MAINTENANCE_STATUS,
     MESSAGE_REQUEST_STORAGE_PERSISTENCE,
     MESSAGE_GET_RETENTION_SETTINGS,
@@ -50,11 +52,25 @@
     ArchiveCleanupResult,
   } from '../../src/storage/retention';
   import {
-    buildCompressedBackup,
     PORTABLE_BACKUP_EXTENSION,
     PORTABLE_BACKUP_MIME_TYPE,
+    createCompressedBackupReadableStream,
+    streamBackupToWritable,
   } from '../../src/backup';
   import type { RestoreMode, RestorePreflight, RestoreResult } from '../../src/restore';
+  import {
+    validateAndPreflightRestore,
+    executeRestore,
+    retryPendingRestoreCleanup,
+  } from '../../src/restore/restore-service';
+  import { buildRestorePlan } from '../../src/restore/plan';
+  import {
+    recoverIncompleteRestoreIfAny,
+    verifyDatabaseEquality,
+    validateStagingReferentialIntegrity,
+  } from '../../src/restore/staging-service';
+  import { readPortableBackup, type MaterializedPortableBackup } from '../../src/backup/reader';
+  import { IndexedDbStorageRepository } from '../../src/storage/repositories/storage-repository-impl';
   import { formatDateUtc } from '../../src/export';
   import { saveLocalFile } from '../../src/backup/save-file';
 
@@ -89,8 +105,11 @@
   let restorePreflight = $state<RestorePreflight | null>(null);
   let replaceConfirmed = $state<boolean>(false);
   let restoreResult = $state<RestoreResult | null>(null);
+  let isRetryingCleanup = $state<boolean>(false);
+  let cleanupActionError = $state<string | null>(null);
   let selectedBackupFileName = $state<string | null>(null);
-  let cachedBackupBytes = $state<Uint8Array | null>(null);
+  let cachedParsedBackup: MaterializedPortableBackup | null = null;
+  let cachedSelectedFile: File | null = null;
 
   // Storage & Retention State
   let maintenanceStatus = $state<StorageMaintenanceStatus | null>(null);
@@ -120,9 +139,42 @@
   // Context Continuity Settings State
   let continuitySettings = $state<ContextContinuitySettings>({ ...DEFAULT_CONTEXT_CONTINUITY_SETTINGS });
 
-  onMount(() => {
-    loadRecoverySettings();
-    loadContinuitySettings();
+  // Startup Crash Recovery Alert State
+  type ArchiveSafetyStatus = 'READY' | 'RECOVERING' | 'RECOVERY_BLOCKED' | 'RECOVERY_FAILED';
+  let archiveSafetyStatus = $state<ArchiveSafetyStatus>('RECOVERING');
+  let startupCrashRecoveryAlert = $state<string | null>(null);
+
+  onMount(async () => {
+    if (typeof window !== 'undefined') {
+      (window as any).__recoverIncompleteRestoreIfAny = recoverIncompleteRestoreIfAny;
+      (window as any).__streamBackupToWritable = streamBackupToWritable;
+      (window as any).__readPortableBackup = readPortableBackup;
+      (window as any).__validateAndPreflight = validateAndPreflightRestore;
+      (window as any).__executeRestore = executeRestore;
+      (window as any).__verifyDatabaseEquality = verifyDatabaseEquality;
+      (window as any).__validateStagingReferentialIntegrity = validateStagingReferentialIntegrity;
+    }
+    try {
+      const status = await recoverIncompleteRestoreIfAny();
+      if (status.state === 'not_required') {
+        archiveSafetyStatus = 'READY';
+      } else if (status.state === 'recovered') {
+        archiveSafetyStatus = 'READY';
+        console.info('[StreamArchive] Auto-recovered database from interrupted restore after browser restart.');
+      } else if (status.state === 'blocked') {
+        archiveSafetyStatus = 'RECOVERY_BLOCKED';
+        startupCrashRecoveryAlert = `Recovery blocked: ${status.reason}. Please close other DeepSeek tabs or sidepanels.`;
+      } else if (status.state === 'failed') {
+        archiveSafetyStatus = 'RECOVERY_FAILED';
+        startupCrashRecoveryAlert = `CRITICAL: Crash recovery failed (${status.reason}). Writes and restores are disabled to protect data.`;
+      }
+    } catch (recErr: any) {
+      console.error('[StreamArchive] Startup crash recovery encountered error:', recErr);
+      archiveSafetyStatus = 'RECOVERY_FAILED';
+      startupCrashRecoveryAlert = `Detected unfinished restore from a browser crash. If data appears missing, your pre-restore snapshot is preserved. (${recErr?.message || 'Unknown error'})`;
+    }
+    await loadRecoverySettings();
+    await loadContinuitySettings();
   });
 
   async function loadRecoverySettings() {
@@ -148,6 +200,11 @@
 
   async function handleShowThinkingInlineChange(show: boolean) {
     recoverySettings = { ...recoverySettings, showThinkingInline: show };
+    await saveRecoveryPresentationSettings(recoverySettings);
+  }
+
+  async function handleInlinePlacementChange(placement: 'underneath' | 'replace') {
+    recoverySettings = { ...recoverySettings, inlinePlacement: placement };
     await saveRecoveryPresentationSettings(recoverySettings);
   }
 
@@ -346,59 +403,176 @@
     }
   }
 
+  interface FoundationStreamSafetyResult {
+    ok: boolean;
+    activeCount: number;
+    error?: string;
+  }
+
+  async function checkFoundationStreamSafety(): Promise<FoundationStreamSafetyResult> {
+    return new Promise((resolve) => {
+      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+        try {
+          chrome.runtime.sendMessage(
+            { type: MESSAGE_GET_FOUNDATION_STATUS },
+            (res: FoundationStatusResponse) => {
+              if (chrome.runtime?.lastError) {
+                resolve({
+                  ok: false,
+                  activeCount: 0,
+                  error: chrome.runtime.lastError.message || 'Background service worker unavailable.',
+                });
+                return;
+              }
+              if (res && res.transport && typeof res.transport.activeStreamsCount === 'number') {
+                resolve({
+                  ok: true,
+                  activeCount: res.transport.activeStreamsCount,
+                });
+              } else {
+                resolve({
+                  ok: false,
+                  activeCount: 0,
+                  error: 'Could not verify active DeepSeek streams status from background service.',
+                });
+              }
+            }
+          );
+        } catch (err: any) {
+          resolve({
+            ok: false,
+            activeCount: 0,
+            error: err?.message || 'Failed to message background service worker.',
+          });
+        }
+      } else {
+        // Test / standalone mock environment
+        resolve({ ok: true, activeCount: 0 });
+      }
+    });
+  }
+
+  async function getActiveStreamsCount(): Promise<number> {
+    const safety = await checkFoundationStreamSafety();
+    if (!safety.ok) {
+      throw new Error(safety.error || 'Cannot verify active stream status.');
+    }
+    return safety.activeCount;
+  }
+
   async function handleCreateBackup() {
-    backupState = 'preparing';
     backupError = null;
     backupSummary = null;
 
-    try {
-      const res = await new Promise<CreatePortableBackupSnapshotResponse>((resolve) => {
-        if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-          chrome.runtime.sendMessage(
-            { type: MESSAGE_CREATE_PORTABLE_BACKUP_SNAPSHOT },
-            (r) => resolve(r || { success: false, error: 'No response from background worker' })
-          );
-        } else {
-          resolve({ success: false, error: 'Extension runtime unavailable' });
-        }
-      });
+    const dateStr = formatDateUtc();
+    const suggestedName = `deepseek-streamarchive-backup_${dateStr}.${PORTABLE_BACKUP_EXTENSION}`;
 
-      if (!res.success || !res.snapshot) {
+    // 1. Prompt for file save location immediately inside the click gesture to preserve user activation
+    // ZERO async or await before this point to guarantee user activation is never dropped!
+    let fileHandle: any = null;
+    const hasPicker = typeof window !== 'undefined' && 'showSaveFilePicker' in window;
+
+    if (hasPicker) {
+      try {
+        fileHandle = await (window as any).showSaveFilePicker({
+          suggestedName,
+          types: [
+            {
+              description: 'StreamArchive Backup Archive',
+              accept: {
+                [PORTABLE_BACKUP_MIME_TYPE]: [`.${PORTABLE_BACKUP_EXTENSION}`],
+              },
+            },
+          ],
+        });
+      } catch (err: any) {
+        if (err?.name === 'AbortError') {
+          backupState = 'idle';
+          return;
+        }
+        // Do NOT silently fall back to loading giant memory blobs on SecurityError or picker failures!
         backupState = 'error';
-        backupError = res.error || 'Failed to create backup snapshot';
+        backupError = `File picker failed: ${err?.message || 'User activation or permissions error.'}`;
         return;
       }
+    }
 
-      backupState = 'compressing';
-      const compressedBytes = await buildCompressedBackup(res.snapshot);
+    // 2. Perform safety checks AFTER file picker returns, but BEFORE fileHandle.createWritable()!
+    // This strictly prevents truncating an existing selected file on disk if background generation is running.
+    backupState = 'validating';
 
-      backupState = 'saving';
-      const dateStr = formatDateUtc();
-      const suggestedName = `deepseek-streamarchive-backup_${dateStr}.${PORTABLE_BACKUP_EXTENSION}`;
+    const streamSafety = await checkFoundationStreamSafety();
+    if (!streamSafety.ok) {
+      backupState = 'error';
+      backupError = streamSafety.error || 'Cannot verify background stream safety.';
+      return;
+    }
 
-      const saveRes = await saveLocalFile({
-        suggestedName,
-        mimeType: PORTABLE_BACKUP_MIME_TYPE,
-        data: compressedBytes,
-        description: 'StreamArchive Backup Archive',
-        extension: PORTABLE_BACKUP_EXTENSION,
-      });
+    if (streamSafety.activeCount > 0) {
+      backupState = 'error';
+      backupError = 'Cannot create backup while active DeepSeek generation streams are running. Please wait for completion.';
+      return;
+    }
 
-      if (saveRes.success) {
+    backupState = 'compressing';
+
+    try {
+      const repo = new IndexedDbStorageRepository();
+      const db = await repo.getDb();
+
+      if (fileHandle) {
+        // Direct bounded streaming to disk (< 5 MiB peak RAM, no IPC message size limit)
+        backupState = 'saving';
+        const writable = await fileHandle.createWritable();
+        const result = await streamBackupToWritable(db, writable, {
+          getActiveStreamsCount,
+          getMutationEpoch: () => repo.getMutationEpoch(),
+        });
+
         backupState = 'complete';
         backupSummary = {
-          conversations: res.snapshot.footer.counts.conversations,
-          messages: res.snapshot.footer.counts.messages,
-          revisions: res.snapshot.footer.counts.revisions,
-          rawStreams: res.snapshot.footer.counts.raw_streams,
-          rawBatches: res.snapshot.footer.counts.raw_stream_batches,
-          compressedBytes: compressedBytes.length,
+          conversations: result.counts.conversations,
+          messages: result.counts.messages,
+          revisions: result.counts.revisions,
+          rawStreams: result.counts.raw_streams,
+          rawBatches: result.counts.raw_stream_batches,
+          compressedBytes: result.compressedBytes,
         };
-      } else if (saveRes.canceled) {
-        backupState = 'idle';
       } else {
-        backupState = 'error';
-        backupError = saveRes.error || 'Failed to save backup file';
+        // Fallback for environments without File System Access API
+        const { stream: compressedStream, getCounts } = createCompressedBackupReadableStream(db, {
+          getActiveStreamsCount,
+          getMutationEpoch: () => repo.getMutationEpoch(),
+        });
+        const resp = new Response(compressedStream);
+        const blob = await resp.blob();
+
+        backupState = 'saving';
+        const saveRes = await saveLocalFile({
+          suggestedName,
+          mimeType: PORTABLE_BACKUP_MIME_TYPE,
+          data: blob,
+          description: 'StreamArchive Backup Archive',
+          extension: PORTABLE_BACKUP_EXTENSION,
+        });
+
+        if (saveRes.success) {
+          const counts = getCounts();
+          backupState = 'complete';
+          backupSummary = {
+            conversations: counts.conversations,
+            messages: counts.messages,
+            revisions: counts.revisions,
+            rawStreams: counts.raw_streams,
+            rawBatches: counts.raw_stream_batches,
+            compressedBytes: blob.size,
+          };
+        } else if (saveRes.canceled) {
+          backupState = 'idle';
+        } else {
+          backupState = 'error';
+          backupError = saveRes.error || 'Failed to save backup file';
+        }
       }
     } catch (err) {
       backupState = 'error';
@@ -414,6 +588,8 @@
     if (!file) return;
 
     selectedBackupFileName = file.name;
+    cachedSelectedFile = file;
+    cachedParsedBackup = null;
     restoreState = 'reading';
     restoreError = null;
     restorePreflight = null;
@@ -422,37 +598,30 @@
     restoreResult = null;
 
     try {
-      const buffer = await file.arrayBuffer();
-      const bytes = new Uint8Array(buffer);
-      cachedBackupBytes = bytes;
-
       restoreState = 'validating';
 
-      const arrayData = Array.from(bytes);
-      const res = await new Promise<RestorePreviewResponse>((resolve) => {
-        if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-          chrome.runtime.sendMessage(
-            {
-              type: MESSAGE_RESTORE_PREVIEW,
-              data: arrayData,
-              mode: restoreMode,
-            },
-            (r) => resolve(r || { success: false, error: 'No response from background worker' })
-          );
-        } else {
-          resolve({ success: false, error: 'Extension runtime unavailable' });
-        }
-      });
+      // 1. Direct validation in extension page (sidepanel) context using file stream
+      // Zero IPC transfer, no Array.from(bytes) memory explosion, accommodates 163+ MiB files
+      const repo = new IndexedDbStorageRepository();
+      const db = await repo.getDb();
+      const activeStreamsCount = await getActiveStreamsCount();
 
-      if (!res.success || !res.preflight) {
+      const { preflight, backup } = await validateAndPreflightRestore(
+        db,
+        file,
+        activeStreamsCount,
+        restoreMode
+      );
+
+      if (!preflight.canRestore || !backup) {
         restoreState = 'error';
-        const firstErr = res.preflight?.validationErrors?.[0]?.message;
-        restoreError = res.error || firstErr || 'Failed to validate backup archive';
+        const firstErr = preflight.validationErrors?.[0]?.message;
+        restoreError = firstErr || 'Failed to validate backup archive';
         return;
       }
 
-      restorePreflight = res.preflight;
-      restorePreflightId = res.preflightId || null;
+      cachedParsedBackup = backup;
+      restorePreflight = preflight;
       restoreState = 'ready';
     } catch (err) {
       restoreState = 'error';
@@ -463,29 +632,26 @@
   async function handleModeChange(newMode: RestoreMode) {
     restoreMode = newMode;
     replaceConfirmed = false;
-    if (cachedBackupBytes && restoreState === 'ready') {
+    if ((cachedSelectedFile || cachedParsedBackup) && restoreState === 'ready') {
       restoreState = 'validating';
       try {
-        const arrayData = Array.from(cachedBackupBytes);
-        const res = await new Promise<RestorePreviewResponse>((resolve) => {
-          if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-            chrome.runtime.sendMessage(
-              {
-                type: MESSAGE_RESTORE_PREVIEW,
-                data: arrayData,
-                mode: newMode,
-              },
-              (r) => resolve(r || { success: false, error: 'No response from background worker' })
-            );
-          } else {
-            resolve({ success: false, error: 'Extension runtime unavailable' });
-          }
-        });
-        if (res.success && res.preflight) {
-          restorePreflight = res.preflight;
-          restorePreflightId = res.preflightId || null;
-          restoreState = 'ready';
+        const repo = new IndexedDbStorageRepository();
+        const activeStreamsCount = await getActiveStreamsCount();
+        const target = cachedSelectedFile || cachedParsedBackup;
+        const { preflight, backup } = await repo.validateAndPreflightRestore(
+          target as any,
+          activeStreamsCount,
+          newMode
+        );
+        if (!preflight.canRestore || !backup) {
+          restoreState = 'error';
+          const firstErr = preflight.validationErrors?.[0]?.message;
+          restoreError = firstErr || 'Failed to validate backup archive';
+          return;
         }
+        cachedParsedBackup = backup;
+        restorePreflight = preflight;
+        restoreState = 'ready';
       } catch (err) {
         restoreState = 'error';
         restoreError = (err as Error).message;
@@ -502,29 +668,33 @@
     restoreError = null;
 
     try {
-      const res = await new Promise<ExecuteRestoreResponse>((resolve) => {
-        if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-          chrome.runtime.sendMessage(
-            {
-              type: MESSAGE_EXECUTE_RESTORE,
-              preflightId: restorePreflightId,
-              mode: restoreMode,
-            },
-            (r) => resolve(r || { success: false, error: 'No response from background worker' })
-          );
-        } else {
-          resolve({ success: false, error: 'Extension runtime unavailable' });
-        }
-      });
-
-      if (!res.success || !res.result) {
+      const activeStreamsCount = await getActiveStreamsCount();
+      if (activeStreamsCount > 0) {
         restoreState = 'error';
-        restoreError = res.error || 'Restore failed';
+        restoreError = 'Cannot restore archive while active DeepSeek generation streams are running. Please wait for completion.';
         return;
       }
 
-      restoreResult = res.result;
+      if (!cachedParsedBackup) {
+        restoreState = 'error';
+        restoreError = 'Please re-select the backup file before restoring.';
+        return;
+      }
+
+      const repo = new IndexedDbStorageRepository();
+      const db = await repo.getDb();
+      const result = await executeRestore(db, cachedSelectedFile || cachedParsedBackup, restoreMode, activeStreamsCount);
+
+      if (!result.success) {
+        restoreState = 'error';
+        restoreError = result.error || 'Restore failed';
+        return;
+      }
+
+      restoreResult = result;
       restoreState = 'complete';
+      cachedParsedBackup = null;
+      cachedSelectedFile = null;
 
       // Refresh data
       loadStorageEstimate();
@@ -535,6 +705,34 @@
     }
   }
 
+  async function handleRetryRestoreCleanup() {
+    isRetryingCleanup = true;
+    cleanupActionError = null;
+    try {
+      const idbFactory = typeof indexedDB !== 'undefined' ? indexedDB : undefined;
+      const res = await retryPendingRestoreCleanup(idbFactory);
+      if (res.journalDeleted) {
+        if (restoreResult) {
+          restoreResult = {
+            ...restoreResult,
+            cleanupStatus: res.success ? 'completed' : 'temporary_leftover',
+            cleanupWarning: res.errors.length > 0
+              ? res.errors.map((e) => e.message).join('; ')
+              : undefined,
+            journalError: undefined,
+          };
+        }
+        loadStorageEstimate();
+      } else {
+        cleanupActionError = res.errors.map((e) => e.message).join('; ') || 'Retry cleanup failed';
+      }
+    } catch (err) {
+      cleanupActionError = (err as Error).message;
+    } finally {
+      isRetryingCleanup = false;
+    }
+  }
+
   function handleResetRestore() {
     restoreState = 'idle';
     restoreError = null;
@@ -542,8 +740,11 @@
     restorePreflightId = null;
     replaceConfirmed = false;
     restoreResult = null;
+    isRetryingCleanup = false;
+    cleanupActionError = null;
     selectedBackupFileName = null;
-    cachedBackupBytes = null;
+    cachedSelectedFile = null;
+    cachedParsedBackup = null;
   }
 
   function handleCreateSafetyBackupFirst() {
@@ -599,6 +800,19 @@
   </header>
 
   <main class="app-body">
+    {#if archiveSafetyStatus !== 'READY' || startupCrashRecoveryAlert}
+      <div class="restore-error-banner" style="margin: 12px; border-radius: 8px; background: rgba(220, 38, 38, 0.15); border: 1px solid #ef4444; color: #f87171;" role="alert">
+        {#if archiveSafetyStatus === 'RECOVERING'}
+          ⏳ Archive recovery is currently running in the background...
+        {:else if archiveSafetyStatus === 'RECOVERY_BLOCKED'}
+          ⛔ Archive recovery is blocked by another context. Please close other DeepSeek tabs or sidepanels.
+        {:else if archiveSafetyStatus === 'RECOVERY_FAILED'}
+          🚨 CRITICAL: Archive crash recovery failed. Writes and destructive operations are blocked to prevent data loss.
+        {:else if startupCrashRecoveryAlert}
+          ⚠️ {startupCrashRecoveryAlert}
+        {/if}
+      </div>
+    {/if}
     {#if activeTab === 'archive'}
       {#if selectedConversationId}
         <ConversationView
@@ -665,6 +879,37 @@
           </div>
 
           {#if recoverySettings.displayMode === 'inline'}
+            <div class="setting-radio-group" style="margin-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 0.75rem;">
+              <span class="setting-label">{t.inlinePlacementTitle}</span>
+              <label class="setting-radio-item">
+                <input
+                  type="radio"
+                  name="inlinePlacement"
+                  value="underneath"
+                  checked={recoverySettings.inlinePlacement !== 'replace'}
+                  onchange={() => handleInlinePlacementChange('underneath')}
+                />
+                <div class="radio-content">
+                  <strong>{t.inlinePlacementUnderneath}</strong>
+                  <span class="setting-hint">{t.inlinePlacementUnderneathDesc}</span>
+                </div>
+              </label>
+
+              <label class="setting-radio-item">
+                <input
+                  type="radio"
+                  name="inlinePlacement"
+                  value="replace"
+                  checked={recoverySettings.inlinePlacement === 'replace'}
+                  onchange={() => handleInlinePlacementChange('replace')}
+                />
+                <div class="radio-content">
+                  <strong>{t.inlinePlacementReplace}</strong>
+                  <span class="setting-hint">{t.inlinePlacementReplaceDesc}</span>
+                </div>
+              </label>
+            </div>
+
             <div class="setting-checkbox-item">
               <label class="checkbox-label">
                 <input
@@ -985,7 +1230,7 @@
                   class="backup-btn primary"
                   id="execute-restore-btn"
                   type="button"
-                  disabled={!restorePreflight.canRestore || (restoreMode === 'replace' && !replaceConfirmed)}
+                  disabled={archiveSafetyStatus !== 'READY' || !restorePreflight.canRestore || (restoreMode === 'replace' && !replaceConfirmed)}
                   onclick={handleExecuteRestore}
                 >
                   🚀 {t.restoreBtn}
@@ -1004,11 +1249,55 @@
               ⏳ {restoreState === 'restoring' ? t.restoreRestoring : t.restoreVerifying}
             </div>
           {:else if restoreState === 'complete' && restoreResult}
-            <div class="restore-summary-box" id="restore-summary-box">
+            <div
+              class="restore-summary-box"
+              class:warning-box={restoreResult.cleanupStatus === 'journal_unresolved'}
+              id="restore-summary-box"
+            >
               <div class="summary-header">
-                <span class="summary-icon">✅</span>
-                <strong>{t.restoreComplete}</strong>
+                {#if restoreResult.cleanupStatus === 'journal_unresolved'}
+                  <span class="summary-icon">⚠️</span>
+                  <strong>{t.restoreCompleteWithWarning}</strong>
+                {:else}
+                  <span class="summary-icon">✅</span>
+                  <strong>{t.restoreComplete}</strong>
+                {/if}
               </div>
+
+              {#if restoreResult.cleanupStatus === 'journal_unresolved'}
+                <div
+                  class="restore-journal-warning-banner"
+                  id="restore-journal-warning-banner"
+                  style="background: rgba(234, 179, 8, 0.12); border: 1px solid #eab308; padding: 0.6rem 0.8rem; border-radius: 6px; margin: 0.5rem 0; font-size: 0.82rem; color: #fde047;"
+                >
+                  <p style="margin: 0 0 0.4rem 0;">{t.restoreJournalUnresolvedDesc}</p>
+                  {#if restoreResult.journalError}
+                    <div style="font-family: monospace; font-size: 0.78rem; opacity: 0.9; margin-bottom: 0.4rem;">
+                      {restoreResult.journalError}
+                    </div>
+                  {/if}
+                  {#if cleanupActionError}
+                    <div class="cleanup-action-error" style="color: #ef4444; margin-bottom: 0.4rem;">{cleanupActionError}</div>
+                  {/if}
+                  <button
+                    class="backup-btn primary"
+                    type="button"
+                    disabled={isRetryingCleanup}
+                    onclick={handleRetryRestoreCleanup}
+                    style="margin-top: 0.3rem;"
+                  >
+                    {isRetryingCleanup ? t.restoreRetryingCleanup : t.restoreRetryCleanup}
+                  </button>
+                </div>
+              {:else if restoreResult.cleanupStatus === 'temporary_leftover'}
+                <div
+                  class="restore-temporary-notice"
+                  style="background: rgba(59, 130, 246, 0.12); border: 1px solid #3b82f6; padding: 0.5rem 0.75rem; border-radius: 6px; margin: 0.5rem 0; font-size: 0.82rem; color: #93c5fd;"
+                >
+                  ℹ️ {t.restoreTemporaryLeftoverDesc}
+                </div>
+              {/if}
+
               <p class="reload-notice">{t.restoreReloadTabsNotice}</p>
               <div class="summary-grid">
                 <div class="summary-item">
@@ -1238,6 +1527,7 @@
                   class="backup-btn danger"
                   id="clear-all-archive-btn"
                   type="button"
+                  disabled={archiveSafetyStatus !== 'READY'}
                   onclick={() => { showClearArchiveModal = true; clearArchiveConfirmed = false; clearArchiveFeedback = null; }}
                 >
                   ⚠️ {t.clearArchiveBtn}

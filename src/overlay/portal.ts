@@ -4,6 +4,7 @@ import type { PageRecoverySummary, PageRecoveryMessageSummary } from '../adapter
 import {
   MESSAGE_GET_PAGE_RECOVERY_SUMMARY,
   MESSAGE_GET_PAGE_RECOVERY_CONTENT,
+  MESSAGE_RECORD_RECOVERY_DIAGNOSTIC,
   type GetPageRecoverySummaryRequest,
   type GetPageRecoverySummaryResponse,
   type GetPageRecoveryContentRequest,
@@ -116,6 +117,9 @@ export class StreamArchiveOverlayPortal {
   private userTurnLedger = new InlineRecoveryLedger();
   private inFlightFetches = new Set<string>();
   private storageListener: ((changes: { [key: string]: chrome.storage.StorageChange }, areaName: string) => void) | null = null;
+  private inlineAttemptedCount = 0;
+  private inlineSucceededCount = 0;
+  private inlineFallbackReason: string | null = null;
 
   private readonly fetchSummaryImpl: (currentRouteSessionId?: string) => Promise<PageRecoverySummary | null>;
   private readonly fetchContentImpl: (req: {
@@ -475,6 +479,9 @@ export class StreamArchiveOverlayPortal {
     dismissedCount: number;
     displayMode: RecoveryDisplayMode;
     inlineMountedCount: number;
+    inlineAttemptedCount: number;
+    inlineSucceededCount: number;
+    inlineFallbackReason: string | null;
   } {
     return {
       isMounted: this.isMounted,
@@ -486,6 +493,9 @@ export class StreamArchiveOverlayPortal {
       dismissedCount: this.dismissedMessageIds.size,
       displayMode: this.presentationSettings.displayMode,
       inlineMountedCount: this.inlineLedger.size,
+      inlineAttemptedCount: this.inlineAttemptedCount,
+      inlineSucceededCount: this.inlineSucceededCount,
+      inlineFallbackReason: this.inlineFallbackReason,
     };
   }
 
@@ -531,6 +541,13 @@ export class StreamArchiveOverlayPortal {
     }
 
     this.activeSummary = summary;
+    if (this.presentationSettings.displayMode === 'inline' && summary?.messages) {
+      for (const m of summary.messages) {
+        if (!this.modalContentCache.has(m.messageId)) {
+          this.lazyLoadContent(m).catch(() => {});
+        }
+      }
+    }
     this.render();
   }
 
@@ -570,12 +587,14 @@ export class StreamArchiveOverlayPortal {
 
       for (const msg of availableMessages) {
         let isAnchored = false;
-        if (msg.remoteId) {
-          const anchor = locateMessageAnchor(msg.remoteId, document);
-          if (anchor && anchor.rect.top > -200 && anchor.rect.top < window.innerHeight + 200) {
+        const lookupId = msg.remoteId;
+        if (lookupId) {
+          const anchor = locateMessageAnchor(lookupId, document);
+          if (anchor) {
             const target = findInlineInsertionPoint(anchor);
             if (target) {
               isAnchored = true;
+              this.inlineAttemptedCount++;
               const cached = this.modalContentCache.get(msg.messageId);
               if (cached) {
                 const existingHandle = this.inlineLedger.get(msg.messageId);
@@ -588,48 +607,35 @@ export class StreamArchiveOverlayPortal {
                 } else {
                   const handle = mountInlineRecovery(target, msg, cached, {
                     showThinkingInline: this.presentationSettings.showThinkingInline,
+                    inlinePlacement: this.presentationSettings.inlinePlacement,
                   });
                   if (handle) {
                     this.inlineLedger.registerHandle(msg.messageId, handle);
+                    this.inlineSucceededCount++;
+                    this.inlineFallbackReason = null;
+                    this.reportRecoveryDiagnostic('inline_rendering_succeeded', 'inline_success');
                   } else {
                     // Fallback to anchored badge if closed shadow DOM or mount failed
-                    this.renderAnchoredBadge(msg, anchor.rect);
+                    this.inlineFallbackReason = 'shadow_root_or_mount_failed';
+                    if (anchor.rect.top > -200 && anchor.rect.top < window.innerHeight + 200) {
+                      this.renderAnchoredBadge(msg, anchor.rect);
+                    }
+                    this.reportRecoveryDiagnostic('fallback_render', 'fallback_render');
                   }
                 }
               } else {
-                // Content not yet cached; trigger lazy load and display temporary anchored badge
+                // Content not yet cached; trigger eager fetch without flashing temporary overlay badge
                 this.lazyLoadContent(msg);
-                this.renderAnchoredBadge(msg, anchor.rect);
               }
             } else {
               // Anchor found in DOM, but no valid inline insertion target structure
               // Fallback to anchored badge
               isAnchored = true;
-              this.renderAnchoredBadge(msg, anchor.rect);
-            }
-          } else if (anchor) {
-            // Anchor exists in DOM but outside current viewport range
-            isAnchored = true;
-            const target = findInlineInsertionPoint(anchor);
-            if (target) {
-              const cached = this.modalContentCache.get(msg.messageId);
-              if (cached) {
-                const existingHandle = this.inlineLedger.get(msg.messageId);
-                if (
-                  !existingHandle ||
-                  !existingHandle.hostElement.isConnected ||
-                  existingHandle.containerElement !== target.containerElement
-                ) {
-                  const handle = mountInlineRecovery(target, msg, cached, {
-                    showThinkingInline: this.presentationSettings.showThinkingInline,
-                  });
-                  if (handle) {
-                    this.inlineLedger.registerHandle(msg.messageId, handle);
-                  }
-                }
-              } else {
-                this.lazyLoadContent(msg);
+              this.inlineFallbackReason = 'target_structure_not_found';
+              if (anchor.rect.top > -200 && anchor.rect.top < window.innerHeight + 200) {
+                this.renderAnchoredBadge(msg, anchor.rect);
               }
+              this.reportRecoveryDiagnostic('inline_target_not_found', 'fallback_render');
             }
           }
         }
@@ -642,6 +648,10 @@ export class StreamArchiveOverlayPortal {
             }
           }
           unanchoredMessages.push(msg);
+          const reason: import('../bridge/messages').RecoveryDiagnosticReason =
+            !lookupId || !msg.remoteId ? 'remote_identity_unresolved' : 'dom_anchor_not_found';
+          this.inlineFallbackReason = reason;
+          this.reportRecoveryDiagnostic(reason, 'dom_mapping_error');
         }
       }
     } else {
@@ -686,7 +696,9 @@ export class StreamArchiveOverlayPortal {
   private reconcileUserContinuityTurns(): void {
     if (this.isDestroyed || !this.isMounted || typeof document === 'undefined') return;
 
-    const elements = document.querySelectorAll('[data-message-id]');
+    const elements = document.querySelectorAll(
+      '[data-virtual-list-item-key], [data-message-id]'
+    );
     const activeDeliveryIds = new Set<string>();
 
     for (let i = 0; i < elements.length; i++) {
@@ -721,6 +733,25 @@ export class StreamArchiveOverlayPortal {
       if (!activeDeliveryIds.has(handle.messageId)) {
         this.userTurnLedger.unmount(handle.messageId);
       }
+    }
+  }
+
+  private reportRecoveryDiagnostic(
+    reason?: import('../bridge/messages').RecoveryDiagnosticReason,
+    kind?: 'inline_success' | 'fallback_render' | 'dom_mapping_error'
+  ): void {
+    try {
+      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+        chrome.runtime
+          .sendMessage({
+            type: MESSAGE_RECORD_RECOVERY_DIAGNOSTIC,
+            kind: kind || (reason === 'inline_rendering_succeeded' ? 'inline_success' : 'dom_mapping_error'),
+            reason,
+          })
+          .catch(() => {});
+      }
+    } catch {
+      // ignore
     }
   }
 

@@ -20,8 +20,13 @@ import {
 } from '../src/adapters/deepseek/history/capture-policy';
 import type { HistoryObservationPayload } from '../src/bridge/protocol';
 import { augmentDeepSeekRequest } from '../src/adapters/deepseek/request/augment';
-import { parseDeepSeekRequestBody } from '../src/adapters/deepseek/request/parser';
+import {
+  isDeepSeekUserGenerationEndpoint,
+  parseDeepSeekRequestBody,
+  normalizeEndpointPath,
+} from '../src/adapters/deepseek/request/parser';
 import type { ContextDeliveryEnvelope } from '../src/adapters/deepseek/request/types';
+import { TurnIdentityCoordinator } from '../src/transport/request-identity';
 import { logger } from '../src/shared/logger';
 
 const TRANSPORT_HOOK_KEY = Symbol.for('__STREAMARCHIVE_MAIN_HOOK__');
@@ -97,8 +102,12 @@ export default defineContentScript({
       }
     };
 
+    // Track active streams and their associated turn identities
+    const turnCoordinator = new TurnIdentityCoordinator();
+
     // Forward captured transport events across MAIN -> ISOLATED boundary
     const handleTransportEvent = (event: TransportEvent) => {
+      turnCoordinator.handleTransportStreamEvent(event);
       dispatchBridgeEnvelope('transport.event', event);
     };
 
@@ -221,62 +230,114 @@ export default defineContentScript({
       body: unknown,
       transport: 'fetch' | 'xhr'
     ): { body?: unknown } | undefined => {
-      if (!activeEnvelope) {
-        return undefined;
-      }
+      let finalBody: unknown = body;
+      let originalUserPrompt: string | undefined = undefined;
 
-      const augResult = augmentDeepSeekRequest({
-        url,
-        method,
-        body,
-        envelope: activeEnvelope,
-      });
+      if (activeEnvelope) {
+        const augResult = augmentDeepSeekRequest({
+          url,
+          method,
+          body,
+          envelope: activeEnvelope,
+        });
 
-      if (augResult.augmented) {
-        const env = activeEnvelope;
-        // In manual_next mode, single delivery disarms the envelope immediately
-        if (env.deliveryMode === 'manual_next') {
-          activeEnvelope = null;
-        }
+        if (augResult.augmented) {
+          const env = activeEnvelope;
+          if (env.deliveryMode === 'manual_next') {
+            activeEnvelope = null;
+          }
 
-        const dispatchedPayload: ContinuityDispatchedPayload = {
-          deliveryId: augResult.deliveryId,
-          conversationId: env.conversationId,
-          remoteConversationId: env.remoteConversationId,
-          parentMessageId: env.expectedParentMessageId,
-          sourceMessageIds: env.sourceMessageIds,
-          sourceRevisionIds: env.sourceRevisionIds,
-          deliveryMode: env.deliveryMode,
-          transport,
-          timestamp: Date.now(),
-        };
-        dispatchBridgeEnvelope('continuity.dispatched', dispatchedPayload);
-
-        logger.info(`[StreamArchive] Injected recovered context into DeepSeek prompt (delivery ${augResult.deliveryId})`);
-        return { body: augResult.augmentedBody };
-      } else {
-        if (augResult.reason !== 'not_candidate_endpoint') {
-          const skippedPayload: ContinuitySkippedPayload = {
-            deliveryId: activeEnvelope?.deliveryId,
-            reason: augResult.reason,
-            url,
+          const dispatchedPayload: ContinuityDispatchedPayload = {
+            deliveryId: augResult.deliveryId,
+            conversationId: env.conversationId,
+            remoteConversationId: env.remoteConversationId,
+            parentMessageId: env.expectedParentMessageId,
+            sourceMessageIds: env.sourceMessageIds,
+            sourceRevisionIds: env.sourceRevisionIds,
+            deliveryMode: env.deliveryMode,
+            transport,
             timestamp: Date.now(),
           };
-          dispatchBridgeEnvelope('continuity.skipped', skippedPayload);
-          logger.info(`[StreamArchive] Continuity skipped: ${augResult.reason}`);
+          dispatchBridgeEnvelope('continuity.dispatched', dispatchedPayload);
+
+          logger.info(`[StreamArchive] Injected recovered context into DeepSeek prompt (delivery ${augResult.deliveryId})`);
+          finalBody = augResult.augmentedBody;
+          originalUserPrompt = augResult.originalPrompt;
+        } else {
+          if (augResult.reason !== 'not_candidate_endpoint') {
+            const skippedPayload: ContinuitySkippedPayload = {
+              deliveryId: activeEnvelope?.deliveryId,
+              reason: augResult.reason,
+              url,
+              timestamp: Date.now(),
+            };
+            dispatchBridgeEnvelope('continuity.skipped', skippedPayload);
+            logger.info(`[StreamArchive] Continuity skipped: ${augResult.reason}`);
+          }
         }
-        return undefined;
       }
+
+      // Immediate User Prompt Persistence (Section 6)
+      if (isDeepSeekUserGenerationEndpoint(url, method)) {
+        const parsed = parseDeepSeekRequestBody(finalBody);
+        const isRegenRequest =
+          normalizeEndpointPath(url).endsWith('/api/v0/chat/regenerate') ||
+          Boolean((parsed as any)?.regenerate);
+
+        if (!isRegenRequest && parsed && typeof parsed.prompt === 'string' && parsed.prompt.trim().length > 0) {
+          const userPromptText = originalUserPrompt || parsed.prompt;
+          const parentTurnId =
+            parsed.parent_message_id !== undefined
+              ? (parsed.parent_message_id ? String(parsed.parent_message_id) : null)
+              : undefined;
+          const reqSessionId = parsed.chat_session_id ? String(parsed.chat_session_id) : undefined;
+
+          const { clientTurnId } = turnCoordinator.resolveTurnForOutgoingRequest({
+            prompt: userPromptText,
+            sessionId: reqSessionId,
+            parentTurnId,
+            isRegenRequest: false,
+            requestBody: finalBody,
+          });
+          if (body !== finalBody) {
+            turnCoordinator.recordRequestBody(body, clientTurnId);
+          }
+
+          dispatchBridgeEnvelope('user_turn.observed', {
+            clientTurnId,
+            sessionId: reqSessionId,
+            prompt: userPromptText,
+            parentTurnId,
+            transport,
+            timestamp: Date.now(),
+          });
+
+          logger.info(`[StreamArchive] Observed user prompt outgoing turn: ${clientTurnId}`);
+        }
+      }
+
+      return finalBody !== body ? { body: finalBody } : undefined;
     };
 
     const extractDeepSeekRequestMetadata = (context: { method: string; url: string; body: unknown }): Partial<import('../src/transport/types').TransportMetadata> | undefined => {
       const parsed = parseDeepSeekRequestBody(context.body);
       if (!parsed) return undefined;
-      return {
-        requestPrompt: typeof parsed.prompt === 'string' ? parsed.prompt : undefined,
-        requestParentTurnId: parsed.parent_message_id !== undefined ? (parsed.parent_message_id ? String(parsed.parent_message_id) : null) : undefined,
-        requestSessionId: parsed.chat_session_id ? String(parsed.chat_session_id) : undefined,
-      };
+
+      const isRegenRequest =
+        normalizeEndpointPath(context.url).endsWith('/api/v0/chat/regenerate') ||
+        Boolean((parsed as any)?.regenerate);
+
+      const parentTurnId =
+        parsed.parent_message_id !== undefined
+          ? (parsed.parent_message_id ? String(parsed.parent_message_id) : null)
+          : undefined;
+      const reqSessionId = parsed.chat_session_id ? String(parsed.chat_session_id) : undefined;
+
+      return turnCoordinator.extractRequestMetadata(context, isRegenRequest, {
+        prompt: typeof parsed.prompt === 'string' ? parsed.prompt : undefined,
+        sessionId: reqSessionId,
+        parentTurnId,
+      });
     };
 
     // Install passive transport observers
