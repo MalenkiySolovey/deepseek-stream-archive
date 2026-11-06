@@ -1414,6 +1414,53 @@ export async function batchGetKeys(
 }
 
 /**
+ * Detects whether having or setting parentId on a message introduces a cycle of arbitrary length in the database.
+ * Uses ancestor chain traversal with memoized acyclic paths to operate in bounded O(N) time and memory.
+ */
+export async function checkMessageTreeCycle(
+  db: IDBDatabase,
+  messageId: string,
+  parentId: string,
+  knownAcyclicNodes?: Set<string>
+): Promise<{ hasCycle: boolean; cyclePath?: string[] }> {
+  if (parentId === messageId) {
+    return { hasCycle: true, cyclePath: [messageId, parentId] };
+  }
+
+  const visited = new Set<string>([messageId]);
+  const path: string[] = [messageId, parentId];
+  let currId: string | undefined = parentId;
+  let depth = 0;
+  const maxDepth = 1000;
+
+  while (currId && depth < maxDepth) {
+    depth++;
+    if (visited.has(currId)) {
+      return { hasCycle: true, cyclePath: path };
+    }
+    if (knownAcyclicNodes && knownAcyclicNodes.has(currId)) {
+      break;
+    }
+    visited.add(currId);
+    const parentMap = await batchGetKeys(db, STORE_MESSAGES, [currId]);
+    const parentMsg = parentMap.get(currId) as Message | undefined;
+    if (!parentMsg || !parentMsg.parentId) {
+      break;
+    }
+    currId = parentMsg.parentId;
+    path.push(currId);
+  }
+
+  if (knownAcyclicNodes) {
+    for (const id of visited) {
+      knownAcyclicNodes.add(id);
+    }
+  }
+
+  return { hasCycle: false };
+}
+
+/**
  * Validates referential integrity directly against the staging database using cursor batches.
  * Peak memory consumption is strictly bounded (< 2 MiB RAM) without accumulating in-memory graphs.
  */
@@ -1541,36 +1588,52 @@ export async function verifyRestoredBaselinePreserved(
 
       // 7. Message content preservation:
       if (baselineRecord.role === 'user' || baselineRecord.role === 'system') {
-        if (typeof baselineRecord.content === 'string') {
-          if (liveRecord.content !== baselineRecord.content) {
-            return {
-              preserved: false,
-              reason: `User message "${baselineRecord.id}" content mismatch: expected "${baselineRecord.content.slice(0, 40)}...", got "${(liveRecord.content ?? '').slice(0, 40)}..."`,
-            };
-          }
+        const baseContent = typeof baselineRecord.content === 'string' ? baselineRecord.content : '';
+        const liveContent = typeof liveRecord.content === 'string' ? liveRecord.content : '';
+        if (baseContent !== liveContent) {
+          return {
+            preserved: false,
+            reason: `User message "${baselineRecord.id}" content mismatch in field "content": expected length ${baseContent.length}, got length ${liveContent.length}`,
+          };
         }
       } else if (baselineRecord.role === 'assistant') {
-        if (typeof baselineRecord.content === 'string' && baselineRecord.content.length > 0) {
-          if (typeof liveRecord.content !== 'string') {
-            return { preserved: false, reason: `Assistant message "${baselineRecord.id}" content was wiped or removed` };
-          }
-          if (liveRecord.content !== baselineRecord.content) {
-            const wasStreaming = baselineRecord.status === 'streaming' || baselineRecord.status === 'incomplete';
-            if (wasStreaming && liveRecord.content.startsWith(baselineRecord.content)) {
-              // Legitimate streaming continuation
-            } else {
+        const wasStreaming = baselineRecord.status === 'streaming' || baselineRecord.status === 'incomplete';
+        const baseContent = typeof baselineRecord.content === 'string' ? baselineRecord.content : '';
+        const liveContent = typeof liveRecord.content === 'string' ? liveRecord.content : '';
+
+        if (wasStreaming) {
+          if (baseContent.length > 0) {
+            if (!liveContent.startsWith(baseContent)) {
               return {
                 preserved: false,
-                reason: `Assistant message "${baselineRecord.id}" content was mutated without legitimate streaming continuation`,
+                reason: `Assistant message "${baselineRecord.id}" content was mutated without legitimate streaming continuation in field "content": expected prefix length ${baseContent.length}, got length ${liveContent.length}`,
               };
             }
+          }
+          // If baseContent was empty (''), any continuation in liveContent is valid stream progression.
+        } else {
+          // Finished or filtered: content must match exactly (empty or non-empty)
+          if (baseContent !== liveContent) {
+            return {
+              preserved: false,
+              reason: `Finished or filtered assistant message "${baselineRecord.id}" content mismatch in field "content": expected length ${baseContent.length}, got length ${liveContent.length}`,
+            };
           }
         }
       }
 
-      // 8. parentId resolution and preservation:
+      // 8. parentId resolution, cycle detection, and preservation:
       if (baselineRecord.parentId === liveRecord.parentId) {
         // Preserved!
+        if (liveRecord.parentId) {
+          const cycleCheck = await checkMessageTreeCycle(liveDb, liveRecord.id, liveRecord.parentId);
+          if (cycleCheck.hasCycle) {
+            return {
+              preserved: false,
+              reason: `Message tree cycle detected involving message "${baselineRecord.id}" and ancestor "${liveRecord.parentId}"`,
+            };
+          }
+        }
       } else {
         if (baselineRecord.parentId !== undefined) {
           const wasRawRemoteId = baselineRecord.remoteParentId && baselineRecord.parentId === baselineRecord.remoteParentId;
@@ -1583,6 +1646,13 @@ export async function verifyRestoredBaselinePreserved(
                 reason: `Message "${baselineRecord.id}" parentId was substituted from raw remoteParentId "${baselineRecord.remoteParentId}" to an invalid or unconfirmed parent "${liveRecord.parentId}"`,
               };
             }
+            const cycleCheck = await checkMessageTreeCycle(liveDb, liveRecord.id, liveRecord.parentId);
+            if (cycleCheck.hasCycle) {
+              return {
+                preserved: false,
+                reason: `Message tree cycle detected involving message "${baselineRecord.id}" and ancestor "${liveRecord.parentId}"`,
+              };
+            }
           } else {
             return {
               preserved: false,
@@ -1592,19 +1662,29 @@ export async function verifyRestoredBaselinePreserved(
         } else {
           // Baseline had parentId === undefined (was root or unresolved provisional message).
           if (liveRecord.parentId) {
-            const expectedRemoteParent = baselineRecord.remoteParentId || liveRecord.remoteParentId;
-            if (!expectedRemoteParent) {
+            // If baselineRecord had no remoteParentId, it is a confirmed root message!
+            // It MUST NOT be relocated to any parent, even if liveRecord supplies a new remoteParentId!
+            if (!baselineRecord.remoteParentId) {
               return {
                 preserved: false,
-                reason: `Root message "${baselineRecord.id}" without remoteParentId was arbitrarily assigned parentId "${liveRecord.parentId}"`,
+                reason: `Root message "${baselineRecord.id}" has no parent and cannot be relocated to parent "${liveRecord.parentId}"`,
               };
             }
+            // If baselineRecord HAD remoteParentId, liveRecord.parentId must resolve to that exact confirmed remoteParentId
+            const expectedRemoteParent = baselineRecord.remoteParentId;
             const parentMap = await batchGetKeys(liveDb, STORE_MESSAGES, [liveRecord.parentId]);
             const parent = parentMap.get(liveRecord.parentId) as Message | undefined;
             if (!parent || parent.remoteId !== expectedRemoteParent || !isValidRoleParentage(liveRecord.role, parent.role)) {
               return {
                 preserved: false,
                 reason: `Message "${baselineRecord.id}" parentId "${liveRecord.parentId}" does not resolve to confirmed remoteParentId "${expectedRemoteParent}"`,
+              };
+            }
+            const cycleCheck = await checkMessageTreeCycle(liveDb, liveRecord.id, liveRecord.parentId);
+            if (cycleCheck.hasCycle) {
+              return {
+                preserved: false,
+                reason: `Message tree cycle detected involving message "${baselineRecord.id}" and ancestor "${liveRecord.parentId}"`,
               };
             }
           }
@@ -1869,6 +1949,7 @@ export async function validateStagingReferentialIntegrity(
 
   // 1. Messages referential integrity
   if (stagingDb.objectStoreNames.contains(STORE_MESSAGES) && stagingDb.objectStoreNames.contains(STORE_CONVERSATIONS)) {
+    const acyclicNodes = new Set<string>();
     let lastKey: IDBValidKey | null = null;
     while (true) {
       const batch = await fetchStoreBatch(stagingDb, STORE_MESSAGES, lastKey, BATCH_SIZE);
@@ -1933,6 +2014,16 @@ export async function validateStagingReferentialIntegrity(
                 entityId: msg.id,
                 relatedId: parent.id,
               });
+            } else {
+              const cycleCheck = await checkMessageTreeCycle(stagingDb, msg.id, msg.parentId, acyclicNodes);
+              if (cycleCheck.hasCycle) {
+                errors.push({
+                  code: 'parent_cycle_detected',
+                  message: `Message tree cycle detected involving message "${msg.id}" and ancestor "${msg.parentId}".`,
+                  entityId: msg.id,
+                  relatedId: msg.parentId,
+                });
+              }
             }
           }
         }

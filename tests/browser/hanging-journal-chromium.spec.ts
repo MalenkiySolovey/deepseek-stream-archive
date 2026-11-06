@@ -466,90 +466,41 @@ test.describe('E2E Chromium: Hanging Journal Marker & Post-Commit Cleanup Safety
   test('genuine Chromium: parentId branch substitution with added new message blocks Retry Cleanup and preserves snapshot', async ({
     page,
     loadSidepanel,
+    router,
   }) => {
+    // 1. Mock completion endpoint
+    router.registry.registerCustomHandler(
+      'https://chat.deepseek.com/api/v0/chat/completion',
+      async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream; charset=utf-8',
+          headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+          body: 'data: {"choices":[{"delta":{"content":"Original Branch Answer"}}]}\n\ndata: [DONE]\n\n',
+        });
+      }
+    );
+
+    // 2. Generate initial Conversation in DeepSeek
+    const sessionId = 'sess-branch-defense-1';
+    await page.goto(`https://chat.deepseek.com/a/chat/s/${sessionId}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(500);
+
+    await page.evaluate(() => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', 'https://chat.deepseek.com/api/v0/chat/completion', true);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.send(JSON.stringify({ prompt: 'Initial Branch Question' }));
+    });
+    await page.waitForTimeout(1000);
+
+    // 3. Create Backup
     const sidepanel = await loadSidepanel();
-    sidepanel.on('console', (msg) => console.log('BROWSER CONSOLE T4:', msg.text()));
+    sidepanel.on('console', (msg) => console.log('BROWSER CONSOLE:', msg.text()));
     await sidepanel.evaluate(() => {
       delete (window as any).showSaveFilePicker;
     });
 
-    // 1. Seed branching conversation directly in Chromium IndexedDB
-    const convId = 'sess-branch-defense-1';
-    await sidepanel.evaluate(async (cId) => {
-      const openDb = (): Promise<IDBDatabase> => {
-        return new Promise((res, rej) => {
-          const req = indexedDB.open('StreamArchiveDB', 9);
-          req.onupgradeneeded = (e) => {
-            const db = (e.target as any).result;
-            if (!db.objectStoreNames.contains('conversations')) db.createObjectStore('conversations', { keyPath: 'id' });
-            if (!db.objectStoreNames.contains('messages')) db.createObjectStore('messages', { keyPath: 'id' });
-          };
-          req.onsuccess = () => res(req.result);
-          req.onerror = () => rej(req.error);
-        });
-      };
-      const db = await openDb();
-      const tx = db.transaction(['conversations', 'messages'], 'readwrite');
-      tx.objectStore('conversations').put({
-        id: cId,
-        title: 'Branching tree defense',
-        createdAt: 1000,
-        updatedAt: 1000,
-      });
-      const u1 = {
-        id: 'u1',
-        conversationId: cId,
-        role: 'user',
-        status: 'finished',
-        identityState: 'reconciled',
-        projectionState: 'logical',
-        content: 'Prompt 1',
-        createdAt: 1000,
-        updatedAt: 1000,
-      };
-      const a1a = {
-        id: 'a1a',
-        conversationId: cId,
-        parentId: 'u1',
-        role: 'assistant',
-        status: 'finished',
-        identityState: 'reconciled',
-        projectionState: 'logical',
-        createdAt: 1100,
-        updatedAt: 1100,
-      };
-      const a1b = {
-        id: 'a1b',
-        conversationId: cId,
-        parentId: 'u1',
-        role: 'assistant',
-        status: 'finished',
-        identityState: 'reconciled',
-        projectionState: 'logical',
-        createdAt: 1200,
-        updatedAt: 1200,
-      };
-      const u2 = {
-        id: 'u2',
-        conversationId: cId,
-        parentId: 'a1b', // Connected under a1b in baseline
-        role: 'user',
-        status: 'finished',
-        identityState: 'reconciled',
-        projectionState: 'logical',
-        content: 'Prompt 2 under a1b',
-        createdAt: 1300,
-        updatedAt: 1300,
-      };
-      tx.objectStore('messages').put(u1);
-      tx.objectStore('messages').put(a1a);
-      tx.objectStore('messages').put(a1b);
-      tx.objectStore('messages').put(u2);
-      await new Promise((r) => (tx.oncomplete = r));
-      db.close();
-    }, convId);
-
-    // 2. Create Backup
     const settingsTabBtn = sidepanel.locator('button.tab-btn').filter({ hasText: /Settings|Настройки/i });
     await expect(settingsTabBtn).toBeVisible({ timeout: 5000 });
     await settingsTabBtn.click();
@@ -566,12 +517,12 @@ test.describe('E2E Chromium: Hanging Journal Marker & Post-Commit Cleanup Safety
     for await (const chunk of stream) chunks.push(chunk as Buffer);
     const backupBuffer = Buffer.concat(chunks);
 
-    // 3. Simulate EBUSY on journal deletion
+    // 4. Simulate EBUSY on journal deletion
     await sidepanel.evaluate(() => {
       (window as any).__failJournalMarkerDeletion = true;
     });
 
-    // 4. Select backup file for Restore Replace
+    // 5. Select backup file for Restore Replace
     const fileInput = sidepanel.locator('#backup-file-input');
     await fileInput.setInputFiles({
       name: 'branch-defense-backup' + PORTABLE_BACKUP_EXTENSION,
@@ -591,11 +542,11 @@ test.describe('E2E Chromium: Hanging Journal Marker & Post-Commit Cleanup Safety
     const executeBtn = sidepanel.locator('#execute-restore-btn');
     await executeBtn.click();
 
-    // 5. Verify warning banner appears
+    // 6. Verify warning banner appears
     const warningBanner = sidepanel.locator('#restore-journal-warning-banner');
     await expect(warningBanner).toBeVisible({ timeout: 15000 });
 
-    // 6. Verify snapshot DB exists in genuine Chromium IndexedDB
+    // 7. Verify snapshot DB exists in genuine Chromium IndexedDB
     const dbsAfterRestore = await sidepanel.evaluate(async () => {
       const dbs = await indexedDB.databases();
       return dbs.map((d) => d.name || '');
@@ -603,40 +554,46 @@ test.describe('E2E Chromium: Hanging Journal Marker & Post-Commit Cleanup Safety
     const snapshotName = dbsAfterRestore.find((n) => n.startsWith('StreamArchiveDB_pre_restore_snapshot_'));
     expect(snapshotName).toBeDefined();
 
-    // 7. Mutate ONLY u2.parentId from 'a1b' to 'a1a' (both valid parents, valid roles!) + add subsequent message
-    await sidepanel.evaluate(async () => {
-      const req = indexedDB.open('StreamArchiveDB', 9);
+    // 8. Relocate root message in liveDb or create a cycle + add subsequent message
+    await sidepanel.evaluate(async (sessId) => {
+      const req = indexedDB.open('StreamArchiveDB');
       await new Promise<void>((resolve, reject) => {
         req.onsuccess = () => {
           const db = req.result;
           const tx = db.transaction(['messages'], 'readwrite');
           const msgStore = tx.objectStore('messages');
-          const getReq = msgStore.get('u2');
-          getReq.onsuccess = () => {
-            const u2Val = getReq.result;
-            console.log('[DEBUG CHROMIUM TEST 4] u2Val:', u2Val);
-            if (u2Val) {
-              // Mutate ONLY parentId to a1a (corrupting tree structure)
-              u2Val.parentId = 'a1a';
-              msgStore.put(u2Val);
-              console.log('[DEBUG CHROMIUM TEST 4] MUTATED u2 parentId to a1a');
-            } else {
-              console.log('[DEBUG CHROMIUM TEST 4] u2 was NOT FOUND in messages store!');
-            }
+          const cursorReq = msgStore.openCursor();
+          let rootMsg: any = null;
+          let childMsg: any = null;
 
-            // Add new message to increase count
-            msgStore.put({
-              id: 'u3_subsequent',
-              conversationId: 'sess-branch-defense-1',
-              parentId: 'a1b',
-              role: 'user',
-              status: 'finished',
-              identityState: 'reconciled',
-              projectionState: 'logical',
-              content: 'Subsequent prompt',
-              createdAt: Date.now(),
-              updatedAt: Date.now(),
-            });
+          cursorReq.onsuccess = () => {
+            const cursor = cursorReq.result;
+            if (cursor) {
+              const val = cursor.value;
+              if (val.role === 'user' && !val.parentId) rootMsg = val;
+              if (val.role === 'assistant') childMsg = val;
+              cursor.continue();
+            } else {
+              if (rootMsg && childMsg) {
+                // Relocate root under child creating cycle root -> child -> root!
+                rootMsg.parentId = childMsg.id;
+                rootMsg.remoteParentId = 'remote-' + childMsg.id;
+                msgStore.put(rootMsg);
+              }
+
+              // Add subsequent message
+              msgStore.put({
+                id: 'm_subsequent_branch_test',
+                conversationId: sessId,
+                role: 'user',
+                status: 'finished',
+                identityState: 'reconciled',
+                projectionState: 'logical',
+                content: 'Subsequent user prompt',
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+              });
+            }
           };
 
           tx.oncomplete = () => {
@@ -647,9 +604,9 @@ test.describe('E2E Chromium: Hanging Journal Marker & Post-Commit Cleanup Safety
         };
         req.onerror = () => reject(req.error);
       });
-    });
+    }, sessionId);
 
-    // 8. Release simulated journal lock and click Retry Cleanup
+    // 9. Release simulated journal lock and click Retry Cleanup
     await sidepanel.evaluate(() => {
       (window as any).__failJournalMarkerDeletion = false;
     });
@@ -657,7 +614,7 @@ test.describe('E2E Chromium: Hanging Journal Marker & Post-Commit Cleanup Safety
     const retryBtn = sidepanel.locator('#restore-journal-warning-banner button.backup-btn.primary');
     await retryBtn.click();
 
-    // 9. Error banner must appear and SNAPSHOT MUST BE PRESERVED!
+    // 10. Error banner must appear and SNAPSHOT MUST BE PRESERVED!
     const errorBanner = sidepanel.locator('#restore-journal-warning-banner .cleanup-action-error');
     await expect(errorBanner).toBeVisible({ timeout: 10000 });
     await expect(errorBanner).toContainText(/failed integrity verification|Snapshot preserved/i);
