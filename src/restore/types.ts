@@ -41,6 +41,8 @@ export interface RestorePreflight {
   plan?: RestorePlan;
 }
 
+export type RestoreCleanupStatus = 'completed' | 'temporary_leftover' | 'journal_unresolved';
+
 export interface RestoreResult {
   success: boolean;
   mode: RestoreMode;
@@ -50,4 +52,6 @@ export interface RestoreResult {
   durationMs: number;
   error?: string;
   cleanupWarning?: string;
+  cleanupStatus?: RestoreCleanupStatus;
+  journalError?: string;
 }

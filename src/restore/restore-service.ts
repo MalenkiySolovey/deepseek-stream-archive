@@ -23,7 +23,10 @@ import {
   closeExtensionDatabase,
   deleteExtensionDatabase,
   getRestoreJournalMarker,
+  registerActiveTemporaryDatabase,
+  retryPendingRestoreCleanup,
 } from './staging-service';
+export { retryPendingRestoreCleanup };
 import { withExclusiveRestoreLock } from './restore-lock';
 import type { RestoreMode, RestorePreflight, RestoreResult, RestorePlan } from './types';
 import {
@@ -158,6 +161,7 @@ export async function validateAndPreflightRestore(
     const idbFactory = (db as any).factory ?? (db as any).__idbFactory ?? (typeof indexedDB !== 'undefined' ? indexedDB : undefined);
     const preflightOpId = `preflight_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const stagingDbName = createStagingDatabaseName(preflightOpId);
+    const unregisterStaging = registerActiveTemporaryDatabase(stagingDbName);
     let stagingDbInstance: IDBDatabase | null = null;
     try {
       const ingest = await ingestArchiveToStaging(rawInput, idbFactory, stagingDbName);
@@ -218,6 +222,7 @@ export async function validateAndPreflightRestore(
         },
       };
     } finally {
+      unregisterStaging();
       if (stagingDbInstance) {
         closeExtensionDatabase(idbFactory, stagingDbName);
         try {
@@ -466,6 +471,8 @@ export async function executeRestore(
   const operationId = `restore_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const stagingDbName = createStagingDatabaseName(operationId);
   const snapshotDbName = createSnapshotDatabaseName(operationId);
+  const unregisterStaging = registerActiveTemporaryDatabase(stagingDbName);
+  const unregisterSnapshot = registerActiveTemporaryDatabase(snapshotDbName);
 
   let ingestResult: { stagingDb: IDBDatabase; counts: PortableBackupStoreCounts } | null = null;
   let commitStarted = false;
@@ -511,5 +518,8 @@ export async function executeRestore(
       }
     }
     throw err;
+  } finally {
+    unregisterStaging();
+    unregisterSnapshot();
   }
 }

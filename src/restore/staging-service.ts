@@ -46,7 +46,7 @@ import {
   acquireRestoreLock,
   type RestoreLockHandle,
 } from './restore-lock';
-import type { RestorePlan, RestoreResult, RestoreMode, RestoreConflict } from './types';
+import type { RestorePlan, RestoreResult, RestoreMode, RestoreConflict, RestoreCleanupStatus } from './types';
 import type { Conversation, Message, ResponseRevision, RecoveryEvent } from '../core/models';
 import type { RawStreamRecord, RawStreamBatch } from '../storage/raw-journal/types';
 import { ALL_NINE_STORES } from './replace';
@@ -56,6 +56,36 @@ export const RESTORE_STAGING_DB_NAME = 'StreamArchiveDB_restore_staging' as cons
 export const RESTORE_SNAPSHOT_DB_NAME = 'StreamArchiveDB_pre_restore_snapshot' as const;
 export const RESTORE_JOURNAL_DB_NAME = 'StreamArchiveDB_restore_journal' as const;
 export const RESTORE_JOURNAL_STORE_NAME = 'restore_journal_markers' as const;
+
+export type RecoveryCheckResetHook = (factory?: IDBFactory) => void;
+let onRecoveryCheckReset: RecoveryCheckResetHook | null = null;
+
+export function registerRecoveryCheckResetHook(hook: RecoveryCheckResetHook | null): void {
+  onRecoveryCheckReset = hook;
+}
+
+export function notifyRecoveryCheckReset(factory?: IDBFactory): void {
+  if (onRecoveryCheckReset) {
+    try {
+      onRecoveryCheckReset(factory);
+    } catch (err) {
+      console.warn('[RecoveryCheck] Error in recovery check reset hook:', err);
+    }
+  }
+}
+
+const activeTemporaryDatabases = new Set<string>();
+
+export function registerActiveTemporaryDatabase(dbName: string): () => void {
+  activeTemporaryDatabases.add(dbName);
+  return () => {
+    activeTemporaryDatabases.delete(dbName);
+  };
+}
+
+export function isTemporaryDatabaseActive(dbName: string): boolean {
+  return activeTemporaryDatabases.has(dbName);
+}
 
 /**
  * Creates a unique staging database name for an isolated restore operation.
@@ -107,7 +137,7 @@ let activeRestoreLock = false;
 export type RecoveryStatus =
   | { state: 'not_required' }
   | { state: 'recovered'; durationMs?: number; details?: string }
-  | { state: 'blocked'; reason: string }
+  | { state: 'blocked'; reason: string; snapshotPreserved?: boolean }
   | { state: 'failed'; reason: string; snapshotPreserved: boolean };
 
 export type RestoreJournalStage =
@@ -361,6 +391,10 @@ export interface PostCommitCleanupResult {
  * Safely cleans up temporary snapshot, staging databases, and the restore journal marker
  * AFTER a commit has been confirmed and verified. Any error in deleting temporary resources
  * is caught and recorded as a non-fatal warning so it NEVER causes a destructive rollback.
+ *
+ * CRITICAL INVARIANT:
+ * If deletion of the restore journal marker fails, snapshotDb and stagingDb MUST NOT be deleted.
+ * Cleanup halts immediately to preserve the safety snapshots until journal state is resolved.
  */
 export async function performPostCommitCleanup(options: {
   idbFactory?: IDBFactory;
@@ -375,15 +409,43 @@ export async function performPostCommitCleanup(options: {
   let stagingDeleted = false;
 
   await triggerInterruptionPoint('before_journal_deletion');
-  try {
-    await setRestoreJournalMarker(null, idbFactory);
-    journalDeleted = true;
-  } catch (err) {
-    console.warn('[PostCommitCleanup] Failed to delete restore journal marker:', err);
-    errors.push(err instanceof Error ? err : new Error(String(err)));
+
+  // Attempt journal marker deletion with retries (up to 3 attempts with exponential backoff)
+  const MAX_JOURNAL_DELETE_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_JOURNAL_DELETE_ATTEMPTS; attempt++) {
+    try {
+      await setRestoreJournalMarker(null, idbFactory);
+      journalDeleted = true;
+      break;
+    } catch (err) {
+      if (attempt === MAX_JOURNAL_DELETE_ATTEMPTS) {
+        console.warn(`[PostCommitCleanup] Failed to delete restore journal marker after ${attempt} attempts:`, err);
+        errors.push(err instanceof Error ? err : new Error(String(err)));
+      } else {
+        await new Promise((r) => setTimeout(r, attempt * 50));
+      }
+    }
   }
+
   await triggerInterruptionPoint('after_journal_deletion');
 
+  // CRITICAL INVARIANT:
+  // If deletion of the authoritative restore journal failed, WE MUST NOT delete snapshotDb or stagingDb!
+  // Preserving the safety snapshot and staging data is mandatory while the journal state is indeterminate.
+  // We must halt cleanup immediately and signal that the recovery check must be re-evaluated.
+  if (!journalDeleted) {
+    notifyRecoveryCheckReset(idbFactory);
+    return {
+      success: false,
+      journalDeleted: false,
+      snapshotDeleted: false,
+      stagingDeleted: false,
+      errors,
+    };
+  }
+
+  // Journal is confirmed deleted. The commit is now 100% durable and cannot be rolled back.
+  // It is now safe to delete the safety snapshot.
   await triggerInterruptionPoint('before_snapshot_deletion');
   try {
     closeExtensionDatabase(idbFactory, snapshotDbName);
@@ -417,12 +479,60 @@ export async function performPostCommitCleanup(options: {
 }
 
 /**
+ * Retries a pending post-commit cleanup if an earlier attempt failed to delete
+ * the journal marker or temporary databases.
+ */
+export async function retryPendingRestoreCleanup(
+  idbFactory?: IDBFactory
+): Promise<PostCommitCleanupResult> {
+  const marker = await getRestoreJournalMarker(idbFactory);
+  if (!marker) {
+    notifyRecoveryCheckReset(idbFactory);
+    return {
+      success: true,
+      journalDeleted: true,
+      snapshotDeleted: true,
+      stagingDeleted: true,
+      errors: [],
+    };
+  }
+
+  let normalizedStage: RestoreJournalStage = marker.stage;
+  if (marker.stage === ('commit_completed' as any)) normalizedStage = 'commit_verified';
+
+  if (normalizedStage !== 'commit_verified' && normalizedStage !== 'cleanup_pending' && normalizedStage !== 'completed') {
+    throw new Error(`Cannot retry cleanup: restore operation is at pre-commit stage "${marker.stage}".`);
+  }
+
+  const result = await performPostCommitCleanup({
+    idbFactory,
+    snapshotDbName: marker.snapshotDbName,
+    stagingDbName: marker.stagingDbName,
+    shouldCleanupStaging: true,
+  });
+
+  if (result.journalDeleted) {
+    notifyRecoveryCheckReset(idbFactory);
+  }
+
+  return result;
+}
+
+export const STALE_TEMPORARY_DB_AGE_THRESHOLD_MS = 15 * 60 * 1000; // 15 minutes
+
+/**
  * Sweeps and removes orphaned temporary staging/snapshot databases left behind by crashed processes.
- * Protects databases referenced by any active restore journal marker.
+ * Protects databases referenced by any active restore journal marker, actively running operations,
+ * or created within the safety age threshold (15 minutes).
  */
 export async function cleanupStaleTemporaryDatabases(
   idbFactory?: IDBFactory
 ): Promise<string[]> {
+  if (activeRestoreLock) {
+    console.info('[CleanupStale] Restore lock is currently held; postponing stale cleanup.');
+    return [];
+  }
+
   const factory = idbFactory || (typeof indexedDB !== 'undefined' ? indexedDB : null);
   if (!factory || typeof (factory as any).databases !== 'function') return [];
 
@@ -437,19 +547,40 @@ export async function cleanupStaleTemporaryDatabases(
     }
 
     const dbs: Array<{ name?: string }> = await (factory as any).databases();
+    const now = Date.now();
+
     for (const db of dbs) {
       const name = db.name;
       if (!name) continue;
       const isStaging = name.startsWith(RESTORE_STAGING_DB_NAME + '_');
       const isSnapshot = name.startsWith(RESTORE_SNAPSHOT_DB_NAME + '_');
-      if ((isStaging || isSnapshot) && !protectedNames.has(name)) {
-        try {
-          closeExtensionDatabase(idbFactory, name);
-          await deleteExtensionDatabase(idbFactory, name);
-          deleted.push(name);
-        } catch (err) {
-          console.warn(`[cleanupStaleTemporaryDatabases] Could not delete orphaned temporary database "${name}":`, err);
+      if (!isStaging && !isSnapshot) continue;
+
+      // 1. Protect actively registered temporary databases (e.g. running in-flight preflights or restores)
+      if (activeTemporaryDatabases.has(name)) continue;
+
+      // 2. Protect databases referenced by active journal marker
+      if (protectedNames.has(name)) continue;
+
+      // 3. Protect databases created recently (age threshold: 15 minutes)
+      const tsMatch = name.match(/_(?:op|preflight|restore|_)?(\d{10,13})(?:_|$)/);
+      if (tsMatch && tsMatch[1]) {
+        const timestamp = parseInt(tsMatch[1], 10);
+        if (!isNaN(timestamp)) {
+          const ageMs = now - timestamp;
+          if (ageMs >= 0 && ageMs < STALE_TEMPORARY_DB_AGE_THRESHOLD_MS) {
+            // Database is younger than threshold, likely active or recent
+            continue;
+          }
         }
+      }
+
+      try {
+        closeExtensionDatabase(idbFactory, name);
+        await deleteExtensionDatabase(idbFactory, name);
+        deleted.push(name);
+      } catch (err) {
+        console.warn(`[cleanupStaleTemporaryDatabases] Could not delete orphaned temporary database "${name}":`, err);
       }
     }
   } catch (err) {
@@ -472,6 +603,10 @@ export async function setRestoreJournalMarker(
   // 1. Authoritative IndexedDB persistence FIRST!
   if (factory) {
     if (marker === null) {
+      const globalObj = typeof window !== 'undefined' ? (window as any) : (globalThis as any);
+      if (globalObj?.__failJournalMarkerDeletion) {
+        throw new Error('EBUSY: simulated persistent lock on restore journal deletion');
+      }
       await new Promise<void>((resolve, reject) => {
         try {
           const req = factory.open(RESTORE_JOURNAL_DB_NAME, 1);
@@ -781,40 +916,62 @@ export async function recoverIncompleteRestoreIfAny(idbFactory?: IDBFactory): Pr
               } finally {
                 try { stagingDb.close(); } catch {}
               }
-            } else {
-              // Staging DB is absent: verify using authoritative liveStoreChecksums and liveStoreCounts
-              if (marker.liveStoreChecksums && marker.liveStoreCounts) {
-                let countsMatch = true;
+            }
+            
+            // If stagingDb was absent OR verifyDatabaseEquality failed (e.g. because subsequent legitimate
+            // writes occurred before crash recovery ran): verify via liveStoreCounts, checksums, and referential integrity
+            if (!verifiedCommit) {
+              if (marker.liveStoreCounts) {
+                let countsSufficient = true;
+                let hasSubsequentWrites = false;
                 for (const store of SIX_DURABLE_STORES) {
                   const exp = marker.liveStoreCounts[store] ?? 0;
                   const act = await getStoreRecordCount(liveDb, store);
-                  if (act !== exp) {
-                    console.error(`[Crash Recovery] Replace count mismatch in store "${store}" without stagingDb: actual=${act}, expected=${exp}`);
-                    countsMatch = false;
+                  if (act < exp) {
+                    console.error(`[Crash Recovery] Replace count deficiency in store "${store}": actual=${act}, expected at least=${exp}`);
+                    countsSufficient = false;
                     break;
+                  }
+                  if (act > exp) {
+                    hasSubsequentWrites = true;
                   }
                 }
 
-                if (countsMatch) {
-                  const currentChecksums = await computeDatabaseStoreChecksums(liveDb, SIX_DURABLE_STORES);
-                  let checksumsMatch = true;
-                  for (const store of SIX_DURABLE_STORES) {
-                    const expChecksum = marker.liveStoreChecksums[store];
-                    const actChecksum = currentChecksums[store];
-                    if (!expChecksum || actChecksum !== expChecksum) {
-                      console.error(`[Crash Recovery] Replace checksum mismatch in store "${store}" without stagingDb: actual=${actChecksum}, expected=${expChecksum}`);
-                      checksumsMatch = false;
-                      break;
+                if (countsSufficient) {
+                  let exactMatch = true;
+                  if (marker.liveStoreChecksums) {
+                    const currentChecksums = await computeDatabaseStoreChecksums(liveDb, SIX_DURABLE_STORES);
+                    for (const store of SIX_DURABLE_STORES) {
+                      const expChecksum = marker.liveStoreChecksums[store];
+                      const actChecksum = currentChecksums[store];
+                      if (!expChecksum || actChecksum !== expChecksum) {
+                        exactMatch = false;
+                        break;
+                      }
                     }
+                  } else {
+                    exactMatch = false;
                   }
 
-                  if (checksumsMatch) {
+                  if (exactMatch) {
                     const integrity = await validateStagingReferentialIntegrity(liveDb);
                     verifiedCommit = integrity.valid;
+                  } else if (hasSubsequentWrites) {
+                    // Counts strictly increased due to subsequent legitimate records added after commit.
+                    // Referential integrity check ensures records form a consistent state.
+                    const integrity = await validateStagingReferentialIntegrity(liveDb);
+                    if (integrity.valid) {
+                      console.info('[Crash Recovery] Live database contains verified replace commit plus subsequent legitimate records. Commit verified.');
+                      verifiedCommit = true;
+                    }
+                  } else {
+                    // Counts are identical to snapshot, but checksums mismatch -> data corruption in existing records!
+                    console.error('[Crash Recovery] Replace checksum mismatch with identical counts indicates data corruption. Preserving snapshot.');
+                    verifiedCommit = false;
                   }
                 }
               } else {
-                console.error('[Crash Recovery] Staging DB is absent and journal lacks verifiable checksums for replace. Refusing to destroy snapshot.');
+                console.error('[Crash Recovery] Staging DB is absent and journal lacks verifiable store counts for replace. Refusing to destroy snapshot.');
                 verifiedCommit = false;
               }
             }
@@ -843,40 +1000,60 @@ export async function recoverIncompleteRestoreIfAny(idbFactory?: IDBFactory): Pr
                 try { stagingDb.close(); } catch {}
                 try { snapDbForCheck.close(); } catch {}
               }
-            } else {
-              // Either stagingDb or snapshotDb is absent: verify using authoritative liveStoreChecksums and liveStoreCounts
-              if (marker.liveStoreChecksums && marker.liveStoreCounts) {
-                let countsMatch = true;
+            }
+
+            if (!verifiedCommit) {
+              // Either stagingDb/snapshotDb is absent OR new records were added after commit
+              if (marker.liveStoreCounts) {
+                let countsSufficient = true;
+                let hasSubsequentWrites = false;
                 for (const store of SIX_DURABLE_STORES) {
                   const exp = marker.liveStoreCounts[store] ?? 0;
                   const act = await getStoreRecordCount(liveDb, store);
-                  if (act !== exp) {
-                    console.error(`[Crash Recovery] Merge count mismatch in store "${store}" without stagingDb: actual=${act}, expected=${exp}`);
-                    countsMatch = false;
+                  if (act < exp) {
+                    console.error(`[Crash Recovery] Merge count deficiency in store "${store}": actual=${act}, expected at least=${exp}`);
+                    countsSufficient = false;
                     break;
+                  }
+                  if (act > exp) {
+                    hasSubsequentWrites = true;
                   }
                 }
 
-                if (countsMatch) {
-                  const currentChecksums = await computeDatabaseStoreChecksums(liveDb, SIX_DURABLE_STORES);
-                  let checksumsMatch = true;
-                  for (const store of SIX_DURABLE_STORES) {
-                    const expChecksum = marker.liveStoreChecksums[store];
-                    const actChecksum = currentChecksums[store];
-                    if (!expChecksum || actChecksum !== expChecksum) {
-                      console.error(`[Crash Recovery] Merge checksum mismatch in store "${store}" without stagingDb: actual=${actChecksum}, expected=${expChecksum}`);
-                      checksumsMatch = false;
-                      break;
+                if (countsSufficient) {
+                  let exactMatch = true;
+                  if (marker.liveStoreChecksums) {
+                    const currentChecksums = await computeDatabaseStoreChecksums(liveDb, SIX_DURABLE_STORES);
+                    for (const store of SIX_DURABLE_STORES) {
+                      const expChecksum = marker.liveStoreChecksums[store];
+                      const actChecksum = currentChecksums[store];
+                      if (!expChecksum || actChecksum !== expChecksum) {
+                        exactMatch = false;
+                        break;
+                      }
                     }
+                  } else {
+                    exactMatch = false;
                   }
 
-                  if (checksumsMatch) {
+                  if (exactMatch) {
                     const integrity = await validateStagingReferentialIntegrity(liveDb);
                     verifiedCommit = integrity.valid;
+                  } else if (hasSubsequentWrites) {
+                    // Counts strictly increased due to subsequent legitimate records added after merge commit.
+                    const integrity = await validateStagingReferentialIntegrity(liveDb);
+                    if (integrity.valid) {
+                      console.info('[Crash Recovery] Live database contains verified merge commit plus subsequent legitimate records. Commit verified.');
+                      verifiedCommit = true;
+                    }
+                  } else {
+                    // Counts are identical to post-merge state, but checksums mismatch -> data corruption in existing records!
+                    console.error('[Crash Recovery] Merge checksum mismatch with identical counts indicates data corruption. Preserving snapshot.');
+                    verifiedCommit = false;
                   }
                 }
               } else {
-                console.error('[Crash Recovery] Temporary DBs are absent and journal lacks verifiable checksums for merge. Preserving snapshot without destructive rollback.');
+                console.error('[Crash Recovery] Temporary DBs are absent and journal lacks verifiable store counts for merge. Preserving snapshot without destructive rollback.');
                 verifiedCommit = false;
               }
             }
@@ -896,7 +1073,24 @@ export async function recoverIncompleteRestoreIfAny(idbFactory?: IDBFactory): Pr
           }
 
           console.info(`[Crash Recovery] Commit was verified before crash (stage: ${normalizedStage}). Completing cleanup without rollback...`);
-          await setRestoreJournalMarker(null, idbFactory);
+          
+          let journalRemoved = false;
+          try {
+            await setRestoreJournalMarker(null, idbFactory);
+            journalRemoved = true;
+          } catch (journalErr) {
+            console.warn('[Crash Recovery] Failed to delete restore journal marker during recovery:', journalErr);
+          }
+
+          if (!journalRemoved) {
+            console.error('[Crash Recovery] Failed to clear restore journal marker during cleanup. Halting cleanup; snapshot preserved.');
+            return {
+              state: 'blocked',
+              reason: 'Restore commit was verified, but removing the restore journal marker failed. Snapshot preserved. Writes temporarily blocked until cleanup completes.',
+              snapshotPreserved: true,
+            };
+          }
+
           closeExtensionDatabase(idbFactory, marker.snapshotDbName);
           try {
             await deleteExtensionDatabase(idbFactory, marker.snapshotDbName);
@@ -2213,39 +2407,44 @@ export async function commitStagingReplaceToLive(
         // Step 5: Success! Mark commit confirmed before entering cleanup
         commitConfirmed = true;
 
-        const liveStoreChecksums = await computeDatabaseStoreChecksums(liveDb, SIX_DURABLE_STORES);
+        let liveStoreChecksums: Record<string, string> | undefined;
         const liveStoreCounts: Record<string, number> = {};
-        for (const store of SIX_DURABLE_STORES) {
-          liveStoreCounts[store] = await getStoreRecordCount(liveDb, store);
+        try {
+          liveStoreChecksums = await computeDatabaseStoreChecksums(liveDb, SIX_DURABLE_STORES);
+          for (const store of SIX_DURABLE_STORES) {
+            liveStoreCounts[store] = await getStoreRecordCount(liveDb, store);
+          }
+
+          await setRestoreJournalMarker({
+            type: 'replace',
+            stage: 'commit_verified',
+            liveDbName: liveDb.name,
+            snapshotDbName,
+            stagingDbName,
+            timestamp: Date.now(),
+            operationId,
+            expectedCounts,
+            snapshotCounts,
+            liveStoreChecksums,
+            liveStoreCounts,
+          }, idbFactory);
+
+          await setRestoreJournalMarker({
+            type: 'replace',
+            stage: 'cleanup_pending',
+            liveDbName: liveDb.name,
+            snapshotDbName,
+            stagingDbName,
+            timestamp: Date.now(),
+            operationId,
+            expectedCounts,
+            snapshotCounts,
+            liveStoreChecksums,
+            liveStoreCounts,
+          }, idbFactory);
+        } catch (markerErr) {
+          console.warn('[Staging Replace] Failed to record commit_verified or cleanup_pending marker:', markerErr);
         }
-
-        await setRestoreJournalMarker({
-          type: 'replace',
-          stage: 'commit_verified',
-          liveDbName: liveDb.name,
-          snapshotDbName,
-          stagingDbName,
-          timestamp: Date.now(),
-          operationId,
-          expectedCounts,
-          snapshotCounts,
-          liveStoreChecksums,
-          liveStoreCounts,
-        }, idbFactory);
-
-        await setRestoreJournalMarker({
-          type: 'replace',
-          stage: 'cleanup_pending',
-          liveDbName: liveDb.name,
-          snapshotDbName,
-          stagingDbName,
-          timestamp: Date.now(),
-          operationId,
-          expectedCounts,
-          snapshotCounts,
-          liveStoreChecksums,
-          liveStoreCounts,
-        }, idbFactory);
 
         // Step 6: Post-commit cleanup phase (isolated from rollback)
         const cleanupResult = await performPostCommitCleanup({
@@ -2254,6 +2453,19 @@ export async function commitStagingReplaceToLive(
           stagingDbName,
           shouldCleanupStaging,
         });
+
+        let cleanupStatus: RestoreCleanupStatus = 'completed';
+        let cleanupWarning: string | undefined;
+        let journalError: string | undefined;
+
+        if (!cleanupResult.journalDeleted) {
+          cleanupStatus = 'journal_unresolved';
+          journalError = cleanupResult.errors[0]?.message || 'Failed to remove restore journal marker';
+          cleanupWarning = `Restore succeeded and verified, but finalizing the restore journal failed (${journalError}). Safety snapshot preserved. Normal writes are temporarily blocked until cleanup completes.`;
+        } else if (cleanupResult.errors.length > 0) {
+          cleanupStatus = 'temporary_leftover';
+          cleanupWarning = `Restore succeeded and verified, but cleanup of temporary databases encountered: ${cleanupResult.errors.map(e => e.message).join('; ')}. They will be swept automatically.`;
+        }
 
         return {
           success: true,
@@ -2269,9 +2481,9 @@ export async function commitStagingReplaceToLive(
           },
           verified: true,
           durationMs: Date.now() - startTime,
-          ...(cleanupResult.errors.length > 0
-            ? { cleanupWarning: `Restore succeeded and verified, but cleanup of temporary databases encountered: ${cleanupResult.errors.map(e => e.message).join('; ')}` }
-            : {}),
+          cleanupStatus,
+          cleanupWarning,
+          journalError,
         };
       } catch (err) {
         if (!commitConfirmed && snapshotCreated && snapshotDb) {
@@ -2528,37 +2740,42 @@ export async function commitStagingMergeToLive(
         // Step 5: Success! Mark commit confirmed before entering cleanup
         commitConfirmed = true;
 
-        const liveStoreChecksums = await computeDatabaseStoreChecksums(liveDb, SIX_DURABLE_STORES);
+        let liveStoreChecksums: Record<string, string> | undefined;
         const liveStoreCounts: Record<string, number> = {};
-        for (const store of SIX_DURABLE_STORES) {
-          liveStoreCounts[store] = await getStoreRecordCount(liveDb, store);
+        try {
+          liveStoreChecksums = await computeDatabaseStoreChecksums(liveDb, SIX_DURABLE_STORES);
+          for (const store of SIX_DURABLE_STORES) {
+            liveStoreCounts[store] = await getStoreRecordCount(liveDb, store);
+          }
+
+          await setRestoreJournalMarker({
+            type: 'merge',
+            stage: 'commit_verified',
+            liveDbName: liveDb.name,
+            snapshotDbName,
+            stagingDbName,
+            timestamp: Date.now(),
+            operationId,
+            expectedCounts: insertedCounts,
+            liveStoreChecksums,
+            liveStoreCounts,
+          }, idbFactory);
+
+          await setRestoreJournalMarker({
+            type: 'merge',
+            stage: 'cleanup_pending',
+            liveDbName: liveDb.name,
+            snapshotDbName,
+            stagingDbName,
+            timestamp: Date.now(),
+            operationId,
+            expectedCounts: insertedCounts,
+            liveStoreChecksums,
+            liveStoreCounts,
+          }, idbFactory);
+        } catch (markerErr) {
+          console.warn('[Staging Merge] Failed to record commit_verified or cleanup_pending marker:', markerErr);
         }
-
-        await setRestoreJournalMarker({
-          type: 'merge',
-          stage: 'commit_verified',
-          liveDbName: liveDb.name,
-          snapshotDbName,
-          stagingDbName,
-          timestamp: Date.now(),
-          operationId,
-          expectedCounts: insertedCounts,
-          liveStoreChecksums,
-          liveStoreCounts,
-        }, idbFactory);
-
-        await setRestoreJournalMarker({
-          type: 'merge',
-          stage: 'cleanup_pending',
-          liveDbName: liveDb.name,
-          snapshotDbName,
-          stagingDbName,
-          timestamp: Date.now(),
-          operationId,
-          expectedCounts: insertedCounts,
-          liveStoreChecksums,
-          liveStoreCounts,
-        }, idbFactory);
 
         // Step 6: Post-commit cleanup phase (isolated from rollback)
         const cleanupResult = await performPostCommitCleanup({
@@ -2568,6 +2785,19 @@ export async function commitStagingMergeToLive(
           shouldCleanupStaging,
         });
 
+        let cleanupStatus: RestoreCleanupStatus = 'completed';
+        let cleanupWarning: string | undefined;
+        let journalError: string | undefined;
+
+        if (!cleanupResult.journalDeleted) {
+          cleanupStatus = 'journal_unresolved';
+          journalError = cleanupResult.errors[0]?.message || 'Failed to remove restore journal marker';
+          cleanupWarning = `Restore succeeded and verified, but finalizing the restore journal failed (${journalError}). Safety snapshot preserved. Normal writes are temporarily blocked until cleanup completes.`;
+        } else if (cleanupResult.errors.length > 0) {
+          cleanupStatus = 'temporary_leftover';
+          cleanupWarning = `Merge succeeded and verified, but cleanup of temporary databases encountered: ${cleanupResult.errors.map(e => e.message).join('; ')}. They will be swept automatically.`;
+        }
+
         return {
           success: true,
           mode: 'merge',
@@ -2575,9 +2805,9 @@ export async function commitStagingMergeToLive(
           skippedCounts: { ...plan.toSkip },
           verified: true,
           durationMs: Date.now() - startTime,
-          ...(cleanupResult.errors.length > 0
-            ? { cleanupWarning: `Merge succeeded and verified, but cleanup of temporary databases encountered: ${cleanupResult.errors.map(e => e.message).join('; ')}` }
-            : {}),
+          cleanupStatus,
+          cleanupWarning,
+          journalError,
         };
       } catch (err) {
         if (!commitConfirmed && snapshotCreated && snapshotDb) {

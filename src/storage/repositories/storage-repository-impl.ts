@@ -33,7 +33,11 @@ import {
 } from '../schema';
 import { openExtensionDatabase, createDurableWriteTransaction } from '../db';
 import { recordStorageMutation, getStorageMutationEpoch, getDurableStorageMutationEpoch } from '../mutation-tracker';
-import { recoverIncompleteRestoreIfAny, type RecoveryStatus } from '../../restore/staging-service';
+import {
+  recoverIncompleteRestoreIfAny,
+  type RecoveryStatus,
+  registerRecoveryCheckResetHook,
+} from '../../restore/staging-service';
 import { withSharedStorageLock, withExclusiveRestoreLock } from '../../restore/restore-lock';
 import {
   computeCanonicalCheckpointFingerprint,
@@ -93,6 +97,10 @@ export function resetStorageRepositoryRecoveryCheck(factory?: IDBFactory): void 
   const key = factory || 'default';
   factoryRecoveryMap.delete(key);
 }
+
+registerRecoveryCheckResetHook((factory) => {
+  resetStorageRepositoryRecoveryCheck(factory);
+});
 
 export class IndexedDbStorageRepository implements StorageRepository {
   constructor(

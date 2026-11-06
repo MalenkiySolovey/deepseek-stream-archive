@@ -61,6 +61,7 @@
   import {
     validateAndPreflightRestore,
     executeRestore,
+    retryPendingRestoreCleanup,
   } from '../../src/restore/restore-service';
   import { buildRestorePlan } from '../../src/restore/plan';
   import {
@@ -104,6 +105,8 @@
   let restorePreflight = $state<RestorePreflight | null>(null);
   let replaceConfirmed = $state<boolean>(false);
   let restoreResult = $state<RestoreResult | null>(null);
+  let isRetryingCleanup = $state<boolean>(false);
+  let cleanupActionError = $state<string | null>(null);
   let selectedBackupFileName = $state<string | null>(null);
   let cachedParsedBackup: MaterializedPortableBackup | null = null;
   let cachedSelectedFile: File | null = null;
@@ -702,6 +705,36 @@
     }
   }
 
+  async function handleRetryRestoreCleanup() {
+    isRetryingCleanup = true;
+    cleanupActionError = null;
+    try {
+      const repo = new IndexedDbStorageRepository();
+      const db = await repo.getDb();
+      const idbFactory = (db as any).factory ?? (db as any).__idbFactory ?? (typeof indexedDB !== 'undefined' ? indexedDB : undefined);
+      const res = await retryPendingRestoreCleanup(idbFactory);
+      if (res.journalDeleted) {
+        if (restoreResult) {
+          restoreResult = {
+            ...restoreResult,
+            cleanupStatus: res.success ? 'completed' : 'temporary_leftover',
+            cleanupWarning: res.errors.length > 0
+              ? res.errors.map((e) => e.message).join('; ')
+              : undefined,
+            journalError: undefined,
+          };
+        }
+        loadStorageEstimate();
+      } else {
+        cleanupActionError = res.errors.map((e) => e.message).join('; ') || 'Retry cleanup failed';
+      }
+    } catch (err) {
+      cleanupActionError = (err as Error).message;
+    } finally {
+      isRetryingCleanup = false;
+    }
+  }
+
   function handleResetRestore() {
     restoreState = 'idle';
     restoreError = null;
@@ -709,6 +742,8 @@
     restorePreflightId = null;
     replaceConfirmed = false;
     restoreResult = null;
+    isRetryingCleanup = false;
+    cleanupActionError = null;
     selectedBackupFileName = null;
     cachedSelectedFile = null;
     cachedParsedBackup = null;
@@ -1216,11 +1251,55 @@
               ⏳ {restoreState === 'restoring' ? t.restoreRestoring : t.restoreVerifying}
             </div>
           {:else if restoreState === 'complete' && restoreResult}
-            <div class="restore-summary-box" id="restore-summary-box">
+            <div
+              class="restore-summary-box"
+              class:warning-box={restoreResult.cleanupStatus === 'journal_unresolved'}
+              id="restore-summary-box"
+            >
               <div class="summary-header">
-                <span class="summary-icon">✅</span>
-                <strong>{t.restoreComplete}</strong>
+                {#if restoreResult.cleanupStatus === 'journal_unresolved'}
+                  <span class="summary-icon">⚠️</span>
+                  <strong>{t.restoreCompleteWithWarning}</strong>
+                {:else}
+                  <span class="summary-icon">✅</span>
+                  <strong>{t.restoreComplete}</strong>
+                {/if}
               </div>
+
+              {#if restoreResult.cleanupStatus === 'journal_unresolved'}
+                <div
+                  class="restore-journal-warning-banner"
+                  id="restore-journal-warning-banner"
+                  style="background: rgba(234, 179, 8, 0.12); border: 1px solid #eab308; padding: 0.6rem 0.8rem; border-radius: 6px; margin: 0.5rem 0; font-size: 0.82rem; color: #fde047;"
+                >
+                  <p style="margin: 0 0 0.4rem 0;">{t.restoreJournalUnresolvedDesc}</p>
+                  {#if restoreResult.journalError}
+                    <div style="font-family: monospace; font-size: 0.78rem; opacity: 0.9; margin-bottom: 0.4rem;">
+                      {restoreResult.journalError}
+                    </div>
+                  {/if}
+                  {#if cleanupActionError}
+                    <div style="color: #ef4444; margin-bottom: 0.4rem;">{cleanupActionError}</div>
+                  {/if}
+                  <button
+                    class="backup-btn primary"
+                    type="button"
+                    disabled={isRetryingCleanup}
+                    onclick={handleRetryRestoreCleanup}
+                    style="margin-top: 0.3rem;"
+                  >
+                    {isRetryingCleanup ? t.restoreRetryingCleanup : t.restoreRetryCleanup}
+                  </button>
+                </div>
+              {:else if restoreResult.cleanupStatus === 'temporary_leftover'}
+                <div
+                  class="restore-temporary-notice"
+                  style="background: rgba(59, 130, 246, 0.12); border: 1px solid #3b82f6; padding: 0.5rem 0.75rem; border-radius: 6px; margin: 0.5rem 0; font-size: 0.82rem; color: #93c5fd;"
+                >
+                  ℹ️ {t.restoreTemporaryLeftoverDesc}
+                </div>
+              {/if}
+
               <p class="reload-notice">{t.restoreReloadTabsNotice}</p>
               <div class="summary-grid">
                 <div class="summary-item">
