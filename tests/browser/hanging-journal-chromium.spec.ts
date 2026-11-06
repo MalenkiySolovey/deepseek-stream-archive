@@ -196,6 +196,7 @@ test.describe('E2E Chromium: Hanging Journal Marker & Post-Commit Cleanup Safety
 
     // 3. Create Backup
     const sidepanel = await loadSidepanel();
+    sidepanel.on('console', (msg) => console.log('BROWSER CONSOLE:', msg.text()));
     await sidepanel.evaluate(() => {
       delete (window as any).showSaveFilePicker;
     });
@@ -255,33 +256,38 @@ test.describe('E2E Chromium: Hanging Journal Marker & Post-Commit Cleanup Safety
 
     // 8. Corrupt an existing restored message in liveDb AND add a new message
     await sidepanel.evaluate(async () => {
-      const req = indexedDB.open('StreamArchiveDB');
+      const req = indexedDB.open('StreamArchiveDB', 9);
       await new Promise<void>((resolve, reject) => {
         req.onsuccess = () => {
           const db = req.result;
           const tx = db.transaction(['messages'], 'readwrite');
           const msgStore = tx.objectStore('messages');
 
-          const cursorReq = msgStore.openCursor();
-          cursorReq.onsuccess = () => {
-            const cursor = cursorReq.result;
-            if (cursor) {
-              // Corrupt the restored message's role to violate baseline integrity
-              const val = { ...cursor.value, role: 'unknown', content: 'CORRUPTED_TEXT_IN_CHROMIUM' };
-              cursor.update(val);
+          const allReq = msgStore.getAll();
+          allReq.onsuccess = () => {
+            console.log('[DEBUG CHROMIUM TEST 2] ALL MESSAGES:', allReq.result);
+            const userMsg = allReq.result.find((m) => m.role === 'user');
+            if (userMsg) {
+              userMsg.content = 'CORRUPTED_USER_CONTENT_ONLY_WITHOUT_ROLE_CHANGE';
+              msgStore.put(userMsg);
+              console.log('[DEBUG CHROMIUM TEST 2] PUT CORRUPTED USER MSG:', userMsg);
 
               // Also add a new message so total count increases
               const newMsg = {
                 id: 'm_subsequent_chromium',
-                conversationId: 'sess-corrupt-defense-1',
+                conversationId: userMsg.conversationId,
                 role: 'user',
                 status: 'finished',
                 identityState: 'reconciled',
                 projectionState: 'logical',
+                content: 'Subsequent user prompt',
                 createdAt: Date.now(),
                 updatedAt: Date.now(),
               };
               msgStore.put(newMsg);
+              console.log('[DEBUG CHROMIUM TEST 2] PUT NEW SUBSEQUENT MSG:', newMsg);
+            } else {
+              console.log('[DEBUG CHROMIUM TEST 2] NO USER MSG FOUND!');
             }
           };
 
@@ -349,6 +355,7 @@ test.describe('E2E Chromium: Hanging Journal Marker & Post-Commit Cleanup Safety
 
     // 3. Create Backup
     const sidepanel = await loadSidepanel();
+    sidepanel.on('console', (msg) => console.log('BROWSER CONSOLE:', msg.text()));
     await sidepanel.evaluate(() => {
       delete (window as any).showSaveFilePicker;
     });
@@ -400,7 +407,7 @@ test.describe('E2E Chromium: Hanging Journal Marker & Post-Commit Cleanup Safety
 
     // 7. Add a legitimate new message without modifying existing records
     await sidepanel.evaluate(async () => {
-      const req = indexedDB.open('StreamArchiveDB');
+      const req = indexedDB.open('StreamArchiveDB', 9);
       await new Promise<void>((resolve, reject) => {
         req.onsuccess = () => {
           const db = req.result;
@@ -454,5 +461,211 @@ test.describe('E2E Chromium: Hanging Journal Marker & Post-Commit Cleanup Safety
     const summaryBox = sidepanel.locator('#restore-summary-box');
     await expect(summaryBox).toBeVisible();
     await expect(summaryBox.locator('.summary-icon')).toHaveText('✅');
+  });
+
+  test('genuine Chromium: parentId branch substitution with added new message blocks Retry Cleanup and preserves snapshot', async ({
+    page,
+    loadSidepanel,
+  }) => {
+    const sidepanel = await loadSidepanel();
+    sidepanel.on('console', (msg) => console.log('BROWSER CONSOLE T4:', msg.text()));
+    await sidepanel.evaluate(() => {
+      delete (window as any).showSaveFilePicker;
+    });
+
+    // 1. Seed branching conversation directly in Chromium IndexedDB
+    const convId = 'sess-branch-defense-1';
+    await sidepanel.evaluate(async (cId) => {
+      const openDb = (): Promise<IDBDatabase> => {
+        return new Promise((res, rej) => {
+          const req = indexedDB.open('StreamArchiveDB', 9);
+          req.onupgradeneeded = (e) => {
+            const db = (e.target as any).result;
+            if (!db.objectStoreNames.contains('conversations')) db.createObjectStore('conversations', { keyPath: 'id' });
+            if (!db.objectStoreNames.contains('messages')) db.createObjectStore('messages', { keyPath: 'id' });
+          };
+          req.onsuccess = () => res(req.result);
+          req.onerror = () => rej(req.error);
+        });
+      };
+      const db = await openDb();
+      const tx = db.transaction(['conversations', 'messages'], 'readwrite');
+      tx.objectStore('conversations').put({
+        id: cId,
+        title: 'Branching tree defense',
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+      const u1 = {
+        id: 'u1',
+        conversationId: cId,
+        role: 'user',
+        status: 'finished',
+        identityState: 'reconciled',
+        projectionState: 'logical',
+        content: 'Prompt 1',
+        createdAt: 1000,
+        updatedAt: 1000,
+      };
+      const a1a = {
+        id: 'a1a',
+        conversationId: cId,
+        parentId: 'u1',
+        role: 'assistant',
+        status: 'finished',
+        identityState: 'reconciled',
+        projectionState: 'logical',
+        createdAt: 1100,
+        updatedAt: 1100,
+      };
+      const a1b = {
+        id: 'a1b',
+        conversationId: cId,
+        parentId: 'u1',
+        role: 'assistant',
+        status: 'finished',
+        identityState: 'reconciled',
+        projectionState: 'logical',
+        createdAt: 1200,
+        updatedAt: 1200,
+      };
+      const u2 = {
+        id: 'u2',
+        conversationId: cId,
+        parentId: 'a1b', // Connected under a1b in baseline
+        role: 'user',
+        status: 'finished',
+        identityState: 'reconciled',
+        projectionState: 'logical',
+        content: 'Prompt 2 under a1b',
+        createdAt: 1300,
+        updatedAt: 1300,
+      };
+      tx.objectStore('messages').put(u1);
+      tx.objectStore('messages').put(a1a);
+      tx.objectStore('messages').put(a1b);
+      tx.objectStore('messages').put(u2);
+      await new Promise((r) => (tx.oncomplete = r));
+      db.close();
+    }, convId);
+
+    // 2. Create Backup
+    const settingsTabBtn = sidepanel.locator('button.tab-btn').filter({ hasText: /Settings|Настройки/i });
+    await expect(settingsTabBtn).toBeVisible({ timeout: 5000 });
+    await settingsTabBtn.click();
+
+    const createBackupBtn = sidepanel.locator('button.backup-btn.primary');
+    await expect(createBackupBtn).toBeVisible();
+
+    const downloadPromise = sidepanel.waitForEvent('download');
+    await createBackupBtn.click();
+    const download = await downloadPromise;
+
+    const stream = await download.createReadStream();
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) chunks.push(chunk as Buffer);
+    const backupBuffer = Buffer.concat(chunks);
+
+    // 3. Simulate EBUSY on journal deletion
+    await sidepanel.evaluate(() => {
+      (window as any).__failJournalMarkerDeletion = true;
+    });
+
+    // 4. Select backup file for Restore Replace
+    const fileInput = sidepanel.locator('#backup-file-input');
+    await fileInput.setInputFiles({
+      name: 'branch-defense-backup' + PORTABLE_BACKUP_EXTENSION,
+      mimeType: 'application/gzip',
+      buffer: backupBuffer,
+    });
+
+    const preflightCard = sidepanel.locator('#restore-preflight-card, #restore-preview-box');
+    await expect(preflightCard.first()).toBeVisible({ timeout: 15000 });
+
+    const replaceRadio = sidepanel.locator('input[value="replace"]');
+    await replaceRadio.check();
+
+    const replaceCheckbox = sidepanel.locator('#confirm-replace-checkbox');
+    await replaceCheckbox.check();
+
+    const executeBtn = sidepanel.locator('#execute-restore-btn');
+    await executeBtn.click();
+
+    // 5. Verify warning banner appears
+    const warningBanner = sidepanel.locator('#restore-journal-warning-banner');
+    await expect(warningBanner).toBeVisible({ timeout: 15000 });
+
+    // 6. Verify snapshot DB exists in genuine Chromium IndexedDB
+    const dbsAfterRestore = await sidepanel.evaluate(async () => {
+      const dbs = await indexedDB.databases();
+      return dbs.map((d) => d.name || '');
+    });
+    const snapshotName = dbsAfterRestore.find((n) => n.startsWith('StreamArchiveDB_pre_restore_snapshot_'));
+    expect(snapshotName).toBeDefined();
+
+    // 7. Mutate ONLY u2.parentId from 'a1b' to 'a1a' (both valid parents, valid roles!) + add subsequent message
+    await sidepanel.evaluate(async () => {
+      const req = indexedDB.open('StreamArchiveDB', 9);
+      await new Promise<void>((resolve, reject) => {
+        req.onsuccess = () => {
+          const db = req.result;
+          const tx = db.transaction(['messages'], 'readwrite');
+          const msgStore = tx.objectStore('messages');
+          const getReq = msgStore.get('u2');
+          getReq.onsuccess = () => {
+            const u2Val = getReq.result;
+            console.log('[DEBUG CHROMIUM TEST 4] u2Val:', u2Val);
+            if (u2Val) {
+              // Mutate ONLY parentId to a1a (corrupting tree structure)
+              u2Val.parentId = 'a1a';
+              msgStore.put(u2Val);
+              console.log('[DEBUG CHROMIUM TEST 4] MUTATED u2 parentId to a1a');
+            } else {
+              console.log('[DEBUG CHROMIUM TEST 4] u2 was NOT FOUND in messages store!');
+            }
+
+            // Add new message to increase count
+            msgStore.put({
+              id: 'u3_subsequent',
+              conversationId: 'sess-branch-defense-1',
+              parentId: 'a1b',
+              role: 'user',
+              status: 'finished',
+              identityState: 'reconciled',
+              projectionState: 'logical',
+              content: 'Subsequent prompt',
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            });
+          };
+
+          tx.oncomplete = () => {
+            db.close();
+            resolve();
+          };
+          tx.onerror = () => reject(tx.error);
+        };
+        req.onerror = () => reject(req.error);
+      });
+    });
+
+    // 8. Release simulated journal lock and click Retry Cleanup
+    await sidepanel.evaluate(() => {
+      (window as any).__failJournalMarkerDeletion = false;
+    });
+
+    const retryBtn = sidepanel.locator('#restore-journal-warning-banner button.backup-btn.primary');
+    await retryBtn.click();
+
+    // 9. Error banner must appear and SNAPSHOT MUST BE PRESERVED!
+    const errorBanner = sidepanel.locator('#restore-journal-warning-banner .cleanup-action-error');
+    await expect(errorBanner).toBeVisible({ timeout: 10000 });
+    await expect(errorBanner).toContainText(/failed integrity verification|Snapshot preserved/i);
+
+    const dbsAfterRejectedRetry = await sidepanel.evaluate(async () => {
+      const dbs = await indexedDB.databases();
+      return dbs.map((d) => d.name || '');
+    });
+    expect(dbsAfterRejectedRetry).toContain(snapshotName);
   });
 });

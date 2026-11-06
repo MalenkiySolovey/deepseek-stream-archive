@@ -49,6 +49,7 @@ import {
 } from './restore-lock';
 import type { RestorePlan, RestoreResult, RestoreMode, RestoreConflict, RestoreCleanupStatus } from './types';
 import type { Conversation, Message, ResponseRevision, RecoveryEvent } from '../core/models';
+import { isValidRoleParentage } from '../core/parentage/parent-resolver';
 import type { RawStreamRecord, RawStreamBatch } from '../storage/raw-journal/types';
 import { ALL_NINE_STORES } from './replace';
 import { computeSha256, canonicalStringify } from '../shared/crypto';
@@ -1442,8 +1443,15 @@ export async function verifyRestoredBaselinePreserved(
   }
 
   // Helper to compare an individual record against baseline
-  const isBaselineRecordPreserved = (storeName: string, baselineRecord: any, liveRecord: any): boolean => {
-    if (!liveRecord) return false;
+  const checkBaselineRecordPreserved = async (
+    storeName: string,
+    baselineRecord: any,
+    liveRecord: any,
+    liveDb: IDBDatabase
+  ): Promise<{ preserved: boolean; reason?: string }> => {
+    if (!liveRecord) {
+      return { preserved: false, reason: 'Record does not exist in live database' };
+    }
 
     if (
       storeName === STORE_REVISIONS ||
@@ -1452,53 +1460,220 @@ export async function verifyRestoredBaselinePreserved(
       storeName === STORE_RAW_STREAM_BATCHES
     ) {
       // Revisions, recovery events, and raw stream records are STRICTLY IMMUTABLE!
-      return deepEqualRecords(storeName, baselineRecord, liveRecord);
+      if (!deepEqualRecords(storeName, baselineRecord, liveRecord)) {
+        return {
+          preserved: false,
+          reason: `Immutable record "${String(baselineRecord.id)}" in store "${storeName}" has been modified or corrupted in live database`,
+        };
+      }
+      return { preserved: true };
     }
 
     if (storeName === STORE_MESSAGES) {
-      // Core identity fields must match exactly
-      if (
-        liveRecord.id !== baselineRecord.id ||
-        liveRecord.conversationId !== baselineRecord.conversationId ||
-        liveRecord.role !== baselineRecord.role ||
-        liveRecord.createdAt !== baselineRecord.createdAt
-      ) {
-        return false;
+      // 1. Core immutable identifiers
+      if (liveRecord.id !== baselineRecord.id) {
+        return { preserved: false, reason: `Message id mismatch: "${liveRecord.id}" !== "${baselineRecord.id}"` };
       }
-      if (baselineRecord.remoteId && liveRecord.remoteId !== baselineRecord.remoteId) {
-        return false;
+      if (liveRecord.conversationId !== baselineRecord.conversationId) {
+        return { preserved: false, reason: `Message "${baselineRecord.id}" conversationId mismatch: "${liveRecord.conversationId}" !== "${baselineRecord.conversationId}"` };
       }
-      if (baselineRecord.remoteParentId && liveRecord.remoteParentId !== baselineRecord.remoteParentId) {
-        return false;
+      if (liveRecord.role !== baselineRecord.role) {
+        return { preserved: false, reason: `Message "${baselineRecord.id}" role mismatch: "${liveRecord.role}" !== "${baselineRecord.role}"` };
       }
-      // Content preservation check: if baseline had content, liveRecord must not be wiped or corrupted
-      if (typeof baselineRecord.content === 'string') {
-        if (typeof liveRecord.content !== 'string') return false;
+      if (liveRecord.createdAt !== baselineRecord.createdAt) {
+        return { preserved: false, reason: `Message "${baselineRecord.id}" createdAt mismatch: ${liveRecord.createdAt} !== ${baselineRecord.createdAt}` };
       }
-      // Updated timestamp can only advance or remain equal
+      if (baselineRecord.remoteCreatedAt !== undefined && liveRecord.remoteCreatedAt !== baselineRecord.remoteCreatedAt) {
+        return { preserved: false, reason: `Message "${baselineRecord.id}" remoteCreatedAt mismatch: ${liveRecord.remoteCreatedAt} !== ${baselineRecord.remoteCreatedAt}` };
+      }
+
+      // 2. Authoritative server identity
+      if (baselineRecord.remoteId !== undefined && liveRecord.remoteId !== baselineRecord.remoteId) {
+        return { preserved: false, reason: `Message "${baselineRecord.id}" confirmed remoteId changed from "${baselineRecord.remoteId}" to "${liveRecord.remoteId}"` };
+      }
+      if (baselineRecord.remoteParentId !== undefined && liveRecord.remoteParentId !== baselineRecord.remoteParentId) {
+        return { preserved: false, reason: `Message "${baselineRecord.id}" confirmed remoteParentId changed from "${baselineRecord.remoteParentId}" to "${liveRecord.remoteParentId}"` };
+      }
+
+      // 3. Raw stream linkage & continuity receipts
+      if (baselineRecord.sourceRawStreamKey !== undefined && liveRecord.sourceRawStreamKey !== baselineRecord.sourceRawStreamKey) {
+        return { preserved: false, reason: `Message "${baselineRecord.id}" sourceRawStreamKey changed from "${baselineRecord.sourceRawStreamKey}" to "${liveRecord.sourceRawStreamKey}"` };
+      }
+      if (baselineRecord.contextContinuityDeliveryId !== undefined && liveRecord.contextContinuityDeliveryId !== baselineRecord.contextContinuityDeliveryId) {
+        return { preserved: false, reason: `Message "${baselineRecord.id}" contextContinuityDeliveryId changed from "${baselineRecord.contextContinuityDeliveryId}" to "${liveRecord.contextContinuityDeliveryId}"` };
+      }
+
+      // 4. Identity state promotion: 'reconciled' is terminal
+      if (baselineRecord.identityState === 'reconciled' && liveRecord.identityState !== 'reconciled') {
+        return { preserved: false, reason: `Message "${baselineRecord.id}" identityState downgraded from "reconciled" to "${liveRecord.identityState}"` };
+      }
+
+      // 5. Projection state invariants:
+      // - Confirmed 'logical' must NEVER be downgraded to 'attempt_only' or 'unmatched_capture'
+      // - 'provisional_logical' may advance to 'logical', but cannot be degraded to 'attempt_only' or 'unmatched_capture'
+      if (baselineRecord.projectionState === 'logical') {
+        if (liveRecord.projectionState !== 'logical') {
+          return { preserved: false, reason: `Message "${baselineRecord.id}" projectionState changed from "logical" to "${liveRecord.projectionState}"` };
+        }
+      } else if (baselineRecord.projectionState === 'provisional_logical') {
+        if (liveRecord.projectionState !== 'provisional_logical' && liveRecord.projectionState !== 'logical') {
+          return { preserved: false, reason: `Message "${baselineRecord.id}" projectionState degraded from "provisional_logical" to "${liveRecord.projectionState}"` };
+        }
+      } else if (baselineRecord.projectionState === undefined) {
+        if (baselineRecord.identityState === 'reconciled' || baselineRecord.role === 'user') {
+          if (liveRecord.projectionState === 'attempt_only' || liveRecord.projectionState === 'unmatched_capture') {
+            return { preserved: false, reason: `Message "${baselineRecord.id}" implicitly logical turn degraded to "${liveRecord.projectionState}"` };
+          }
+        }
+      }
+
+      // 6. Status preservation invariants:
+      // - Filtered response MUST retain 'filtered' status (core StreamArchive guarantee)
+      if (baselineRecord.status === 'filtered' && liveRecord.status !== 'filtered') {
+        return { preserved: false, reason: `Filtered message "${baselineRecord.id}" lost its filtered status (current: "${liveRecord.status}")` };
+      }
+      // - Finished message must not be degraded to streaming or incomplete
+      if (baselineRecord.status === 'finished') {
+        if (liveRecord.status === 'streaming' || liveRecord.status === 'incomplete') {
+          return { preserved: false, reason: `Finished message "${baselineRecord.id}" degraded to "${liveRecord.status}"` };
+        }
+      }
+
+      // 7. Message content preservation:
+      if (baselineRecord.role === 'user' || baselineRecord.role === 'system') {
+        if (typeof baselineRecord.content === 'string') {
+          if (liveRecord.content !== baselineRecord.content) {
+            return {
+              preserved: false,
+              reason: `User message "${baselineRecord.id}" content mismatch: expected "${baselineRecord.content.slice(0, 40)}...", got "${(liveRecord.content ?? '').slice(0, 40)}..."`,
+            };
+          }
+        }
+      } else if (baselineRecord.role === 'assistant') {
+        if (typeof baselineRecord.content === 'string' && baselineRecord.content.length > 0) {
+          if (typeof liveRecord.content !== 'string') {
+            return { preserved: false, reason: `Assistant message "${baselineRecord.id}" content was wiped or removed` };
+          }
+          if (liveRecord.content !== baselineRecord.content) {
+            const wasStreaming = baselineRecord.status === 'streaming' || baselineRecord.status === 'incomplete';
+            if (wasStreaming && liveRecord.content.startsWith(baselineRecord.content)) {
+              // Legitimate streaming continuation
+            } else {
+              return {
+                preserved: false,
+                reason: `Assistant message "${baselineRecord.id}" content was mutated without legitimate streaming continuation`,
+              };
+            }
+          }
+        }
+      }
+
+      // 8. parentId resolution and preservation:
+      if (baselineRecord.parentId === liveRecord.parentId) {
+        // Preserved!
+      } else {
+        if (baselineRecord.parentId !== undefined) {
+          const wasRawRemoteId = baselineRecord.remoteParentId && baselineRecord.parentId === baselineRecord.remoteParentId;
+          if (wasRawRemoteId && liveRecord.parentId) {
+            const parentMap = await batchGetKeys(liveDb, STORE_MESSAGES, [liveRecord.parentId]);
+            const parent = parentMap.get(liveRecord.parentId) as Message | undefined;
+            if (!parent || parent.remoteId !== baselineRecord.remoteParentId || !isValidRoleParentage(liveRecord.role, parent.role)) {
+              return {
+                preserved: false,
+                reason: `Message "${baselineRecord.id}" parentId was substituted from raw remoteParentId "${baselineRecord.remoteParentId}" to an invalid or unconfirmed parent "${liveRecord.parentId}"`,
+              };
+            }
+          } else {
+            return {
+              preserved: false,
+              reason: `Message "${baselineRecord.id}" parentId was substituted from "${baselineRecord.parentId}" to "${liveRecord.parentId}" without history resolution`,
+            };
+          }
+        } else {
+          // Baseline had parentId === undefined (was root or unresolved provisional message).
+          if (liveRecord.parentId) {
+            const expectedRemoteParent = baselineRecord.remoteParentId || liveRecord.remoteParentId;
+            if (!expectedRemoteParent) {
+              return {
+                preserved: false,
+                reason: `Root message "${baselineRecord.id}" without remoteParentId was arbitrarily assigned parentId "${liveRecord.parentId}"`,
+              };
+            }
+            const parentMap = await batchGetKeys(liveDb, STORE_MESSAGES, [liveRecord.parentId]);
+            const parent = parentMap.get(liveRecord.parentId) as Message | undefined;
+            if (!parent || parent.remoteId !== expectedRemoteParent || !isValidRoleParentage(liveRecord.role, parent.role)) {
+              return {
+                preserved: false,
+                reason: `Message "${baselineRecord.id}" parentId "${liveRecord.parentId}" does not resolve to confirmed remoteParentId "${expectedRemoteParent}"`,
+              };
+            }
+          }
+        }
+      }
+
+      // 9. Time monotonicity
       if (typeof liveRecord.updatedAt === 'number' && typeof baselineRecord.updatedAt === 'number') {
-        if (liveRecord.updatedAt < baselineRecord.updatedAt) return false;
+        if (liveRecord.updatedAt < baselineRecord.updatedAt) {
+          return { preserved: false, reason: `Message "${baselineRecord.id}" updatedAt went backward: ${liveRecord.updatedAt} < ${baselineRecord.updatedAt}` };
+        }
       }
-      return true;
+
+      return { preserved: true };
     }
 
     if (storeName === STORE_CONVERSATIONS) {
-      if (
-        liveRecord.id !== baselineRecord.id ||
-        liveRecord.createdAt !== baselineRecord.createdAt
-      ) {
-        return false;
+      if (liveRecord.id !== baselineRecord.id) {
+        return { preserved: false, reason: `Conversation id mismatch: "${liveRecord.id}" !== "${baselineRecord.id}"` };
       }
-      if (baselineRecord.remoteId && liveRecord.remoteId !== baselineRecord.remoteId) {
-        return false;
+      if (liveRecord.createdAt !== baselineRecord.createdAt) {
+        return { preserved: false, reason: `Conversation "${baselineRecord.id}" createdAt mismatch: ${liveRecord.createdAt} !== ${baselineRecord.createdAt}` };
       }
+      if (baselineRecord.remoteId !== undefined && liveRecord.remoteId !== baselineRecord.remoteId) {
+        return { preserved: false, reason: `Conversation "${baselineRecord.id}" remoteId changed from "${baselineRecord.remoteId}" to "${liveRecord.remoteId}"` };
+      }
+
+      // Title: must remain non-empty string if baseline title was non-empty
+      if (typeof liveRecord.title !== 'string') {
+        return { preserved: false, reason: `Conversation "${baselineRecord.id}" title is not a string` };
+      }
+      if (typeof baselineRecord.title === 'string' && baselineRecord.title.trim().length > 0) {
+        if (liveRecord.title.trim().length === 0) {
+          return { preserved: false, reason: `Conversation "${baselineRecord.id}" title was wiped or emptied` };
+        }
+      }
+
+      // currentMessageId:
+      if (baselineRecord.currentMessageId !== undefined && liveRecord.currentMessageId === undefined) {
+        return { preserved: false, reason: `Conversation "${baselineRecord.id}" currentMessageId was cleared or lost` };
+      }
+      if (liveRecord.currentMessageId) {
+        const msgMap = await batchGetKeys(liveDb, STORE_MESSAGES, [liveRecord.currentMessageId]);
+        const currentMsg = msgMap.get(liveRecord.currentMessageId) as Message | undefined;
+        if (!currentMsg) {
+          return { preserved: false, reason: `Conversation "${baselineRecord.id}" currentMessageId "${liveRecord.currentMessageId}" does not exist in messages store` };
+        }
+        if (currentMsg.conversationId !== liveRecord.id) {
+          return { preserved: false, reason: `Conversation "${baselineRecord.id}" currentMessageId "${liveRecord.currentMessageId}" belongs to another conversation "${currentMsg.conversationId}"` };
+        }
+      }
+
+      // Time monotonicity
       if (typeof liveRecord.updatedAt === 'number' && typeof baselineRecord.updatedAt === 'number') {
-        if (liveRecord.updatedAt < baselineRecord.updatedAt) return false;
+        if (liveRecord.updatedAt < baselineRecord.updatedAt) {
+          return { preserved: false, reason: `Conversation "${baselineRecord.id}" updatedAt went backward: ${liveRecord.updatedAt} < ${baselineRecord.updatedAt}` };
+        }
       }
-      return true;
+
+      return { preserved: true };
     }
 
-    return deepEqualRecords(storeName, baselineRecord, liveRecord);
+    if (!deepEqualRecords(storeName, baselineRecord, liveRecord)) {
+      return {
+        preserved: false,
+        reason: `Record "${String(baselineRecord.id)}" in store "${storeName}" has been modified or corrupted in live database`,
+      };
+    }
+    return { preserved: true };
   };
 
   if (marker.type === 'replace') {
@@ -1545,10 +1720,11 @@ export async function verifyRestoredBaselinePreserved(
                 reason: `Restored record "${String(item.key)}" in store "${storeName}" was lost or deleted from live database`,
               };
             }
-            if (!isBaselineRecordPreserved(storeName, item.value, liveRecord)) {
+            const check = await checkBaselineRecordPreserved(storeName, item.value, liveRecord, liveDb);
+            if (!check.preserved) {
               return {
                 valid: false,
-                reason: `Restored record "${String(item.key)}" in store "${storeName}" was mutated or corrupted in live database`,
+                reason: `Restored record "${String(item.key)}" in store "${storeName}" was mutated or corrupted: ${check.reason}`,
               };
             }
           }
@@ -1623,10 +1799,11 @@ export async function verifyRestoredBaselinePreserved(
                   reason: `Pre-existing record "${String(item.key)}" in store "${storeName}" was lost or deleted from live database`,
                 };
               }
-              if (!isBaselineRecordPreserved(storeName, item.value, liveRecord)) {
+              const check = await checkBaselineRecordPreserved(storeName, item.value, liveRecord, liveDb);
+              if (!check.preserved) {
                 return {
                   valid: false,
-                  reason: `Pre-existing record "${String(item.key)}" in store "${storeName}" was mutated or corrupted in live database`,
+                  reason: `Pre-existing record "${String(item.key)}" in store "${storeName}" was mutated or corrupted: ${check.reason}`,
                 };
               }
             }
@@ -1662,10 +1839,11 @@ export async function verifyRestoredBaselinePreserved(
               const inSnap = snapMap.get(item.key);
               if (!inSnap) {
                 // Was newly inserted during merge: must match imported staging record
-                if (!isBaselineRecordPreserved(storeName, item.value, liveRecord)) {
+                const check = await checkBaselineRecordPreserved(storeName, item.value, liveRecord, liveDb);
+                if (!check.preserved) {
                   return {
                     valid: false,
-                    reason: `Imported record "${String(item.key)}" in store "${storeName}" was mutated or corrupted in live database`,
+                    reason: `Imported record "${String(item.key)}" in store "${storeName}" was mutated or corrupted: ${check.reason}`,
                   };
                 }
               }
@@ -1748,7 +1926,57 @@ export async function validateStagingReferentialIntegrity(
                 entityId: msg.id,
                 relatedId: parent.id,
               });
+            } else if (!isValidRoleParentage(msg.role, parent.role)) {
+              errors.push({
+                code: 'invalid_role_parentage',
+                message: `Message "${msg.id}" (role: "${msg.role}") has parent "${parent.id}" with invalid role "${parent.role}".`,
+                entityId: msg.id,
+                relatedId: parent.id,
+              });
             }
+          }
+        }
+      }
+      if (batch.length < BATCH_SIZE) break;
+    }
+  }
+
+  // 1b. Conversations currentMessageId referential integrity
+  if (stagingDb.objectStoreNames.contains(STORE_CONVERSATIONS) && stagingDb.objectStoreNames.contains(STORE_MESSAGES)) {
+    let lastKey: IDBValidKey | null = null;
+    while (true) {
+      const batch = await fetchStoreBatch(stagingDb, STORE_CONVERSATIONS, lastKey, BATCH_SIZE);
+      if (batch.length === 0) break;
+      lastKey = batch[batch.length - 1]!.key;
+
+      const currentMsgIds = Array.from(
+        new Set(
+          batch
+            .map((item) => (item.value as Conversation).currentMessageId)
+            .filter((id): id is string => Boolean(id))
+        )
+      );
+
+      const msgMap = await batchGetKeys(stagingDb, STORE_MESSAGES, currentMsgIds);
+
+      for (const item of batch) {
+        const conv = item.value as Conversation;
+        if (conv.currentMessageId) {
+          const targetMsg = msgMap.get(conv.currentMessageId);
+          if (!targetMsg) {
+            errors.push({
+              code: 'missing_current_message',
+              message: `Conversation "${conv.id}" references non-existent currentMessageId "${conv.currentMessageId}".`,
+              entityId: conv.id,
+              relatedId: conv.currentMessageId,
+            });
+          } else if (targetMsg.conversationId !== conv.id) {
+            errors.push({
+              code: 'cross_conversation_current_message',
+              message: `Conversation "${conv.id}" references currentMessageId "${conv.currentMessageId}" belonging to conversation "${targetMsg.conversationId}".`,
+              entityId: conv.id,
+              relatedId: conv.currentMessageId,
+            });
           }
         }
       }
